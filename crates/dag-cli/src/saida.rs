@@ -178,6 +178,7 @@ fn scan(
     ms: u64,
     hash: Option<&ResumoHash>,
     dup: Option<&ResumoDuplicados>,
+    rec: Option<&dag_core::ResumoReconciliacao>,
 ) -> String {
     let seg = ms as f64 / 1000.0;
     let rotulo = match desfecho {
@@ -195,6 +196,9 @@ fn scan(
         inteiro_pt_br(ignorados),
         inteiro_pt_br(erros),
     );
+    if let Some(r) = rec {
+        s.push_str(&reconciliacao(r));
+    }
     if let Some(h) = hash {
         s.push_str(&format!(
             "Hash Completo: {} arquivo(s) lidos ({}), {} reaproveitados, {} erro(s).\n",
@@ -222,6 +226,128 @@ fn scan(
         s.push_str(&format!("Retome com: dag scan --retomar {execucao}\n"));
     }
     s
+}
+
+fn reconciliacao(r: &dag_core::ResumoReconciliacao) -> String {
+    let mut s = format!(
+        "Reconciliação: {} novo(s), {} alterado(s), {} inalterado(s), {} arquivo(s) e {} pasta(s) renomeado(s), {} arquivo(s) e {} pasta(s) ausente(s).\n",
+        inteiro_pt_br(r.arquivos_novos),
+        inteiro_pt_br(r.arquivos_alterados),
+        inteiro_pt_br(r.arquivos_inalterados),
+        inteiro_pt_br(r.arquivos_renomeados),
+        inteiro_pt_br(r.pastas_renomeadas),
+        inteiro_pt_br(r.arquivos_ausentes),
+        inteiro_pt_br(r.pastas_ausentes),
+    );
+    if r.bloqueios > 0 {
+        s.push_str(&format!(
+            "{} subárvore(s) protegida(s) por erro de leitura: nada nelas foi marcado como ausente.\n",
+            inteiro_pt_br(r.bloqueios)
+        ));
+    }
+    if !r.remocao_aplicada {
+        s.push_str(&format!(
+            "Remoções não aplicadas: {}.\n",
+            r.motivo_sem_remocao
+                .as_deref()
+                .unwrap_or("varredura incompleta")
+        ));
+    }
+    s
+}
+
+fn saude_monitor(m: &dag_core::SaudeMonitorInfo) -> String {
+    let estado = if m.em_execucao {
+        format!("ativo ({})", m.estado)
+    } else if m.estado == "parado" || m.heartbeat.is_none() {
+        "parado".to_string()
+    } else {
+        format!("sem sinal (último estado: {})", m.estado)
+    };
+    let opt = |t: Option<i64>| t.map_or_else(|| "nunca".to_string(), data_hora_utc);
+    let mut s = format!(
+        "Monitor: {estado}\n  watches: {}/{}; backlog: {}; eventos processados: {}; overflows: {}\n  último evento: {}; última reconciliação: {}\n",
+        inteiro_pt_br(m.watches),
+        inteiro_pt_br(m.watches_limite),
+        inteiro_pt_br(m.backlog),
+        inteiro_pt_br(m.eventos_processados),
+        inteiro_pt_br(m.overflows),
+        opt(m.ultimo_evento_em),
+        opt(m.ultima_reconciliacao),
+    );
+    if m.raizes_parciais > 0 {
+        s.push_str(&format!(
+            "  ATENÇÃO: {} raiz(es) com cobertura parcial (limite de watches)\n",
+            m.raizes_parciais
+        ));
+    }
+    if m.lacunas_abertas > 0 || m.eventos_nao_processados > 0 {
+        s.push_str(&format!(
+            "  Reconciliação pendente: {} lacuna(s) aberta(s), {} evento(s) não processado(s); rode `dag scan --fast`\n",
+            inteiro_pt_br(m.lacunas_abertas),
+            inteiro_pt_br(m.eventos_nao_processados)
+        ));
+    }
+    if let Some(e) = &m.erro {
+        s.push_str(&format!("  erro: {e}\n"));
+    }
+    s
+}
+
+fn eventos(e: &[dag_core::EventoInfo]) -> String {
+    if e.is_empty() {
+        return "Nenhum evento registrado.\n".to_string();
+    }
+    let linhas: Vec<Vec<String>> = e
+        .iter()
+        .map(|x| {
+            let caminho = match (&x.caminho_antigo, &x.caminho) {
+                (Some(a), Some(n)) => format!("{a} -> {n}"),
+                (_, Some(n)) => n.clone(),
+                _ => x.detalhe.clone().unwrap_or_default(),
+            };
+            vec![
+                x.id.to_string(),
+                data_hora_utc(x.observado_em),
+                x.tipo.clone(),
+                x.fonte.clone(),
+                if x.reconciliar && x.processado_em.is_none() {
+                    "pendente".into()
+                } else {
+                    String::new()
+                },
+                caminho,
+            ]
+        })
+        .collect();
+    tabela(
+        &[
+            "ID",
+            "QUANDO (UTC)",
+            "TIPO",
+            "FONTE",
+            "RECONCILIAÇÃO",
+            "CAMINHO",
+        ],
+        &[true, false, false, false, false, false],
+        &linhas,
+    )
+}
+
+fn monitor_encerrado(r: &dag_core::ResumoMonitorInfo) -> String {
+    format!(
+        "Monitor encerrado após {} s: {} lote(s), {} criado(s), {} alterado(s), {} removido(s), {} renomeado(s), {} lacuna(s) ({} overflow), {} reconciliação(ões) Fast Scan, {} watches.\n",
+        format!("{:.1}", r.duracao_ms as f64 / 1000.0).replace('.', ","),
+        inteiro_pt_br(r.lotes),
+        inteiro_pt_br(r.criados),
+        inteiro_pt_br(r.alterados),
+        inteiro_pt_br(r.removidos),
+        inteiro_pt_br(r.renomeados),
+        inteiro_pt_br(r.lacunas),
+        inteiro_pt_br(r.overflows),
+        inteiro_pt_br(r.fast_scans),
+        inteiro_pt_br(r.watches),
+    )
 }
 
 fn tipo_marcacao(t: TipoMarcacao) -> &'static str {
@@ -791,7 +917,16 @@ pub fn imprimir(r: &Resposta) {
         Resposta::Status {
             execucoes,
             catalogo,
-        } => print!("{}", status(execucoes, catalogo)),
+            monitor,
+        } => {
+            print!("{}", status(execucoes, catalogo));
+            if let Some(m) = monitor {
+                print!("\n{}", saude_monitor(m));
+            }
+        }
+        Resposta::SaudeMonitor { saude } => print!("{}", saude_monitor(saude)),
+        Resposta::Eventos { eventos: e } => print!("{}", eventos(e)),
+        Resposta::MonitorEncerrado { resumo } => print!("{}", monitor_encerrado(resumo)),
         Resposta::ScanConcluido {
             execucao,
             desfecho,
@@ -804,6 +939,7 @@ pub fn imprimir(r: &Resposta) {
             duracao_ms,
             hash,
             duplicados: dup,
+            reconciliacao,
         } => print!(
             "{}",
             scan(
@@ -817,7 +953,8 @@ pub fn imprimir(r: &Resposta) {
                 *erros,
                 *duracao_ms,
                 hash.as_ref(),
-                dup.as_ref()
+                dup.as_ref(),
+                reconciliacao.as_ref()
             )
         ),
         Resposta::Duplicados {

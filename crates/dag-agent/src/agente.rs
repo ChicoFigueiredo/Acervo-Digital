@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::io::{IsTerminal, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,19 +11,21 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dag_core::formato::{bytes_humanos, inteiro_pt_br};
 use dag_core::{
-    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, ExecucaoId, ModoVarredura,
+    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId, ModoVarredura,
     OrdemDuplicados, Pedido, Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash,
-    ResumoVerificacao, StatusExecucao, TipoDispositivo, TipoMarcacao, TipoRelatorio,
-    VolumeDescoberto, VolumeId, VolumeInfo,
+    ResumoMonitorInfo, ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo, StatusExecucao,
+    TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
 };
+use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::descobrir_volumes;
 use dag_scanner::{
-    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FullScan, Progresso, ProgressoHash,
-    ResultadoScan, VerificacaoIntegridade,
+    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan, Progresso,
+    ProgressoHash, ResultadoScan, VerificacaoIntegridade,
 };
 use dag_store::Catalogo;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
-use dag_store::inventario::{self, EstadoScan, FaseScan, registrar_volume};
+use dag_store::inventario::{self, EstadoScan, FaseScan};
+use dag_store::reconciliacao;
 use rusqlite::{Connection, OpenFlags, params};
 
 use crate::caminho::preparar;
@@ -37,6 +40,8 @@ type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
 const STATUS_LIMITE: i64 = 10;
 const PAGINA_PADRAO: u32 = 50;
 const PAGINA_MAXIMA: u32 = 1000;
+/// Heartbeat mais antigo que isto (s) = monitor morto (a trava é solta com o processo).
+const HEARTBEAT_VALIDO_S: i64 = 15;
 
 fn agora() -> i64 {
     SystemTime::now()
@@ -55,6 +60,8 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::ListarDuplicados { .. }
             | Comando::DetalharGrupo { .. }
             | Comando::Relatorio { .. }
+            | Comando::Eventos { .. }
+            | Comando::SaudeMonitor
     )
 }
 
@@ -62,10 +69,6 @@ pub fn somente_leitura(c: &Comando) -> bool {
 #[must_use]
 pub fn incremento_pendente(c: &Comando) -> Option<u8> {
     match c {
-        Comando::IniciarScan {
-            modo: ModoVarredura::FastScan,
-            ..
-        } => Some(5),
         // Pausar/cancelar entre processos e o serviço exigem o worker com IPC.
         Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Servico { .. } => Some(6),
         _ => None,
@@ -219,8 +222,22 @@ impl Agente {
         match comando {
             Comando::ListarVolumes => self.listar_volumes(),
             Comando::IniciarScan {
+                modo: ModoVarredura::FastScan,
+                raizes,
+                sem_hash,
+            } => self.fast_scan(&raizes, sem_hash),
+            Comando::IniciarScan {
                 raizes, sem_hash, ..
             } => self.full_scan(&raizes, sem_hash),
+            Comando::Monitorar {
+                raizes,
+                reconciliar_a_cada_s,
+                sem_hash,
+            } => self.monitorar(&raizes, reconciliar_a_cada_s, sem_hash),
+            Comando::Eventos { limite } => self.eventos(limite),
+            Comando::SaudeMonitor => Ok(Resposta::SaudeMonitor {
+                saude: self.saude_monitor()?,
+            }),
             Comando::Retomar {
                 execucao: Some(id), ..
             } => self.retomar_scan(id),
@@ -315,11 +332,9 @@ impl Agente {
         self.catalogo
             .armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroAgente> {
-                // Tudo desconectado até prova em contrário; `registrar_volume` religa.
-                tx.execute("UPDATE volumes SET mounted = 0", [])?;
-                for v in descobertos.iter().filter(|v| !v.pseudo) {
-                    registrar_volume(tx, v, t)?;
-                }
+                // Conectados são registrados; os que sumiram ficam `mounted = 0` (última vez visto
+                // preservada, nenhuma linha de arquivo alterada) com evento `desmontado`.
+                reconciliacao::sincronizar_volumes(tx, &descobertos, t)?;
                 Ok(())
             })?;
         let conn = self.catalogo.armazem().conexao();
@@ -370,6 +385,170 @@ impl Agente {
         let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect())?;
         let r = scan.executar(&mut self.catalogo)?;
         self.concluir_scan(r, sem_hash)
+    }
+
+    /// Fast Scan (A-12): reconcilia o Catálogo com o disco reaproveitando metadados e hash do
+    /// que não mudou. Sem raízes, usa as raízes catalogadas cujo Volume está conectado.
+    fn fast_scan(&mut self, raizes: &[String], sem_hash: bool) -> Result<Resposta, ErroAgente> {
+        let raizes: Vec<PathBuf> = if raizes.is_empty() {
+            self.raizes_padrao()?
+        } else {
+            raizes.iter().map(PathBuf::from).collect()
+        };
+        let mut scan = FastScan::novo(raizes, self.volumes_do_sistema()?)
+            .com_controle(self.controle.clone())
+            .com_classificador(Arc::new(ClassificadorPorExtensao));
+        if let Some(p) = &self.progresso {
+            let p = Arc::clone(p);
+            scan = scan.com_progresso(move |x| p(x));
+        }
+        let r = scan.executar(&mut self.catalogo)?;
+        self.concluir_scan(r, sem_hash)
+    }
+
+    /// Raízes já catalogadas cujo Volume está conectado e cujo caminho ainda pertence a ele
+    /// (um ponto de montagem vazio, com o volume desconectado, não conta).
+    fn raizes_padrao(&mut self) -> Result<Vec<PathBuf>, ErroAgente> {
+        let volumes = self.volumes_do_sistema()?;
+        let t = agora();
+        self.catalogo
+            .armazem_mut()
+            .transacao_imediata(|tx| -> Result<(), ErroAgente> {
+                reconciliacao::sincronizar_volumes(tx, &volumes, t)?;
+                Ok(())
+            })?;
+        let raizes = reconciliacao::raizes_catalogadas(self.catalogo.armazem().conexao())?;
+        let mut out = Vec::new();
+        for r in raizes {
+            let caminho = PathBuf::from(std::ffi::OsStr::from_bytes(&r.path_raw));
+            let dev = std::fs::symlink_metadata(&caminho)
+                .ok()
+                .map(|m| std::os::unix::fs::MetadataExt::dev(&m));
+            let esperado = volumes
+                .iter()
+                .find(|v| v.platform_id == r.platform_id)
+                .map(|v| v.st_dev);
+            if r.conectado && dev.is_some() && dev == esperado {
+                out.push(caminho);
+            } else if self.progresso.is_some() {
+                eprintln!(
+                    "raiz ignorada (volume desconectado ou indisponível): {}",
+                    caminho.display()
+                );
+            }
+        }
+        if out.is_empty() {
+            return Err(ErroAgente::Invalido(
+                "nenhuma raiz catalogada disponível; informe as raízes (ex.: `dag scan --fast /dados`)"
+                    .into(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Monitoramento em primeiro plano até o cancelamento do [`ControleScan`] do agente
+    /// (Ctrl-C). Só o escritor monitora: um segundo agente nem chega aqui (trava).
+    fn monitorar(
+        &mut self,
+        raizes: &[String],
+        reconciliar_a_cada_s: Option<u64>,
+        sem_hash: bool,
+    ) -> Result<Resposta, ErroAgente> {
+        let raizes: Vec<PathBuf> = if raizes.is_empty() {
+            self.raizes_padrao()?
+        } else {
+            raizes.iter().map(PathBuf::from).collect()
+        };
+        let mut cfg = ConfigMonitor::default();
+        match reconciliar_a_cada_s {
+            Some(0) => cfg.reconciliar_a_cada = None,
+            Some(s) => cfg.reconciliar_a_cada = Some(std::time::Duration::from_secs(s)),
+            None => {}
+        }
+        let fixos = self.volumes_fixos.clone();
+        let mut monitor = Monitor::novo(raizes, move || match &fixos {
+            Some(v) => v.clone(),
+            None => descobrir_volumes().unwrap_or_default(),
+        })
+        .com_config(cfg)
+        .com_classificador(Arc::new(ClassificadorPorExtensao));
+        if !sem_hash {
+            let autor = self.autor;
+            monitor = monitor.com_pos_reconciliacao(move |cat, execucoes| {
+                pos_reconciliacao(cat, execucoes, autor).map_err(|e| e.to_string())
+            });
+        }
+        if self.progresso.is_some() {
+            eprintln!("monitorando (Ctrl-C para encerrar)...");
+        }
+        let inicio = Instant::now();
+        let r = monitor.executar(&mut self.catalogo, &self.controle)?;
+        Ok(Resposta::MonitorEncerrado {
+            resumo: ResumoMonitorInfo {
+                execucao: Some(ExecucaoId(r.execucao_id)),
+                lotes: r.lotes,
+                diretorios: r.diretorios,
+                criados: r.criados,
+                alterados: r.alterados,
+                removidos: r.removidos,
+                renomeados: r.renomeados,
+                lacunas: r.lacunas,
+                overflows: r.overflows,
+                fast_scans: r.fast_scans,
+                watches: r.watches,
+                duracao_ms: u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX),
+            },
+        })
+    }
+
+    fn eventos(&self, limite: Option<u32>) -> Result<Resposta, ErroAgente> {
+        let l = limite.unwrap_or(PAGINA_PADRAO).clamp(1, PAGINA_MAXIMA);
+        let eventos = reconciliacao::listar_eventos(self.catalogo.armazem().conexao(), l)?
+            .into_iter()
+            .map(|e| EventoInfo {
+                id: e.id,
+                tipo: e.tipo,
+                fonte: e.fonte,
+                volume: e.volume_id.map(VolumeId),
+                arquivo: e.arquivo_id.map(Into::into),
+                execucao: e.execucao_id.map(ExecucaoId),
+                caminho: e.caminho,
+                caminho_antigo: e.caminho_antigo,
+                observado_em: e.observado_em,
+                processado_em: e.processado_em,
+                reconciliar: e.reconciliar,
+                detalhe: e.detalhe,
+            })
+            .collect();
+        Ok(Resposta::Eventos { eventos })
+    }
+
+    /// Saúde persistida do monitor (visível de qualquer processo) e reconciliação pendente.
+    fn saude_monitor(&self) -> Result<SaudeMonitorInfo, ErroAgente> {
+        let conn = self.catalogo.armazem().conexao();
+        let s = reconciliacao::ler_saude(conn)?;
+        let p = reconciliacao::pendencias(conn)?;
+        let vivo = s.estado != "parado"
+            && s.heartbeat
+                .is_some_and(|h| agora().saturating_sub(h) <= HEARTBEAT_VALIDO_S);
+        Ok(SaudeMonitorInfo {
+            estado: s.estado,
+            em_execucao: vivo,
+            iniciado_em: s.iniciado_em,
+            heartbeat: s.heartbeat,
+            backlog: s.backlog,
+            ultimo_evento_em: s.ultimo_evento_em,
+            ultima_reconciliacao: s.ultima_reconciliacao,
+            watches: s.watches,
+            watches_limite: s.watches_limite,
+            overflows: s.overflows,
+            eventos_processados: s.eventos_processados,
+            raizes_parciais: s.raizes_parciais,
+            raizes: s.raizes,
+            erro: s.erro,
+            lacunas_abertas: p.lacunas_abertas,
+            eventos_nao_processados: p.eventos_nao_processados,
+        })
     }
 
     fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
@@ -434,6 +613,7 @@ impl Agente {
             duracao_ms: u64::try_from(duracao.as_millis()).unwrap_or(u64::MAX),
             hash,
             duplicados: dup,
+            reconciliacao: r.reconciliacao.as_ref().map(resumo_reconciliacao),
         })
     }
 
@@ -603,6 +783,7 @@ impl Agente {
                 arquivos: n(arquivos),
                 bytes_logicos: n(bytes),
             },
+            monitor: Some(self.saude_monitor()?),
         })
     }
 
@@ -656,6 +837,40 @@ pub fn executar_comando(caminho: &Path, comando: Comando) -> Resposta {
     match agente {
         Ok(mut a) => a.executar(comando),
         Err(e) => e.para_resposta(),
+    }
+}
+
+/// Hash Completo das execuções que carimbaram linhas novas/alteradas (só lê o que mudou),
+/// reconstrução dos Grupos de Duplicados e reavaliação das Marcações (viram Pendentes se o
+/// conteúdo mudou). Usada pelo monitor quando fica quieto.
+fn pos_reconciliacao(
+    cat: &mut Catalogo,
+    execucoes: &[i64],
+    autor: Autor,
+) -> Result<(), ErroAgente> {
+    for id in execucoes {
+        EtapaHash::nova(ExecucaoId(*id)).executar(cat)?;
+    }
+    let t = agora();
+    duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
+    duplicados::reavaliar_marcacoes(cat, autor, t)?;
+    Ok(())
+}
+
+fn resumo_reconciliacao(r: &dag_scanner::ResumoFast) -> ResumoReconciliacao {
+    ResumoReconciliacao {
+        arquivos_novos: r.arquivos_novos,
+        arquivos_alterados: r.arquivos_alterados,
+        arquivos_inalterados: r.arquivos_inalterados,
+        pastas_novas: r.pastas_novas,
+        arquivos_renomeados: r.arquivos_renomeados,
+        pastas_renomeadas: r.pastas_renomeadas,
+        arquivos_ausentes: r.arquivos_ausentes,
+        pastas_ausentes: r.pastas_ausentes,
+        bloqueios: r.bloqueios,
+        remocao_aplicada: r.remocao_aplicada,
+        motivo_sem_remocao: r.motivo_sem_remocao.clone(),
+        eventos_omitidos: r.eventos_omitidos,
     }
 }
 

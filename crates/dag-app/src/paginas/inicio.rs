@@ -1,6 +1,8 @@
 //! Página Início.
 
-use super::{DefAcao, DefGrupo, DefPagina, estado_vazio};
+use super::{DefAcao, DefGrupo, DefPagina, cabecalho};
+use crate::app::AppDag;
+use crate::formato::{bytes_humanos, inteiro_pt_br};
 use bancada_casca::egui;
 
 pub static PAGINA: DefPagina = DefPagina {
@@ -39,6 +41,38 @@ pub static PAGINA: DefPagina = DefPagina {
     desenhar,
 };
 
-fn desenhar(ui: &mut egui::Ui) {
-    estado_vazio(ui, PAGINA.rotulo, PAGINA.resumo);
+fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
+    cabecalho(ui, &PAGINA);
+    ui.label(format!("Catálogo: {}", app.caminho.display()));
+    ui.label(app.worker.modo().texto_status());
+    ui.add_space(8.0);
+    match app.totais.dado {
+        Some(t) if t.volumes > 0 => {
+            egui::Grid::new("inicio-totais")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Volumes catalogados");
+                    ui.strong(inteiro_pt_br(t.volumes));
+                    ui.end_row();
+                    ui.label("Pastas");
+                    ui.strong(inteiro_pt_br(t.pastas));
+                    ui.end_row();
+                    ui.label("Arquivos");
+                    ui.strong(inteiro_pt_br(t.arquivos));
+                    ui.end_row();
+                    ui.label("Espaço (tamanho lógico)");
+                    ui.strong(bytes_humanos(t.bytes_logicos));
+                    ui.end_row();
+                });
+            ui.weak("Soma da última varredura de cada volume; um volume montado em mais de um lugar conta uma vez.");
+        }
+        _ => {
+            ui.heading("Catálogo vazio");
+            ui.label("Escolha raízes na página Varredura e rode um Full Scan para começar.");
+        }
+    }
+    ui.add_space(8.0);
+    if ui.button("Nova varredura…").clicked() {
+        bancada_casca::abrir(ui.ctx(), "varredura");
+    }
 }

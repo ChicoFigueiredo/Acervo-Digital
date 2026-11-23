@@ -325,3 +325,78 @@ pub(crate) fn visitar(job: &Job, ctx: &Contexto<'_>, saida: &SyncSender<Msg>) ->
 pub(crate) fn lstat(caminho: &[u8]) -> io::Result<fs::Metadata> {
     fs::symlink_metadata(OsStr::from_bytes(caminho))
 }
+
+/// Listagem completa de um diretório, para a reconciliação direcionada do monitor.
+#[derive(Debug, Default)]
+pub(crate) struct Listagem {
+    pub entradas: Vec<Entrada>,
+    /// Caminhos cuja leitura de metadados falhou (inclusive por corrida com remoção): o estado
+    /// deles é desconhecido e **não** pode ser tomado como remoção.
+    pub incertos: Vec<Vec<u8>>,
+    pub problemas: Vec<Problema>,
+    /// A iteração do diretório terminou sem erro: só então a ausência de um nome é evidência.
+    pub completa: bool,
+}
+
+/// Lê um diretório inteiro (nomes, `lstat`, alvo de symlink e tipo por extensão). Só leitura.
+pub(crate) fn ler_diretorio(
+    dir: &[u8],
+    classificador: &dyn Classificador,
+    exclusoes: &[Exclusao],
+) -> io::Result<Listagem> {
+    let leitura = fs::read_dir(OsStr::from_bytes(dir))?;
+    let mut l = Listagem {
+        completa: true,
+        ..Listagem::default()
+    };
+    for item in leitura {
+        let item = match item {
+            Ok(i) => i,
+            Err(e) => {
+                let (codigo, severidade) = classificar_io(&e);
+                l.completa = false;
+                l.problemas.push(Problema {
+                    caminho: dir.to_vec(),
+                    codigo,
+                    motivo: format!("falha ao ler uma entrada do diretório: {e}"),
+                    severidade,
+                });
+                continue;
+            }
+        };
+        let (caminho, off) = juntar(dir, item.file_name().as_bytes());
+        if exclusoes.iter().any(|x| x.casa(&caminho, &caminho[off..])) {
+            // Excluída de propósito: fora do escopo, nunca vira remoção.
+            l.incertos.push(caminho);
+            continue;
+        }
+        match item.metadata() {
+            Ok(m) => {
+                let mut entrada = entrada_de(caminho, off, &m);
+                match entrada.natureza {
+                    Natureza::Outra(TipoEntrada::Symlink) => {
+                        entrada.alvo = fs::read_link(OsStr::from_bytes(&entrada.caminho))
+                            .ok()
+                            .map(|a| a.as_os_str().as_bytes().to_vec());
+                    }
+                    Natureza::Outra(TipoEntrada::Arquivo) => {
+                        entrada.tipo = classificador.tipo_do_arquivo(entrada.nome());
+                    }
+                    _ => {}
+                }
+                l.entradas.push(entrada);
+            }
+            Err(e) => {
+                let (codigo, severidade) = classificar_io(&e);
+                l.problemas.push(Problema {
+                    caminho: caminho.clone(),
+                    codigo,
+                    motivo: format!("não foi possível ler os metadados: {e}"),
+                    severidade,
+                });
+                l.incertos.push(caminho);
+            }
+        }
+    }
+    Ok(l)
+}

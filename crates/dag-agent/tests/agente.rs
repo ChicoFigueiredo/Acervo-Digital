@@ -280,6 +280,7 @@ fn status_mostra_execucoes_e_totais() {
     let Resposta::Status {
         execucoes,
         catalogo,
+        ..
     } = a.executar(Comando::Status { execucao: None })
     else {
         panic!()
@@ -381,21 +382,9 @@ fn scan_cancelado_e_retomado_em_outro_processo() {
 fn comandos_futuros_continuam_nao_implementados() {
     let c = cenario();
     let mut a = agente(&c);
-    for (cmd, n) in [
-        (
-            Comando::IniciarScan {
-                modo: ModoVarredura::FastScan,
-                raizes: vec!["/x".into()],
-                sem_hash: false,
-            },
-            5,
-        ),
-        (Comando::Pausar { execucao: None }, 6),
-    ] {
-        let Resposta::Erro { codigo, mensagem } = a.executar(cmd) else {
-            panic!()
-        };
-        assert_eq!(codigo, "nao_implementado");
-        assert!(mensagem.contains(&format!("incremento {n}")), "{mensagem}");
-    }
+    let Resposta::Erro { codigo, mensagem } = a.executar(Comando::Pausar { execucao: None }) else {
+        panic!()
+    };
+    assert_eq!(codigo, "nao_implementado");
+    assert!(mensagem.contains("incremento 6"), "{mensagem}");
 }

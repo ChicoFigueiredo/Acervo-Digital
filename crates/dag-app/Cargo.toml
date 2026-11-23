@@ -8,6 +8,14 @@ publish.workspace = true
 
 [dependencies]
 bancada-casca.workspace = true
+dag-agent.workspace = true
+dag-core.workspace = true
+dag-scanner.workspace = true
+dag-store.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

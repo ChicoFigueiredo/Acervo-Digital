@@ -34,7 +34,9 @@ mod classificador;
 mod config;
 mod controle;
 mod erro;
+mod fast;
 mod hash;
+mod reconciliar;
 mod scan;
 mod visita;
 
@@ -42,8 +44,10 @@ pub use classificador::{Classificador, FonteEvidencia, SemClassificacao, TipoDet
 pub use config::{Casamento, ConfigScan, Exclusao, FaseProgresso, Progresso};
 pub use controle::{ControleScan, EstadoControle};
 pub use erro::ErroScan;
+pub use fast::{FastScan, ResumoFast};
 pub use hash::{
     ConfigHash, Desfecho, EtapaHash, ProgressoHash, ResultadoHash, ResultadoVerificacao,
     VerificacaoIntegridade,
 };
+pub use reconciliar::{DirSujo, RaizMonitorada, ResultadoLote, reconciliar_diretorios};
 pub use scan::{DesfechoScan, FullScan, ResultadoScan};

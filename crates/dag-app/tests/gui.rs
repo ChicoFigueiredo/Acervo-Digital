@@ -1,0 +1,345 @@
+//! Fumaça da GUI sem display, com um Catálogo de verdade: o worker varre uma árvore temporária,
+//! as páginas leem pela conexão somente-leitura e desenhamos todas por alguns quadros. Também
+//! cobre o caminho completo de uma marcação (GUI → worker → Catálogo → leitura).
+#![allow(clippy::unwrap_used)]
+
+use std::fs;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use bancada_casca::egui::{self, RawInput, Rect, pos2, vec2};
+use bancada_casca::{Local, Rota};
+use dag_app::app::{AppDag, ConfigApp, montar};
+use dag_app::confirmacao::AcaoMarcacao;
+use dag_app::cores::ModoCor;
+use dag_app::paginas::{self, analise};
+use dag_app::worker::ModoWorker;
+use dag_core::VolumeDescoberto;
+
+fn volume_de(p: &Path) -> VolumeDescoberto {
+    let dev = fs::metadata(p).unwrap().dev();
+    VolumeDescoberto {
+        platform_id: format!("teste-dev-{dev}"),
+        st_dev: dev,
+        rotulo: Some("teste".into()),
+        fs_type: "ext4".into(),
+        capacidade_bytes: Some(10_000_000),
+        livre_bytes: Some(4_000_000),
+        // Dois pontos de montagem do mesmo volume (bind mount).
+        pontos_de_montagem: vec![
+            p.as_os_str().as_bytes().to_vec(),
+            [p.as_os_str().as_bytes(), b"/../arvore"].concat(),
+        ],
+        pseudo: false,
+        dispositivo: None,
+    }
+}
+
+fn escrever(p: &Path, conteudo: &[u8]) {
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::File::create(p).unwrap().write_all(conteudo).unwrap();
+}
+
+struct Ambiente {
+    _tmp: tempfile::TempDir,
+    raiz: std::path::PathBuf,
+    casca: bancada_casca::Casca<AppDag>,
+    ctx: egui::Context,
+}
+
+impl Ambiente {
+    fn quadro(&mut self) {
+        let entrada = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0))),
+            ..Default::default()
+        };
+        self.ctx
+            .run_ui(entrada, |ui| self.casca.desenhar(ui))
+            .drop_without_applying_deltas();
+    }
+
+    fn abrir(&mut self, pagina: &str) {
+        self.casca
+            .abrir(&self.ctx, Rota::nova(pagina), Local::Centro);
+    }
+
+    /// Desenha quadros até `pronto` (ou estourar o tempo).
+    fn ate(&mut self, descricao: &str, pronto: impl Fn(&AppDag) -> bool) {
+        let fim = Instant::now() + Duration::from_secs(60);
+        loop {
+            self.quadro();
+            if pronto(&self.casca.app) {
+                return;
+            }
+            assert!(Instant::now() < fim, "tempo esgotado: {descricao}");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+}
+
+/// Árvore com um grupo de duplicados (big.pdf e copia/big.pdf) e arquivos de tipos variados.
+fn ambiente_populado() -> Ambiente {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = fs::canonicalize(tmp.path()).unwrap().join("arvore");
+    escrever(&raiz.join("big.pdf"), &[7u8; 9000]);
+    escrever(&raiz.join("copia/big.pdf"), &[7u8; 9000]);
+    escrever(&raiz.join("sub/x.bin"), &[1u8; 3000]);
+    escrever(&raiz.join("sub/y.txt"), &[2u8; 2000]);
+    escrever(&raiz.join("sub/fundo/z.mp3"), &[3u8; 1500]);
+    escrever(&raiz.join("a.txt"), &[4u8; 100]);
+    fs::create_dir_all(raiz.join("vazia")).unwrap();
+    let mut cfg = ConfigApp::com_caminho(tmp.path().join("dados/catalogo.sqlite"));
+    cfg.volumes_fixos = Some(vec![volume_de(&raiz)]);
+    let casca = montar(cfg).unwrap();
+    let mut a = Ambiente {
+        _tmp: tmp,
+        raiz,
+        casca,
+        ctx: egui::Context::default(),
+    };
+    a.ate("worker abrir o Catálogo", |app| {
+        *app.worker.modo() == ModoWorker::Escritor
+    });
+    a
+}
+
+fn varrer(a: &mut Ambiente) {
+    let raiz = a.raiz.display().to_string();
+    a.casca.app.varredura.adicionar_raiz(raiz);
+    a.casca.app.atualizar_volumes();
+    a.casca.app.iniciar_full_scan(false);
+    assert!(a.casca.app.scan_ativo());
+    a.abrir("varredura");
+    a.ate("varredura terminar", |app| {
+        !app.scan_ativo() && app.ultimo_scan.is_some()
+    });
+}
+
+#[test]
+fn desenha_todas_as_paginas_com_catalogo_vazio_e_depois_populado() {
+    let mut a = ambiente_populado();
+    for p in paginas::todas() {
+        a.abrir(p.id);
+        for _ in 0..2 {
+            a.quadro();
+        }
+    }
+    varrer(&mut a);
+    let r = a.casca.app.ultimo_scan.clone().unwrap();
+    assert_eq!(r.desfecho, "concluida");
+    assert_eq!(r.arquivos, 6);
+    assert_eq!(r.grupos_duplicados, Some(1));
+    for p in paginas::todas() {
+        a.abrir(p.id);
+        for _ in 0..3 {
+            a.quadro();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+    a.ate("totais do catálogo", |app| app.totais.dado.is_some());
+    let t = a.casca.app.totais.dado.unwrap();
+    assert_eq!(t.volumes, 1, "dois pontos de montagem, um volume");
+    assert_eq!(t.arquivos, 6);
+    let s = a.casca.app.segmentos_de_status();
+    assert!(
+        s.iter()
+            .any(|s| s.id == "totais" && s.texto.contains("1 volume(s)")),
+        "{s:?}"
+    );
+}
+
+#[test]
+fn discos_e_varredura_mostram_o_que_o_worker_gravou() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.abrir("discos");
+    a.ate("tabela de volumes", |app| app.discos.volumes.dado.is_some());
+    let v = a.casca.app.discos.volumes.dado.clone().unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].montagens, 2);
+    assert!(v[0].conectado);
+    assert!(v[0].bytes_catalogados.is_some());
+    a.abrir("varredura");
+    a.ate("últimas varreduras", |app| {
+        app.varredura.execucoes.dado.is_some()
+    });
+    let e = a.casca.app.varredura.execucoes.dado.clone().unwrap();
+    assert_eq!(e.len(), 1);
+    assert_eq!(e[0].estado, "concluida");
+}
+
+#[test]
+fn explorador_carrega_arvore_sob_demanda_e_arquivos_da_pasta() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.abrir("explorador");
+    a.ate("raízes", |app| !app.explorador.arvore.is_empty());
+    assert_eq!(a.casca.app.explorador.arvore.len(), 1);
+    assert_eq!(
+        a.casca.app.explorador.arvore[0].contar(),
+        1,
+        "nada de filhos carregado antes de expandir"
+    );
+    let raiz = a.casca.app.explorador.arvore[0].pasta.clone();
+    assert!(raiz.tem_subpastas);
+    let leitor = &a.casca.app.leitor as *const _;
+    // Seleciona e expande a raiz como o clique faria.
+    {
+        let app = &mut a.casca.app;
+        app.explorador.selecionar(&app.leitor, raiz.clone());
+        app.explorador.expandir_selecionada(&app.leitor);
+    }
+    let _ = leitor;
+    a.ate("filhos e arquivos", |app| {
+        app.explorador.arvore[0].filhos.len() == 3 && app.explorador.arquivos.dado.is_some()
+    });
+    let arquivos = a.casca.app.explorador.arquivos.dado.clone().unwrap();
+    let nomes: Vec<_> = arquivos.itens.iter().map(|f| f.nome.as_str()).collect();
+    assert_eq!(nomes, ["big.pdf", "a.txt"]);
+    assert!(arquivos.itens[0].tem_hash && arquivos.itens[0].duplicado);
+    assert_eq!(arquivos.itens[0].categoria.as_deref(), Some("documento"));
+}
+
+#[test]
+fn analise_trata_os_dois_modos_e_desce_um_nivel() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.abrir("analise");
+    // Modo padrão: computador inteiro, um volume (sem contar duas vezes).
+    a.ate("nível computador", |app| app.analise.dados.dado.is_some());
+    let d = a.casca.app.analise.dados.dado.clone().unwrap();
+    assert_eq!(d.filhos.len(), 1);
+    assert_eq!(d.bytes_nivel, 9000 + 9000 + 3000 + 2000 + 1500 + 100);
+    assert_eq!(d.bytes_nivel, d.bytes_computador);
+    // Modo por volume.
+    a.casca.app.analise.usar_modo(analise::ModoAnalise::Volume);
+    a.ate("nível volume", |app| {
+        app.analise
+            .dados
+            .dado
+            .as_ref()
+            .is_some_and(|d| matches!(d.alvo, dag_store::consulta_gui::AlvoAnalise::Volume(_)))
+    });
+    // Desce para a pasta raiz e desenha as duas visões em todos os modos de cor.
+    let d = a.casca.app.analise.dados.dado.clone().unwrap();
+    let alvo = match d.filhos[0].chave {
+        dag_store::consulta_gui::ChaveNo::Pasta(id) => {
+            dag_store::consulta_gui::AlvoAnalise::Pasta(id)
+        }
+        outro => panic!("esperava pasta: {outro:?}"),
+    };
+    a.casca.app.analise.alvo = alvo;
+    a.ate("nível da pasta", |app| {
+        app.analise
+            .dados
+            .dado
+            .as_ref()
+            .is_some_and(|d| d.alvo == alvo)
+    });
+    let d = a.casca.app.analise.dados.dado.clone().unwrap();
+    assert!(d.filhos.len() >= 5);
+    assert!(d.trilha.len() >= 3);
+    for vista in [analise::Vista::Tree, analise::Vista::Treemap] {
+        for cor in ModoCor::TODOS {
+            a.casca.app.analise.vista = vista;
+            a.casca.app.analise.cor = cor;
+            for base in dag_app::bases::BasePercentual::TODAS {
+                a.casca.app.analise.base = base;
+                a.quadro();
+            }
+        }
+    }
+}
+
+#[test]
+fn duplicados_marcacao_de_ponta_a_ponta_com_confirmacao() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.abrir("duplicados");
+    a.ate("lista de grupos", |app| {
+        app.duplicados
+            .lista
+            .dado
+            .as_ref()
+            .is_some_and(|l| !l.grupos.is_empty())
+    });
+    let g = a.casca.app.duplicados.lista.dado.as_ref().unwrap().grupos[0].id;
+    assert_eq!(a.casca.app.duplicados.lista.dado.as_ref().unwrap().total, 1);
+    a.casca.app.duplicados.selecionado = Some(g);
+    a.ate("detalhe do grupo", |app| {
+        app.duplicados.detalhe.dado.is_some()
+    });
+    let det = a.casca.app.duplicados.detalhe.dado.clone().unwrap();
+    assert_eq!(det.copias.len(), 2);
+    assert_eq!(det.copias.iter().filter(|c| c.principal).count(), 1);
+
+    // Pedir a marcação só abre a confirmação: nada é enviado ainda.
+    a.casca.app.duplicados.grupo_inteiro = true;
+    a.casca.app.pedir_confirmacao(AcaoMarcacao::MarcarDelecao);
+    let plano = a.casca.app.duplicados.confirmacao.clone().unwrap();
+    assert_eq!(plano.afetadas.len(), 1, "todas menos a principal");
+    assert!(!plano.unica_copia);
+    a.quadro(); // desenha o diálogo
+    assert!(a.casca.app.pedidos.is_empty());
+
+    // Confirmar manda o pedido ao worker; a página relê e mostra a marcação.
+    let id = a.casca.app.enviar(
+        dag_app::confirmacao::comando(&plano),
+        dag_app::app::Proposito::Marcacao(plano.acao),
+    );
+    a.casca.app.duplicados.confirmacao = None;
+    a.ate("resposta da marcação", |app| {
+        !app.pedidos.contains_key(&id)
+    });
+    a.ate("detalhe com marcação", |app| {
+        app.duplicados
+            .detalhe
+            .dado
+            .as_ref()
+            .is_some_and(|d| d.copias.iter().any(|c| c.marcacao.is_some()))
+    });
+    let det = a.casca.app.duplicados.detalhe.dado.clone().unwrap();
+    let marcada = det.copias.iter().find(|c| c.marcacao.is_some()).unwrap();
+    assert!(!marcada.principal);
+    assert!(
+        a.casca
+            .app
+            .avisos
+            .iter()
+            .any(|v| v.texto.contains("marcação(ões) registrada(s)")),
+        "{:?}",
+        a.casca.app.avisos
+    );
+    // O arquivo marcado continua no disco, intacto (o DAG só escreve no Catálogo).
+    assert_eq!(fs::read(a.raiz.join("big.pdf")).unwrap().len(), 9000);
+    assert_eq!(fs::read(a.raiz.join("copia/big.pdf")).unwrap().len(), 9000);
+}
+
+#[test]
+fn exportar_relatorio_pelo_worker_grava_o_arquivo() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    let saida = a.raiz.parent().unwrap().join("saida.csv");
+    let id = a.casca.app.enviar(
+        dag_core::Comando::Relatorio {
+            tipo: dag_core::TipoRelatorio::Marcacoes,
+            nivel: None,
+            limite: None,
+            cursor: None,
+            saida: Some(saida.display().to_string()),
+        },
+        dag_app::app::Proposito::Exportar,
+    );
+    a.ate("exportação", |app| !app.pedidos.contains_key(&id));
+    assert!(saida.is_file());
+    assert!(
+        a.casca
+            .app
+            .avisos
+            .iter()
+            .any(|v| v.texto.contains("Relatório gravado"))
+    );
+}

@@ -4,9 +4,11 @@
 //!
 //! O worker é o único escritor; a GUI e a CLI leem pela conexão de leitura (WAL).
 
+pub mod consulta_gui;
 pub mod duplicados;
 pub mod hashes;
 pub mod inventario;
+pub mod reconciliacao;
 
 use std::path::Path;
 use std::time::Duration;
@@ -23,6 +25,10 @@ pub const MIGRACOES: &[Migracao] = &[
     Migracao::sql(
         "inventário do Full Scan: tipo de entrada, totais por volume, índices",
         include_str!("../migrations/0002_inventario.sql"),
+    ),
+    Migracao::sql(
+        "Fast Scan, monitor de eventos e volumes offline: first_run_id, eventos e saúde",
+        include_str!("../migrations/0003_reconciliacao.sql"),
     ),
 ];
 

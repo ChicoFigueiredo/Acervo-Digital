@@ -5,9 +5,10 @@
 
 use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
-    ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId, MarcacaoInfo,
-    ModoVarredura, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados, ResumoHash,
-    ResumoVerificacao, TipoDispositivo, TipoRelatorio, VolumeId,
+    EventoInfo, ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId,
+    MarcacaoInfo, ModoVarredura, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados,
+    ResumoHash, ResumoMonitorInfo, ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo,
+    TipoDispositivo, TipoRelatorio, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,10 +56,12 @@ pub enum AcaoServico {
 pub enum Comando {
     /// Lista Volumes conhecidos (conectados ou não).
     ListarVolumes,
-    /// Inicia Full Scan ou Fast Scan sobre as Raízes (caminhos) dadas.
+    /// Inicia Full Scan ou Fast Scan sobre as Raízes (caminhos) dadas. No Fast Scan, sem
+    /// Raízes, vale todas as Raízes já catalogadas cujo Volume está conectado.
     ///
-    /// O Full Scan segue com a etapa de Hash Completo, a reconstrução dos Grupos de Duplicados
-    /// e a reavaliação das Marcações; `sem_hash` pula essas três etapas (inventário rápido).
+    /// Ambos seguem com a etapa de Hash Completo (o Fast Scan só relê o que mudou), a
+    /// reconstrução dos Grupos de Duplicados e a reavaliação das Marcações (que ficam
+    /// Pendentes se o conteúdo mudou); `sem_hash` pula essas três etapas (inventário rápido).
     IniciarScan {
         modo: ModoVarredura,
         raizes: Vec<String>,
@@ -113,6 +116,21 @@ pub enum Comando {
         cursor: Option<String>,
         saida: Option<String>,
     },
+    /// Monitora as Raízes (todas as catalogadas, se vazio) com inotify, em primeiro plano, até o
+    /// cancelamento (Ctrl-C). `reconciliar_a_cada_s`: Fast Scan periódico (padrão 1800 s;
+    /// 0 desliga). Os eventos são dicas: cada lote dispara reconciliação pelo escritor único.
+    Monitorar {
+        raizes: Vec<String>,
+        #[serde(default)]
+        reconciliar_a_cada_s: Option<u64>,
+        /// Não faz Hash Completo das mudanças (só o inventário).
+        #[serde(default)]
+        sem_hash: bool,
+    },
+    /// Últimos eventos persistidos (criado, alterado, removido, renomeado, lacunas...).
+    Eventos { limite: Option<u32> },
+    /// Saúde do monitor e pendências de reconciliação.
+    SaudeMonitor,
     /// Verificação de Integridade sobre as Raízes (todas, se vazio).
     VerificarIntegridade { raizes: Vec<String> },
     /// Gerencia o serviço em segundo plano.
@@ -225,6 +243,20 @@ pub enum Resposta {
     Status {
         execucoes: Vec<StatusExecucao>,
         catalogo: ResumoCatalogo,
+        /// Saúde do monitor e reconciliação pendente.
+        #[serde(default)]
+        monitor: Option<SaudeMonitorInfo>,
+    },
+    /// Últimos eventos persistidos.
+    Eventos {
+        eventos: Vec<EventoInfo>,
+    },
+    SaudeMonitor {
+        saude: SaudeMonitorInfo,
+    },
+    /// Monitoramento encerrado (Ctrl-C).
+    MonitorEncerrado {
+        resumo: ResumoMonitorInfo,
     },
     /// Varredura síncrona terminada (ou cancelada: retomável).
     ScanConcluido {
@@ -244,6 +276,9 @@ pub enum Resposta {
         /// Reconstrução de duplicados e reavaliação de Marcações (ausente com `sem_hash`).
         #[serde(default)]
         duplicados: Option<ResumoDuplicados>,
+        /// Só no Fast Scan: novos, alterados, reaproveitados, renomeados e removidos.
+        #[serde(default)]
+        reconciliacao: Option<ResumoReconciliacao>,
     },
     Explorar {
         /// Caminho explorado; `None` = Raízes.

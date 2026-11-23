@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 dag-core.workspace = true
+dag-monitor.workspace = true
 dag-platform-linux.workspace = true
 dag-scanner.workspace = true
 dag-store.workspace = true

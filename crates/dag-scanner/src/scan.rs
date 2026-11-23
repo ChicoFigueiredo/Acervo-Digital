@@ -17,14 +17,17 @@ use dag_store::inventario::{
     self, ContadoresDb, DiretorioPendente, EstadoScan, FaseScan, FimDiretorio, NovaPasta,
     NovoArquivo, NovoProblema, Severidade, TipoEntrada,
 };
+use dag_store::reconciliacao::{self, Efeito, Escopo, NovoEvento, TipoEvento};
 use rusqlite::Connection;
 
 use crate::classificador::{Classificador, SemClassificacao};
 use crate::config::{ConfigScan, FaseProgresso, Progresso};
 use crate::controle::{ControleScan, EstadoControle};
 use crate::erro::ErroScan;
+use crate::fast::{self, Contagem, ResumoFast};
 use crate::visita::{self, Contexto, Entrada, Fim, Job, Msg, Natureza};
 
+type PreparoExecucao = (i64, HashMap<u64, InfoVolume>, Vec<Escopo>);
 type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
 
 /// Como o scan terminou.
@@ -47,6 +50,8 @@ pub struct ResultadoScan {
     /// `None` se cancelado antes da agregação.
     pub agregacao: Option<ResumoAgregacao>,
     pub duracao: Duration,
+    /// Só no Fast Scan: o que foi reaproveitado, atualizado, renomeado e removido.
+    pub reconciliacao: Option<ResumoFast>,
 }
 
 /// Full Scan (fase de inventário). Construa, ajuste e chame [`executar`](Self::executar).
@@ -57,6 +62,8 @@ pub struct FullScan {
     controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     classificador: Arc<dyn Classificador>,
+    rapido: bool,
+    max_eventos: u64,
 }
 
 impl fmt::Debug for FullScan {
@@ -87,6 +94,7 @@ struct InfoVolume {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Vivo {
+    fast: Contagem,
     pastas: u64,
     arquivos: u64,
     especiais: u64,
@@ -124,7 +132,16 @@ impl FullScan {
             controle: ControleScan::novo(),
             progresso: None,
             classificador: Arc::new(SemClassificacao),
+            rapido: false,
+            max_eventos: fast::MAX_EVENTOS_PADRAO,
         }
+    }
+
+    /// Troca o modo para Fast Scan (ver [`crate::FastScan`]).
+    pub(crate) fn rapido(mut self, max_eventos: u64) -> Self {
+        self.rapido = true;
+        self.max_eventos = max_eventos;
+        self
     }
 
     #[must_use]
@@ -178,11 +195,14 @@ impl FullScan {
         })
         .to_string();
         let t = agora();
-        let (run_id, mapa) = catalogo.armazem_mut().transacao_imediata(
-            |tx| -> Result<(i64, HashMap<u64, InfoVolume>), ErroScan> {
+        let modo = if self.rapido { "fast" } else { "full" };
+        let (run_id, mapa, escopos) = catalogo.armazem_mut().transacao_imediata(
+            |tx| -> Result<PreparoExecucao, ErroScan> {
                 let mapa = self.registrar_volumes(tx, t)?;
                 let run_id =
-                    inventario::criar_execucao(tx, "full", &raizes_json, Some(&checkpoint), t)?;
+                    inventario::criar_execucao(tx, modo, &raizes_json, Some(&checkpoint), t)?;
+                let mut escopos = Vec::new();
+                let mut escopos_json = Vec::new();
                 for p in &problemas {
                     inventario::registrar_problema(
                         tx,
@@ -203,23 +223,43 @@ impl FullScan {
                     let volume_id = mapa.get(&r.dev).and_then(|v| v.id).ok_or_else(|| {
                         ErroScan::Interno("raiz validada sem volume registrado".into())
                     })?;
-                    let id = inventario::upsert_pasta(
-                        tx,
-                        &NovaPasta {
-                            volume_id,
-                            pai: None,
-                            path_raw: &r.caminho,
-                            name_raw: nome,
-                            dev: r.dev,
-                            inode: r.inode,
-                            attrs: &r.attrs,
-                            mtime_ns: r.mtime_ns,
-                            run_id,
-                        },
-                    )?;
+                    let nova = NovaPasta {
+                        volume_id,
+                        pai: None,
+                        path_raw: &r.caminho,
+                        name_raw: nome,
+                        dev: r.dev,
+                        inode: r.inode,
+                        attrs: &r.attrs,
+                        mtime_ns: r.mtime_ns,
+                        run_id,
+                    };
+                    // No Fast Scan a raiz já catalogada mantém o pai (raiz aninhada em outra).
+                    let id = if self.rapido {
+                        reconciliacao::registrar_raiz(tx, &nova)?
+                    } else {
+                        inventario::upsert_pasta(tx, &nova)?
+                    };
                     inventario::enfileirar_diretorio(tx, run_id, id, &r.caminho, t)?;
+                    escopos.push(Escopo {
+                        volume_id,
+                        path_raw: r.caminho.clone(),
+                    });
+                    escopos_json.push(serde_json::json!({"volume_id": volume_id, "pasta_id": id}));
                 }
-                Ok((run_id, mapa))
+                if self.rapido {
+                    let cp = serde_json::json!({
+                        "config": serde_json::to_value(&self.config)
+                            .map_err(|e| ErroScan::Interno(e.to_string()))?,
+                        "escopos": escopos_json,
+                    })
+                    .to_string();
+                    tx.execute(
+                        "UPDATE scan_runs SET checkpoint = ?2 WHERE id = ?1",
+                        rusqlite::params![run_id, cp],
+                    )?;
+                }
+                Ok((run_id, mapa, escopos))
             },
         )?;
         if validas.is_empty() {
@@ -232,7 +272,15 @@ impl FullScan {
             return Err(ErroScan::SemRaizes);
         }
         let devs_raiz = validas.iter().map(|r| r.dev).collect();
-        self.rodar(catalogo, run_id, mapa, devs_raiz, inicio)
+        self.rodar(
+            catalogo,
+            run_id,
+            mapa,
+            devs_raiz,
+            escopos,
+            self.rapido,
+            inicio,
+        )
     }
 
     /// Retoma uma execução cancelada, pausada, interrompida (processo morto) ou que falhou, a
@@ -264,6 +312,7 @@ impl FullScan {
                     contadores: c,
                     agregacao: None,
                     duracao: inicio.elapsed(),
+                    reconciliacao: None,
                 });
             }
             return Err(ErroScan::NaoRetomavel {
@@ -285,7 +334,21 @@ impl FullScan {
                 Ok((mapa, devs))
             },
         )?;
-        self.rodar(catalogo, execucao_id, mapa, devs_raiz, inicio)
+        let rapido = exec.modo == "fast";
+        let escopos = if rapido {
+            fast::escopos_do_checkpoint(catalogo.armazem().conexao(), exec.checkpoint.as_deref())?
+        } else {
+            Vec::new()
+        };
+        self.rodar(
+            catalogo,
+            execucao_id,
+            mapa,
+            devs_raiz,
+            escopos,
+            rapido,
+            inicio,
+        )
     }
 
     fn registrar_volumes(
@@ -293,12 +356,14 @@ impl FullScan {
         tx: &Connection,
         t: i64,
     ) -> Result<HashMap<u64, InfoVolume>, ErroScan> {
+        // Registra os conectados e marca como desconectados (sem tocar nas linhas) os que sumiram.
+        let sincronia = reconciliacao::sincronizar_volumes(tx, &self.volumes, t)?;
         let mut mapa = HashMap::new();
         for v in &self.volumes {
             let id = if v.pseudo {
                 None
             } else {
-                Some(inventario::registrar_volume(tx, v, t)?)
+                sincronia.conectados.get(&v.st_dev).copied()
             };
             mapa.insert(
                 v.st_dev,
@@ -394,16 +459,24 @@ impl FullScan {
         (validas, problemas)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rodar(
         &self,
         catalogo: &mut Catalogo,
         run_id: i64,
         mapa: HashMap<u64, InfoVolume>,
         devs_raiz: HashSet<u64>,
+        escopos: Vec<Escopo>,
+        rapido: bool,
         inicio: Instant,
     ) -> Result<ResultadoScan, ErroScan> {
         let vivo = {
             let c = inventario::contadores_da_execucao(catalogo.armazem().conexao(), run_id)?;
+            let fast = if rapido {
+                fast::contagem_salva(catalogo.armazem().conexao(), run_id)?
+            } else {
+                Contagem::default()
+            };
             Vivo {
                 pastas: c.pastas,
                 arquivos: c.arquivos,
@@ -411,9 +484,12 @@ impl FullScan {
                 bytes: c.bytes_logicos,
                 ignorados: c.ignorados,
                 erros: c.erros,
+                fast,
             }
         };
         let mut ctx = Ctx {
+            rapido,
+            max_eventos: self.max_eventos,
             run_id,
             mapa,
             devs_raiz,
@@ -440,7 +516,11 @@ impl FullScan {
                 |tx| -> Result<ContadoresDb, ErroScan> {
                     inventario::liberar_reservas(tx, run_id)?;
                     let c = inventario::contadores_da_execucao(tx, run_id)?;
-                    inventario::salvar_contadores(tx, run_id, &c.json())?;
+                    let mut json = serde_json::from_str(&c.json()).unwrap_or_default();
+                    if rapido {
+                        fast::acrescentar_contagem(&mut json, &ctx.vivo.fast);
+                    }
+                    inventario::salvar_contadores(tx, run_id, &json.to_string())?;
                     inventario::definir_estado(tx, run_id, EstadoScan::Cancelada, None, agora())?;
                     Ok(c)
                 },
@@ -452,8 +532,22 @@ impl FullScan {
                 contadores,
                 agregacao: None,
                 duracao: inicio.elapsed(),
+                reconciliacao: None,
             });
         }
+        // Fast Scan: com o escopo inteiro revisitado, só agora é possível decidir o que foi
+        // renomeado e o que sumiu. Cancelado/interrompido nunca chega aqui (nada vira ausente).
+        let reconciliacao = if rapido {
+            Some(fast::finalizar(
+                catalogo,
+                run_id,
+                &escopos,
+                ctx.max_eventos,
+                &ctx.vivo.fast,
+            )?)
+        } else {
+            None
+        };
         catalogo
             .armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
@@ -490,7 +584,11 @@ impl FullScan {
         let (contadores, estado) = catalogo.armazem_mut().transacao_imediata(
             |tx| -> Result<(ContadoresDb, EstadoScan), ErroScan> {
                 let c = inventario::contadores_da_execucao(tx, run_id)?;
-                inventario::salvar_contadores(tx, run_id, &c.json())?;
+                let json = match &reconciliacao {
+                    Some(r) => fast::json_final(&c, r),
+                    None => c.json(),
+                };
+                inventario::salvar_contadores(tx, run_id, &json)?;
                 let estado = if c.erros > 0 {
                     EstadoScan::ConcluidaComErros
                 } else {
@@ -511,6 +609,7 @@ impl FullScan {
             contadores,
             agregacao: Some(agregacao),
             duracao: inicio.elapsed(),
+            reconciliacao,
         })
     }
 
@@ -637,6 +736,8 @@ fn nome_da_raiz(caminho: &[u8]) -> &[u8] {
 }
 
 struct Ctx {
+    rapido: bool,
+    max_eventos: u64,
     run_id: i64,
     mapa: HashMap<u64, InfoVolume>,
     devs_raiz: HashSet<u64>,
@@ -819,11 +920,14 @@ impl Coordenador<'_> {
         self.fonte_vazia = false;
         let pendentes = self.prontos.len() as u64 + self.voando as u64;
         let c = self.ctx.vivo;
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "pastas": c.pastas, "arquivos": c.arquivos, "especiais": c.especiais,
             "bytes_logicos": c.bytes, "ignorados": c.ignorados, "erros": c.erros,
-        })
-        .to_string();
+        });
+        if self.ctx.rapido {
+            fast::acrescentar_contagem(&mut json, &c.fast);
+        }
+        let json = json.to_string();
         self.cat
             .armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
@@ -960,28 +1064,50 @@ fn aplicar_entrada(
                 }
                 None => None,
             };
-            inventario::upsert_arquivo(
-                tx,
-                &NovoArquivo {
-                    volume_id: dir.volume_id,
-                    pasta_id: dir.pasta_id,
-                    path_raw: &e.caminho,
-                    name_raw: e.nome(),
-                    tipo,
-                    dev: e.dev,
-                    inode: e.inode,
-                    nlink: e.nlink,
-                    bytes_logicos: e.tamanho,
-                    bytes_alocados: e.alocado,
-                    mtime_ns: e.mtime_ns,
-                    ctime_ns: e.ctime_ns,
-                    birthtime_ns: e.birth_ns,
-                    attrs: &e.attrs,
-                    alvo_symlink: e.alvo.as_deref(),
-                    mime_id,
-                    run_id: ctx.run_id,
-                },
-            )?;
+            let novo = NovoArquivo {
+                volume_id: dir.volume_id,
+                pasta_id: dir.pasta_id,
+                path_raw: &e.caminho,
+                name_raw: e.nome(),
+                tipo,
+                dev: e.dev,
+                inode: e.inode,
+                nlink: e.nlink,
+                bytes_logicos: e.tamanho,
+                bytes_alocados: e.alocado,
+                mtime_ns: e.mtime_ns,
+                ctime_ns: e.ctime_ns,
+                birthtime_ns: e.birth_ns,
+                attrs: &e.attrs,
+                alvo_symlink: e.alvo.as_deref(),
+                mime_id,
+                run_id: ctx.run_id,
+            };
+            if ctx.rapido {
+                match reconciliacao::gravar_arquivo(tx, &novo)? {
+                    Efeito::Inalterado => ctx.vivo.fast.inalterados += 1,
+                    Efeito::Novo => ctx.vivo.fast.novos += 1,
+                    Efeito::Alterado => {
+                        ctx.vivo.fast.alterados += 1;
+                        if ctx.vivo.fast.eventos < ctx.max_eventos {
+                            ctx.vivo.fast.eventos += 1;
+                            reconciliacao::registrar_evento(
+                                tx,
+                                &NovoEvento {
+                                    volume_id: Some(dir.volume_id),
+                                    caminho: Some(&e.caminho),
+                                    execucao_id: Some(ctx.run_id),
+                                    ..NovoEvento::processado(TipoEvento::Alterado, "fast_scan", t)
+                                },
+                            )?;
+                        } else {
+                            ctx.vivo.fast.omitidos += 1;
+                        }
+                    }
+                }
+            } else {
+                inventario::upsert_arquivo(tx, &novo)?;
+            }
             if tipo == TipoEntrada::Arquivo {
                 ctx.vivo.arquivos += 1;
             } else {
@@ -1045,8 +1171,9 @@ fn aplicar_pasta(
         };
         let base = e.attrs.trim_end_matches('}');
         let attrs = format!("{base},\"limite_de_volume\":true}}");
-        inventario::upsert_pasta(
+        gravar_pasta(
             tx,
+            ctx,
             &NovaPasta {
                 volume_id: dir.volume_id,
                 pai: Some(dir.pasta_id),
@@ -1078,8 +1205,9 @@ fn aplicar_pasta(
                 .to_string(),
         );
     }
-    let id = inventario::upsert_pasta(
+    let id = gravar_pasta(
         tx,
+        ctx,
         &NovaPasta {
             volume_id: dir.volume_id,
             pai: Some(dir.pasta_id),
@@ -1095,4 +1223,16 @@ fn aplicar_pasta(
     inventario::enfileirar_diretorio(tx, ctx.run_id, id, &e.caminho, t)?;
     ctx.vivo.pastas += 1;
     Ok(())
+}
+
+/// Grava a pasta: upsert simples no Full Scan; comparação com a linha existente no Fast Scan.
+fn gravar_pasta(tx: &Connection, ctx: &mut Ctx, p: &NovaPasta<'_>) -> Result<i64, ErroScan> {
+    if !ctx.rapido {
+        return Ok(inventario::upsert_pasta(tx, p)?);
+    }
+    let (id, efeito) = reconciliacao::gravar_pasta(tx, p)?;
+    if efeito == Efeito::Novo {
+        ctx.vivo.fast.pastas_novas += 1;
+    }
+    Ok(id)
 }

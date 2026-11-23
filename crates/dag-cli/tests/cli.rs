@@ -50,6 +50,8 @@ fn help_lista_todos_os_subcomandos() {
         "cancelar",
         "status",
         "duplicados",
+        "monitorar",
+        "eventos",
         "marcar",
         "desmarcar",
         "prioridade",
@@ -70,20 +72,6 @@ fn version_funciona() {
     let o = dag(&["--version"]);
     assert!(o.status.success());
     assert!(String::from_utf8(o.stdout).unwrap().starts_with("dag "));
-}
-
-#[test]
-fn scan_fast_ainda_nao_implementado() {
-    let o = dag(&["--json", "scan", "--fast", "/tmp"]);
-    assert_eq!(o.status.code(), Some(2));
-    let v = json(&o);
-    assert_eq!(v["resposta"], "erro");
-    assert_eq!(v["codigo"], "nao_implementado");
-    let err = String::from_utf8(o.stderr).unwrap();
-    assert!(
-        err.contains("ainda não implementado (incremento 5)"),
-        "{err}"
-    );
 }
 
 #[test]
@@ -328,4 +316,104 @@ fn mcp_placeholder() {
     let o = dag(&["mcp"]);
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8(o.stderr).unwrap().contains("MCP"));
+}
+
+#[test]
+fn scan_fast_eventos_e_status_pelo_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = arvore(tmp.path());
+    let cat = tmp.path().join("c.sqlite");
+    let cat = cat.to_str().unwrap();
+    let r = raiz.to_str().unwrap();
+    assert!(
+        dag(&["--catalogo", cat, "scan", "--full", r])
+            .status
+            .success()
+    );
+    std::fs::rename(raiz.join("sub/a.txt"), raiz.join("sub/z.txt")).unwrap();
+    std::fs::remove_file(raiz.join("pequeno.txt")).unwrap();
+    // Sem raízes: reconcilia todas as raízes já varridas.
+    let o = dag(&["--catalogo", cat, "--json", "scan", "--fast"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = json(&o);
+    assert_eq!(v["reconciliacao"]["arquivos_renomeados"], 1);
+    assert_eq!(v["reconciliacao"]["arquivos_ausentes"], 1);
+    assert_eq!(v["hash"]["bytes_lidos"], 0);
+    let o = dag(&["--catalogo", cat, "scan", "--fast"]);
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(out.contains("Reconciliação:"), "{out}");
+    let o = dag(&["--catalogo", cat, "eventos", "--limite", "10"]);
+    assert!(o.status.success());
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(
+        out.contains("renomeado") && out.contains("removido"),
+        "{out}"
+    );
+    let o = dag(&["--catalogo", cat, "status"]);
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(out.contains("Monitor: parado"), "{out}");
+}
+
+#[test]
+fn monitorar_roda_ate_sinal_e_resume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = arvore(tmp.path());
+    let cat = tmp.path().join("c.sqlite");
+    let cat = cat.to_str().unwrap();
+    let r = raiz.to_str().unwrap();
+    assert!(
+        dag(&["--catalogo", cat, "scan", "--full", r])
+            .status
+            .success()
+    );
+    let filho = Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env_remove("DAG_CATALOGO")
+        .args([
+            "--catalogo",
+            cat,
+            "--json",
+            "monitorar",
+            "--reconciliar-a-cada",
+            "0",
+            r,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Aguarda o monitor ficar ativo (saúde persistida) e envia SIGINT.
+    let inicio = std::time::Instant::now();
+    loop {
+        let o = dag(&["--catalogo", cat, "--json", "status"]);
+        let v = json(&o);
+        if v["monitor"]["em_execucao"] == true && v["monitor"]["watches"].as_u64() > Some(0) {
+            break;
+        }
+        assert!(inicio.elapsed().as_secs() < 15, "monitor não subiu: {v}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Um segundo escritor é recusado.
+    let o = dag(&["--catalogo", cat, "--json", "monitorar", r]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(json(&o)["codigo"], "escritor_ocupado");
+    let pid = filho.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let o = filho.wait_with_output().unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(json(&o)["resposta"], "monitor_encerrado");
+}
+
+#[test]
+fn intervalo_invalido_e_rejeitado() {
+    assert!(
+        !dag(&["monitorar", "--reconciliar-a-cada", "abc", "/tmp"])
+            .status
+            .success()
+    );
 }

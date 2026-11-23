@@ -153,8 +153,26 @@ enum Sub {
         #[arg(long, value_name = "ID", conflicts_with_all = ["full", "fast", "raizes"])]
         retomar: Option<i64>,
         /// Raízes da varredura
-        #[arg(required_unless_present = "retomar")]
+        /// (Fast Scan sem raízes: todas as raízes já varridas)
+        #[arg(required_unless_present_any = ["retomar", "fast"])]
         raizes: Vec<String>,
+    },
+    /// Monitora as raízes (inotify) e reconcilia o Catálogo; roda até Ctrl-C
+    Monitorar {
+        /// Raízes a monitorar (padrão: todas as raízes já varridas)
+        raizes: Vec<String>,
+        /// Intervalo da reconciliação periódica (ex.: 30m, 90s, 2h, 1d; 0 ou nunca desliga)
+        #[arg(long, value_name = "INTERVALO", value_parser = parse_intervalo)]
+        reconciliar_a_cada: Option<u64>,
+        /// Não calcula Hash Completo após as reconciliações
+        #[arg(long)]
+        sem_hash: bool,
+    },
+    /// Lista os eventos de arquivos/volumes persistidos (mais recentes primeiro)
+    Eventos {
+        /// Máximo de eventos (padrão 50)
+        #[arg(long)]
+        limite: Option<u32>,
     },
     /// Lista os filhos de uma pasta catalogada, do maior para o menor
     Explorar {
@@ -279,6 +297,27 @@ enum Catalogo {
     Backup { destino: String },
 }
 
+/// `30m`, `90s`, `2h`, `1d` ou segundos puros; `0`/`nunca` desliga (devolve 0).
+fn parse_intervalo(t: &str) -> Result<u64, String> {
+    let t = t.trim().to_lowercase();
+    if t == "nunca" || t == "0" {
+        return Ok(0);
+    }
+    let (num, mult) = match t.chars().last() {
+        Some('s') => (&t[..t.len() - 1], 1),
+        Some('m') => (&t[..t.len() - 1], 60),
+        Some('h') => (&t[..t.len() - 1], 3600),
+        Some('d') => (&t[..t.len() - 1], 86_400),
+        _ => (t.as_str(), 1),
+    };
+    let n: u64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("intervalo inválido: {t} (use 30m, 90s, 2h, 1d)"))?;
+    n.checked_mul(mult)
+        .ok_or_else(|| "intervalo grande demais".to_string())
+}
+
 fn exec(a: &ExecArg) -> Option<ExecucaoId> {
     a.execucao.map(ExecucaoId)
 }
@@ -306,6 +345,16 @@ fn montar(sub: Sub) -> Option<Comando> {
             raizes,
             sem_hash,
         },
+        Sub::Monitorar {
+            raizes,
+            reconciliar_a_cada,
+            sem_hash,
+        } => Comando::Monitorar {
+            raizes,
+            reconciliar_a_cada_s: reconciliar_a_cada,
+            sem_hash,
+        },
+        Sub::Eventos { limite } => Comando::Eventos { limite },
         Sub::Explorar {
             pasta,
             limite,

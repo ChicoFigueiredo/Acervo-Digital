@@ -26,6 +26,10 @@ _Avoid_: varredura completa, scan inicial
 Varredura de reconciliação que revisita o escopo e reaproveita metadados e hash das entradas comprovadamente inalteradas, atualizando só o que foi adicionado, alterado, renomeado ou removido.
 _Avoid_: quick scan, varredura incremental
 
+**Verificação de Integridade**:
+Releitura agendada do conteúdo de arquivos cujo hash foi reaproveitado, para detectar corrupção silenciosa que metadados inalterados não revelam.
+_Avoid_: rehash, auditoria
+
 ### Conteúdo
 
 **Hash Completo**:
@@ -39,6 +43,14 @@ _Avoid_: duplicado, cópia
 **Grupo de Duplicados**:
 Conjunto de dois ou mais arquivos físicos distintos com o mesmo Hash Completo e o mesmo tamanho.
 _Avoid_: duplicata, clone
+
+**Cópia Principal**:
+A cópia de um Grupo de Duplicados escolhida como referência, por Prioridade de Volume ou por escolha manual do usuário.
+_Avoid_: original, master
+
+**Prioridade de Volume**:
+Ordem definida pelo usuário entre Volumes e pastas que decide automaticamente a Cópia Principal de cada Grupo de Duplicados.
+_Avoid_: preferência, ranking
 
 ### Marcações
 

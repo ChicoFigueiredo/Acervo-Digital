@@ -8,6 +8,7 @@
 pub mod classificacao;
 pub mod comando;
 pub mod descoberta;
+pub mod formato;
 pub mod hash;
 pub mod ids;
 pub mod regras;
@@ -20,8 +21,8 @@ pub use classificacao::{
     identificar_por_assinatura, identificar_por_extensao, verificar_divergencia,
 };
 pub use comando::{
-    AcaoServico, Alvo, Comando, GrupoDuplicados, Pedido, Relatorio, Resposta, StatusExecucao,
-    VolumeInfo,
+    AcaoServico, Alvo, Comando, EntradaExploracao, GrupoDuplicados, Pedido, Relatorio, Resposta,
+    ResumoCatalogo, StatusExecucao, TipoEntradaExploracao, VolumeInfo,
 };
 pub use descoberta::{DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use hash::{HashCompleto, HashInvalido};

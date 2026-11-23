@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+dag-agent = { path = "crates/dag-agent" }
 dag-core = { path = "crates/dag-core" }
 dag-platform-linux = { path = "crates/dag-platform-linux" }
 dag-scanner = { path = "crates/dag-scanner" }
@@ -24,6 +25,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rustix = { version = "1", features = ["fs"] }
+ctrlc = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

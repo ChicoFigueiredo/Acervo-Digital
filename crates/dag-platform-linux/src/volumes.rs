@@ -58,6 +58,8 @@ const REDE: &[&str] = &[
     "9p",
     "afs",
     "fuse.glusterfs",
+    // Montagem de nuvem (rclone mount): o "dispositivo" é o remoto.
+    "fuse.rclone",
     "glusterfs",
 ];
 
@@ -471,6 +473,20 @@ mod testes {
         assert_eq!(d.tipo, TipoDispositivo::Rede);
         assert_eq!(d.identificador, "nas.local:/export/fotos");
         assert_eq!(v[0].capacidade_bytes, Some(5000));
+        assert!(!v[0].pseudo);
+    }
+
+    #[test]
+    fn rclone_e_nuvem_tratado_como_rede() {
+        let mut f = FonteFalsa::default();
+        f.stat("/mnt/nuvem", 5000, 2500);
+        f.arquivo(
+            "/proc/self/mountinfo",
+            "61 27 0:51 / /mnt/nuvem rw - fuse.rclone gdrive: rw,user_id=1000\n",
+        );
+        let v = descobrir(&f);
+        let d = v[0].dispositivo.as_ref().unwrap();
+        assert_eq!(d.tipo, TipoDispositivo::Rede);
         assert!(!v[0].pseudo);
     }
 

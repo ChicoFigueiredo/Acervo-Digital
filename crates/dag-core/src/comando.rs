@@ -4,8 +4,8 @@
 //! O transporte (socket local, etc.) não faz parte deste crate; só o formato.
 
 use crate::{
-    ArquivoId, Autor, DispositivoId, EstadoExecucao, EtapaVarredura, ExecucaoId, GrupoId,
-    HashCompleto, ModoVarredura, VolumeId,
+    ArquivoId, Autor, DispositivoId, EstadoExecucao, EtapaVarredura, ExecucaoId, Finalidade,
+    GrupoId, HashCompleto, ModoVarredura, TipoDispositivo, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -78,13 +78,23 @@ pub enum Comando {
     Servico { acao: AcaoServico },
     /// Backup consistente do Catálogo (SQLite) para `destino`.
     BackupCatalogo { destino: String },
+    /// Filhos diretos de `pasta` (ou as Raízes catalogadas, se `None`), do maior para o menor.
+    /// `cursor` é o `proximo_cursor` opaco da página anterior.
+    Explorar {
+        pasta: Option<String>,
+        limite: Option<u32>,
+        cursor: Option<String>,
+    },
 }
 
 /// Resumo de um Volume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeInfo {
     pub id: VolumeId,
-    pub dispositivo: DispositivoId,
+    /// `None` quando o sistema não informa o Dispositivo Físico (ex.: overlay, tmpfs).
+    pub dispositivo: Option<DispositivoId>,
+    pub tipo_dispositivo: Option<TipoDispositivo>,
+    pub fs_type: Option<String>,
     pub rotulo: Option<String>,
     pub ponto_montagem: Option<String>,
     pub conectado: bool,
@@ -101,6 +111,60 @@ pub struct StatusExecucao {
     pub etapa: Option<EtapaVarredura>,
     pub itens_processados: u64,
     pub erros: u64,
+    /// Estado exato gravado no Catálogo (`concluida_com_erros`, `interrompida`...).
+    pub estado_detalhe: String,
+    pub raizes: Vec<String>,
+    /// Segundos Unix.
+    pub iniciada_em: i64,
+    pub encerrada_em: Option<i64>,
+    pub pastas: u64,
+    pub arquivos: u64,
+    pub especiais: u64,
+    pub bytes_logicos: u64,
+    pub ignorados: u64,
+}
+
+/// Totais do Catálogo (soma dos agregados por Volume da última varredura de cada um).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumoCatalogo {
+    pub volumes: u64,
+    pub pastas: u64,
+    pub arquivos: u64,
+    pub bytes_logicos: u64,
+}
+
+/// Pasta ou arquivo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipoEntradaExploracao {
+    Pasta,
+    Arquivo,
+}
+
+/// Filho direto de uma pasta, para exploração.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntradaExploracao {
+    pub tipo: TipoEntradaExploracao,
+    pub nome: String,
+    /// Pasta: soma recursiva; arquivo: tamanho lógico.
+    pub bytes_logicos: u64,
+    /// `None` = indisponível (ou pasta sem agregado).
+    pub bytes_alocados: Option<u64>,
+    /// Pasta: arquivos regulares na subárvore.
+    pub arquivos: Option<u64>,
+    /// Pasta: pastas na subárvore.
+    pub pastas: Option<u64>,
+    /// Arquivo: `arquivo`, `symlink`, `fifo`...
+    pub kind: Option<String>,
+    /// Arquivo: tipo MIME identificado (só por extensão neste incremento).
+    pub mime: Option<String>,
+    /// Arquivo: categoria do formato (`documento`, `imagem`...).
+    pub categoria: Option<String>,
+    pub finalidade: Option<Finalidade>,
+    /// Pasta: `pendente`/`parcial`/`completo`/`desatualizado`.
+    pub estado_agregado: Option<String>,
+    /// Nanossegundos Unix.
+    pub mtime_ns: Option<i64>,
 }
 
 /// Grupo de Duplicados resumido.
@@ -141,6 +205,26 @@ pub enum Resposta {
     },
     Status {
         execucoes: Vec<StatusExecucao>,
+        catalogo: ResumoCatalogo,
+    },
+    /// Varredura síncrona terminada (ou cancelada: retomável).
+    ScanConcluido {
+        execucao: ExecucaoId,
+        /// `concluida`, `concluida_com_erros` ou `cancelada`.
+        desfecho: String,
+        pastas: u64,
+        arquivos: u64,
+        especiais: u64,
+        bytes_logicos: u64,
+        ignorados: u64,
+        erros: u64,
+        duracao_ms: u64,
+    },
+    Explorar {
+        /// Caminho explorado; `None` = Raízes.
+        pasta: Option<String>,
+        entradas: Vec<EntradaExploracao>,
+        proximo_cursor: Option<String>,
     },
     Duplicados {
         grupos: Vec<GrupoDuplicados>,
@@ -185,6 +269,11 @@ mod tests {
             },
             Comando::BackupCatalogo {
                 destino: "/b".into(),
+            },
+            Comando::Explorar {
+                pasta: Some("/a".into()),
+                limite: Some(10),
+                cursor: None,
             },
         ] {
             ida_e_volta(&c);

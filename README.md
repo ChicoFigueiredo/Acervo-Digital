@@ -4,7 +4,21 @@
 
 ## Estado atual
 
-**Planejamento da Fase A consolidado; ainda não há implementação neste repositório.**
+**Incrementos 1 e 2 da Fase A (Linux) em andamento.** A CLI `dag` já inventaria o acervo e o explora, sempre em modo somente leitura sobre os arquivos catalogados. O DAG só escreve no Catálogo (SQLite) e no arquivo `<catálogo>.lock` ao lado dele.
+
+O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite` (diretório 0700, banco 0600). Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`) funcionam durante uma varredura.
+
+```sh
+dag volumes                              # volumes montados (e os conhecidos, offline)
+dag scan --full ~/Documentos /mnt/hd2    # Full Scan: inventário, tipo por extensão e finalidade por caminho
+dag scan --retomar 3                     # retoma a execução 3 (Ctrl-C cancela com limpeza e ela fica retomável)
+dag explorar ~/Documentos --limite 20    # filhos por tamanho (lógico e alocado); sem pasta lista as Raízes
+dag status                               # últimas varreduras e totais do Catálogo
+dag catalogo backup ~/dag-backup.sqlite  # cópia consistente do Catálogo, com verificação de integridade
+dag --json explorar ~/Documentos         # qualquer comando em JSON (--json)
+```
+
+Ainda não implementados (saem com código 2): Fast Scan, hash e duplicados, marcações, relatório, verificação de integridade, serviço, MCP e pausar/cancelar entre processos. O Full Scan ainda não calcula o Hash Completo nem lê o conteúdo dos arquivos.
 
 **Leia a especificação principal:** [Fase A — Especificação de produto e engenharia](docs/FASE-A-ESPECIFICACAO.md).
 

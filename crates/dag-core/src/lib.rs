@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod comando;
+pub mod descoberta;
 pub mod hash;
 pub mod ids;
 pub mod regras;
@@ -15,6 +16,7 @@ pub use comando::{
     AcaoServico, Alvo, Comando, GrupoDuplicados, Pedido, Relatorio, Resposta, StatusExecucao,
     VolumeInfo,
 };
+pub use descoberta::{DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
 pub use tipos::{

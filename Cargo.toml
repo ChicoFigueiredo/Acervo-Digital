@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+dag-core = { path = "crates/dag-core" }
+dag-store = { path = "crates/dag-store" }
+# Bancada fixada em commit (decisão do grilling de 23/11/2026). Atualizar = trocar o rev.
+bancada-armazem = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+bancada-casca = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

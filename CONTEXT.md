@@ -14,6 +14,10 @@ _Avoid_: inventário (como substantivo do banco), snapshot, índice
 Sistema de arquivos identificado de forma estável, conectado ou desconectado.
 _Avoid_: disco, HD, drive (quando se quer dizer o sistema de arquivos)
 
+**Dispositivo Físico**:
+Disco ou mídia física que hospeda um ou mais Volumes. Dois Volumes no mesmo Dispositivo Físico falham juntos.
+_Avoid_: HD, disco (quando se quer dizer o Volume)
+
 **Raiz**:
 Volume ou pasta escolhido pelo usuário como escopo de uma varredura.
 _Avoid_: root, ponto de partida
@@ -59,18 +63,28 @@ Decisão registrada no Catálogo de que uma cópia dentro de um Grupo de Duplica
 _Avoid_: backup (sozinho), cópia de segurança
 
 **Cobertura**:
-Condição de um arquivo que tem ao menos uma cópia com Marcação de Backup em outro Volume.
+Condição de um arquivo que tem ao menos uma cópia com Marcação de Backup em outro Dispositivo Físico.
 _Avoid_: protegido, redundante
 
 **Marcação para Deleção**:
 Decisão registrada no Catálogo de que uma cópia é candidata a descarte. Não apaga nem move nada.
 _Avoid_: excluir, lixo
 
+**Única Cópia**:
+Arquivo cujo conteúdo não existe em nenhum outro arquivo físico do Catálogo.
+_Avoid_: original, exclusivo
+
+**Marcação Pendente**:
+Marcação de Backup ou para Deleção cujo arquivo mudou de conteúdo depois de marcado. Sai de todas as contas até o usuário confirmá-la de novo.
+_Avoid_: marcação inválida, expirada
+
 ## Relationships
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
+- Qualquer arquivo pode ter **Marcação para Deleção**; se não houver outra cópia, ele recebe alerta de **Única Cópia**.
 - Uma cópia pode ter **Marcação de Backup** ou **Marcação para Deleção**, nunca as duas.
-- **Cobertura** só existe quando a cópia marcada está em outro **Volume**.
+- **Cobertura** só existe quando a cópia marcada está em outro **Dispositivo Físico**; outra partição do mesmo disco não conta.
+- Um **Dispositivo Físico** hospeda um ou mais **Volumes**.
 
 ## Flagged ambiguities
 

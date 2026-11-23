@@ -104,12 +104,9 @@ fn subcomandos_futuros_saem_com_2_sem_criar_catalogo() {
     let tmp = tempfile::tempdir().unwrap();
     let cat = tmp.path().join("nao-criar/c.sqlite");
     let cat = cat.to_str().unwrap();
-    let casos: [(&[&str], &str); 5] = [
-        (&["marcar", "backup", "/a"], "incremento 3"),
-        (&["duplicados"], "incremento 3"),
+    let casos: [(&[&str], &str); 2] = [
         (&["servico", "autostart", "on"], "incremento 6"),
         (&["pausar", "--execucao", "3"], "incremento 6"),
-        (&["verificar"], "incremento 5"),
     ];
     for (args, esperado) in casos {
         let mut a = vec!["--catalogo", cat, "--json"];

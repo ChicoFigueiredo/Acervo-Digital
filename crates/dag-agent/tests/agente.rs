@@ -72,6 +72,7 @@ fn scan_cmd(raiz: &Path) -> Comando {
     Comando::IniciarScan {
         modo: ModoVarredura::FullScan,
         raizes: vec![raiz.to_str().unwrap().to_string()],
+        sem_hash: false,
     }
 }
 
@@ -385,12 +386,11 @@ fn comandos_futuros_continuam_nao_implementados() {
             Comando::IniciarScan {
                 modo: ModoVarredura::FastScan,
                 raizes: vec!["/x".into()],
+                sem_hash: false,
             },
             5,
         ),
-        (Comando::Relatorio, 3),
         (Comando::Pausar { execucao: None }, 6),
-        (Comando::VerificarIntegridade { raizes: vec![] }, 5),
     ] {
         let Resposta::Erro { codigo, mensagem } = a.executar(cmd) else {
             panic!()

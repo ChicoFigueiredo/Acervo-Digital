@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rustix = { version = "1", features = ["fs"] }
 ctrlc = "3"
+blake3 = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

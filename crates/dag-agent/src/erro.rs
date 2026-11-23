@@ -33,6 +33,8 @@ pub enum ErroAgente {
     },
     #[error("varredura: {0}")]
     Scan(#[from] ErroScan),
+    #[error("{0}")]
+    Duplicados(#[from] dag_store::duplicados::ErroDuplicados),
     #[error("descoberta de volumes: {0}")]
     Plataforma(#[from] dag_platform_linux::Erro),
     #[error("{0}")]
@@ -65,6 +67,7 @@ impl ErroAgente {
             Self::Scan(ErroScan::ExecucaoInexistente(_)) => "execucao_inexistente",
             Self::Scan(ErroScan::NaoRetomavel { .. }) => "nao_retomavel",
             Self::Scan(_) => "varredura",
+            Self::Duplicados(e) => e.codigo(),
             Self::Plataforma(_) => "plataforma",
             Self::Invalido(_) => "invalido",
             Self::NaoEncontrado(_) => "nao_encontrado",

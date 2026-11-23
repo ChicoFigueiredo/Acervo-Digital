@@ -111,6 +111,62 @@ pub fn tem_cobertura(dispositivo: DispositivoId, copias: &[Copia], marcacoes: &[
         })
 }
 
+/// Cópia de um Grupo de Duplicados com a Marcação que vale para ela (própria ou de regra).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopiaMarcada {
+    pub copia: Copia,
+    pub marcacao: Option<(TipoMarcacao, EstadoMarcacao)>,
+}
+
+/// Divisão do espaço recuperável de um Grupo de Duplicados (A-31).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DivisaoEspaco {
+    /// Cópias com Marcação para Deleção ativa.
+    pub marcadas: Vec<ArquivoId>,
+    /// Cópias redundantes sem marcação (estimativa).
+    pub estimadas: Vec<ArquivoId>,
+}
+
+/// Espaço recuperável de um grupo. As cópias são Arquivos Físicos distintos (hard links já
+/// contados uma vez), então cada cópia vale o tamanho do arquivo.
+///
+/// * `marcadas`: toda cópia com Marcação para Deleção **ativa**.
+/// * `estimadas`: cópias sem Marcação além da Cópia Principal. Cópia com Marcação de Backup
+///   fica de fora (preservada), Marcação Pendente sai de todas as contas, e ao menos uma cópia
+///   sobrevive sempre: se nada fica de pé (Principal marcada para Deleção, sem Backup nem
+///   Pendente), a de menor id entre as sem marcação é poupada.
+#[must_use]
+pub fn espaco_recuperavel(copias: &[CopiaMarcada], principal: Option<ArquivoId>) -> DivisaoEspaco {
+    let mut r = DivisaoEspaco::default();
+    let mut sem_marca: Vec<ArquivoId> = Vec::new();
+    let mut sobreviventes = 0usize;
+    for c in copias {
+        match c.marcacao {
+            Some((TipoMarcacao::Delecao, EstadoMarcacao::Ativa)) => {
+                r.marcadas.push(c.copia.arquivo)
+            }
+            Some((TipoMarcacao::Backup, EstadoMarcacao::Ativa) | (_, EstadoMarcacao::Pendente)) => {
+                sobreviventes += 1;
+            }
+            None => sem_marca.push(c.copia.arquivo),
+        }
+    }
+    sem_marca.sort();
+    for a in &sem_marca {
+        if Some(*a) == principal {
+            sobreviventes += 1;
+        } else {
+            r.estimadas.push(*a);
+        }
+    }
+    if sobreviventes == 0 && !r.estimadas.is_empty() {
+        // Nada ficaria de pé: poupa a de menor id.
+        r.estimadas.remove(0);
+    }
+    r.marcadas.sort();
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +275,49 @@ mod tests {
         mk.confirmar(HashCompleto([2; 32]));
         assert!(mk.conta());
         assert_eq!(mk.hash_na_marcacao, HashCompleto([2; 32]));
+    }
+
+    fn cm(
+        arq: i64,
+        vol: i64,
+        disp: i64,
+        m: Option<(TipoMarcacao, EstadoMarcacao)>,
+    ) -> CopiaMarcada {
+        CopiaMarcada {
+            copia: c(arq, vol, disp),
+            marcacao: m,
+        }
+    }
+
+    #[test]
+    fn espaco_marcadas_estimadas_e_backup() {
+        use EstadoMarcacao::{Ativa, Pendente};
+        use TipoMarcacao::{Backup, Delecao};
+        // 1 principal sem marca, 2 deleção, 3 backup, 4 sem marca, 5 deleção pendente
+        let cs = [
+            cm(1, 1, 1, None),
+            cm(2, 2, 2, Some((Delecao, Ativa))),
+            cm(3, 3, 3, Some((Backup, Ativa))),
+            cm(4, 4, 4, None),
+            cm(5, 5, 5, Some((Delecao, Pendente))),
+        ];
+        let d = espaco_recuperavel(&cs, Some(ArquivoId(1)));
+        assert_eq!(d.marcadas, vec![ArquivoId(2)]);
+        assert_eq!(d.estimadas, vec![ArquivoId(4)]);
+    }
+
+    #[test]
+    fn espaco_sempre_poupa_uma_copia() {
+        use EstadoMarcacao::Ativa;
+        use TipoMarcacao::Delecao;
+        // Principal marcada para deleção e as outras sem marca: poupa a de menor id.
+        let cs = [
+            cm(1, 1, 1, Some((Delecao, Ativa))),
+            cm(2, 2, 2, None),
+            cm(3, 3, 3, None),
+        ];
+        let d = espaco_recuperavel(&cs, Some(ArquivoId(1)));
+        assert_eq!(d.marcadas, vec![ArquivoId(1)]);
+        assert_eq!(d.estimadas, vec![ArquivoId(3)]);
     }
 }

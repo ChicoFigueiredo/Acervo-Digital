@@ -153,3 +153,58 @@ fn escala_de_um_milhao_de_entradas() {
         t.elapsed().as_secs_f64() * 1000.0
     );
 }
+
+/// Vazão do hash BLAKE3 em ~1 GiB (`DAG_BENCH_HASH_MIB` muda o tamanho). Rode com
+/// `cargo test -p dag-scanner --release --test escala -- --ignored --nocapture vazao_do_hash`.
+/// Em arquivos recém-gravados o cache de página domina: o número mede CPU + leitura do cache.
+#[test]
+#[ignore = "grava ~1 GiB; rode com --ignored --nocapture"]
+fn vazao_do_hash() {
+    use dag_core::ExecucaoId;
+    use dag_scanner::{ConfigHash, EtapaHash};
+    use std::io::Write as _;
+
+    let mib = env_usize("DAG_BENCH_HASH_MIB", 1024);
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("acervo");
+    fs::create_dir_all(&raiz).unwrap();
+    let pedaco: Vec<u8> = (0..(1usize << 20))
+        .map(|i| (i * 31 + i / 7) as u8)
+        .collect();
+    let arquivos = 16usize;
+    let por_arquivo = mib / arquivos;
+    for a in 0..arquivos {
+        let mut f = File::create(raiz.join(format!("g{a:02}.bin"))).unwrap();
+        for k in 0..por_arquivo {
+            let mut p = pedaco.clone();
+            p[0] = a as u8;
+            p[1] = k as u8;
+            f.write_all(&p).unwrap();
+        }
+    }
+    let mut cat = Catalogo::abrir(tmp.path().join("catalogo.sqlite")).unwrap();
+    let run = scan(&raiz).executar(&mut cat).unwrap().execucao_id;
+    for leitores in [1usize, 2, 4] {
+        let t = Instant::now();
+        let r = EtapaHash::nova(ExecucaoId(run))
+            .com_config(ConfigHash {
+                concorrencia: leitores,
+                ..ConfigHash::default()
+            })
+            .executar(&mut cat)
+            .unwrap();
+        let s = t.elapsed().as_secs_f64();
+        println!(
+            "hash: {leitores} leitor(es): {} MiB em {s:.2}s = {:.0} MB/s (hasheados {}, reaproveitados {})",
+            r.bytes_lidos >> 20,
+            r.bytes_lidos as f64 / 1e6 / s,
+            r.hasheados,
+            r.reaproveitados
+        );
+        // Zera os hashes para a próxima rodada medir leitura de novo.
+        cat.armazem()
+            .conexao()
+            .execute("DELETE FROM hashes", [])
+            .unwrap();
+    }
+}

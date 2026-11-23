@@ -8,6 +8,7 @@
 pub mod classificacao;
 pub mod comando;
 pub mod descoberta;
+pub mod duplicados;
 pub mod formato;
 pub mod hash;
 pub mod ids;
@@ -21,10 +22,17 @@ pub use classificacao::{
     identificar_por_assinatura, identificar_por_extensao, verificar_divergencia,
 };
 pub use comando::{
-    AcaoServico, Alvo, Comando, EntradaExploracao, GrupoDuplicados, Pedido, Relatorio, Resposta,
-    ResumoCatalogo, StatusExecucao, TipoEntradaExploracao, VolumeInfo,
+    AcaoServico, Alvo, Comando, EntradaExploracao, Pedido, Resposta, ResumoCatalogo,
+    StatusExecucao, TipoEntradaExploracao, VolumeInfo,
 };
 pub use descoberta::{DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
+pub use duplicados::{
+    AlertaUnicaCopia, ArquivoSemCobertura, ClasseRecuperavel, CoberturaArquivo, CoberturaPasta,
+    CoberturaVolume, CopiaGrupo, DadosRelatorio, DetalheGrupo, EscopoMarcacao, EspacoItem,
+    FormatoExportacao, GrupoDuplicados, LIMITACOES_ESPACO, LinhaMarcacao, MarcacaoDaCopia,
+    MarcacaoInfo, ModoPrincipal, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados,
+    ResumoHash, ResumoVerificacao, TipoRelatorio,
+};
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
 pub use tipos::{

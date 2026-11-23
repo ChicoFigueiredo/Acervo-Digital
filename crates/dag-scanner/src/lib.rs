@@ -1,6 +1,6 @@
 //! Full Scan somente-leitura (fase de inventário): percorre as raízes escolhidas, grava pastas,
 //! arquivos, symlinks e entradas especiais no Catálogo e agrega os totais. **Não calcula hash**
-//! (incremento posterior) e **nunca abre o conteúdo nem modifica** nada do que varre.
+//! (isso é a etapa [`EtapaHash`]) e **nunca modifica** nada do que varre.
 //!
 //! # Pipeline
 //!
@@ -34,6 +34,7 @@ mod classificador;
 mod config;
 mod controle;
 mod erro;
+mod hash;
 mod scan;
 mod visita;
 
@@ -41,4 +42,8 @@ pub use classificador::{Classificador, FonteEvidencia, SemClassificacao, TipoDet
 pub use config::{Casamento, ConfigScan, Exclusao, FaseProgresso, Progresso};
 pub use controle::{ControleScan, EstadoControle};
 pub use erro::ErroScan;
+pub use hash::{
+    ConfigHash, Desfecho, EtapaHash, ProgressoHash, ResultadoHash, ResultadoVerificacao,
+    VerificacaoIntegridade,
+};
 pub use scan::{DesfechoScan, FullScan, ResultadoScan};

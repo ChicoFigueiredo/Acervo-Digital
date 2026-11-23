@@ -4,6 +4,8 @@
 //!
 //! O worker é o único escritor; a GUI e a CLI leem pela conexão de leitura (WAL).
 
+pub mod duplicados;
+pub mod hashes;
 pub mod inventario;
 
 use std::path::Path;

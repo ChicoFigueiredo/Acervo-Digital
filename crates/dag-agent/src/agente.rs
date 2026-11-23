@@ -10,12 +10,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dag_core::formato::{bytes_humanos, inteiro_pt_br};
 use dag_core::{
-    Comando, EstadoExecucao, EtapaVarredura, ExecucaoId, ModoVarredura, Resposta, ResumoCatalogo,
-    StatusExecucao, TipoDispositivo, VolumeDescoberto, VolumeId, VolumeInfo,
+    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, ExecucaoId, ModoVarredura,
+    OrdemDuplicados, Pedido, Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash,
+    ResumoVerificacao, StatusExecucao, TipoDispositivo, TipoMarcacao, TipoRelatorio,
+    VolumeDescoberto, VolumeId, VolumeInfo,
 };
 use dag_platform_linux::descobrir_volumes;
-use dag_scanner::{ControleScan, DesfechoScan, FaseProgresso, FullScan, Progresso, ResultadoScan};
+use dag_scanner::{
+    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FullScan, Progresso, ProgressoHash,
+    ResultadoScan, VerificacaoIntegridade,
+};
 use dag_store::Catalogo;
+use dag_store::duplicados::{self, Escopo, FiltroGrupos};
 use dag_store::inventario::{self, EstadoScan, FaseScan, registrar_volume};
 use rusqlite::{Connection, OpenFlags, params};
 
@@ -29,6 +35,8 @@ use crate::trava::GuardaEscritor;
 type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
 
 const STATUS_LIMITE: i64 = 10;
+const PAGINA_PADRAO: u32 = 50;
+const PAGINA_MAXIMA: u32 = 1000;
 
 fn agora() -> i64 {
     SystemTime::now()
@@ -36,10 +44,18 @@ fn agora() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// `true` para comandos que só leem o Catálogo (não exigem ser o escritor).
+/// `true` para comandos que só leem o Catálogo (não exigem ser o escritor). Relatório com
+/// `saida` grava um arquivo escolhido pelo usuário, nunca o Catálogo.
 #[must_use]
 pub fn somente_leitura(c: &Comando) -> bool {
-    matches!(c, Comando::Status { .. } | Comando::Explorar { .. })
+    matches!(
+        c,
+        Comando::Status { .. }
+            | Comando::Explorar { .. }
+            | Comando::ListarDuplicados { .. }
+            | Comando::DetalharGrupo { .. }
+            | Comando::Relatorio { .. }
+    )
 }
 
 /// Incremento em que o comando passa a existir, se ainda não foi implementado.
@@ -49,16 +65,9 @@ pub fn incremento_pendente(c: &Comando) -> Option<u8> {
         Comando::IniciarScan {
             modo: ModoVarredura::FastScan,
             ..
-        }
-        | Comando::VerificarIntegridade { .. } => Some(5),
+        } => Some(5),
         // Pausar/cancelar entre processos e o serviço exigem o worker com IPC.
         Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Servico { .. } => Some(6),
-        Comando::ListarDuplicados { .. }
-        | Comando::MarcarBackup { .. }
-        | Comando::MarcarDelecao { .. }
-        | Comando::Desmarcar { .. }
-        | Comando::DefinirPrioridadeVolume { .. }
-        | Comando::Relatorio => Some(3),
         _ => None,
     }
 }
@@ -71,6 +80,7 @@ pub struct Agente {
     controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     volumes_fixos: Option<Vec<VolumeDescoberto>>,
+    autor: Autor,
 }
 
 impl fmt::Debug for Agente {
@@ -130,7 +140,15 @@ impl Agente {
             controle: ControleScan::novo(),
             progresso: Some(progresso_stderr()),
             volumes_fixos: None,
+            autor: Autor::Cli,
         }
+    }
+
+    /// Quem originou os pedidos (gravado no histórico de Marcações). Padrão: CLI.
+    #[must_use]
+    pub fn com_autor(mut self, autor: Autor) -> Self {
+        self.autor = autor;
+        self
     }
 
     /// Callback de progresso da varredura (padrão: linha em stderr).
@@ -176,6 +194,14 @@ impl Agente {
         self.guarda.is_some()
     }
 
+    /// Executa um [`Pedido`] com o autor dele (GUI, CLI ou MCP).
+    pub fn executar_pedido(&mut self, pedido: Pedido) -> Resposta {
+        let anterior = std::mem::replace(&mut self.autor, pedido.autor);
+        let r = self.executar(pedido.comando);
+        self.autor = anterior;
+        r
+    }
+
     /// Executa um comando; falhas viram [`Resposta::Erro`].
     pub fn executar(&mut self, comando: Comando) -> Resposta {
         self.tentar(comando).unwrap_or_else(|e| e.para_resposta())
@@ -192,7 +218,9 @@ impl Agente {
         }
         match comando {
             Comando::ListarVolumes => self.listar_volumes(),
-            Comando::IniciarScan { raizes, .. } => self.full_scan(&raizes),
+            Comando::IniciarScan {
+                raizes, sem_hash, ..
+            } => self.full_scan(&raizes, sem_hash),
             Comando::Retomar {
                 execucao: Some(id), ..
             } => self.retomar_scan(id),
@@ -211,6 +239,63 @@ impl Agente {
                 cursor.as_deref(),
             ),
             Comando::BackupCatalogo { destino } => self.backup(Path::new(&destino)),
+            Comando::ListarDuplicados {
+                volume,
+                tamanho_minimo,
+                ordem,
+                limite,
+                cursor,
+            } => self.listar_duplicados(volume.as_deref(), tamanho_minimo, ordem, limite, cursor),
+            Comando::DetalharGrupo { grupo } => Ok(Resposta::Grupo {
+                detalhe: duplicados::detalhar_grupo(self.catalogo.armazem().conexao(), grupo)?,
+            }),
+            Comando::DefinirCopiaPrincipal { grupo, arquivo } => {
+                duplicados::definir_copia_principal(
+                    &mut self.catalogo,
+                    grupo,
+                    arquivo.as_ref(),
+                    agora(),
+                )?;
+                Ok(Resposta::Grupo {
+                    detalhe: duplicados::detalhar_grupo(self.catalogo.armazem().conexao(), grupo)?,
+                })
+            }
+            Comando::MarcarBackup { alvo } => self.marcar(TipoMarcacao::Backup, &alvo),
+            Comando::MarcarDelecao { alvo } => self.marcar(TipoMarcacao::Delecao, &alvo),
+            Comando::Desmarcar { alvo } => Ok(Resposta::Desmarcado {
+                removidas: duplicados::desmarcar(&mut self.catalogo, &alvo, self.autor, agora())?,
+            }),
+            Comando::ConfirmarMarcacao { marcacao } => Ok(Resposta::Marcacao {
+                resultado: duplicados::confirmar(
+                    &mut self.catalogo,
+                    marcacao,
+                    self.autor,
+                    agora(),
+                )?,
+            }),
+            Comando::DefinirPrioridadeVolume { ordem } => {
+                let itens = duplicados::definir_prioridade(
+                    &mut self.catalogo,
+                    &ordem,
+                    self.autor,
+                    agora(),
+                )?;
+                let lista: Vec<&str> = itens.iter().map(|i| i.nome.as_str()).collect();
+                Ok(Resposta::Ok {
+                    mensagem: Some(format!(
+                        "Prioridade de Volume definida: {}",
+                        lista.join(" > ")
+                    )),
+                })
+            }
+            Comando::Relatorio {
+                tipo,
+                nivel,
+                limite,
+                cursor,
+                saida,
+            } => self.relatorio(tipo, nivel, limite, cursor.as_deref(), saida.as_deref()),
+            Comando::VerificarIntegridade { raizes } => self.verificar(&raizes),
             _ => Err(ErroAgente::NaoImplementado(0)),
         }
     }
@@ -278,32 +363,64 @@ impl Agente {
         Ok(scan)
     }
 
-    fn full_scan(&mut self, raizes: &[String]) -> Result<Resposta, ErroAgente> {
+    fn full_scan(&mut self, raizes: &[String], sem_hash: bool) -> Result<Resposta, ErroAgente> {
         if raizes.is_empty() {
             return Err(ErroAgente::Invalido("informe ao menos uma raiz".into()));
         }
         let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect())?;
         let r = scan.executar(&mut self.catalogo)?;
-        self.concluir_scan(r)
+        self.concluir_scan(r, sem_hash)
     }
 
     fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
         let scan = self.novo_scan(Vec::new())?;
         let r = scan.retomar(&mut self.catalogo, id.0)?;
-        self.concluir_scan(r)
+        self.concluir_scan(r, false)
     }
 
-    fn concluir_scan(&mut self, r: ResultadoScan) -> Result<Resposta, ErroAgente> {
-        let desfecho = match r.desfecho {
+    /// Pós-inventário: classificação por caminho, Hash Completo, reconstrução dos Grupos de
+    /// Duplicados e reavaliação das Marcações (estas três só sem `sem_hash`).
+    fn concluir_scan(&mut self, r: ResultadoScan, sem_hash: bool) -> Result<Resposta, ErroAgente> {
+        let mut desfecho = match r.desfecho {
             DesfechoScan::Concluida => "concluida",
             DesfechoScan::ConcluidaComErros => "concluida_com_erros",
             DesfechoScan::Cancelada => "cancelada",
         };
+        let mut erros = r.contadores.erros;
+        let mut duracao = r.duracao;
+        let (mut hash, mut dup) = (None, None);
         if r.desfecho != DesfechoScan::Cancelada {
             if self.progresso.is_some() {
                 eprintln!("classificando finalidade (por caminho)...");
             }
             classificar_execucao(&mut self.catalogo, r.execucao_id, agora())?;
+            if !sem_hash {
+                let mut etapa =
+                    EtapaHash::nova(ExecucaoId(r.execucao_id)).com_controle(self.controle.clone());
+                if self.progresso.is_some() {
+                    etapa = etapa.com_progresso(progresso_hash_stderr());
+                }
+                let h = etapa.executar(&mut self.catalogo)?;
+                duracao += h.duracao;
+                erros += h.erros;
+                let cancelada = h.desfecho == DesfechoScan::Cancelada;
+                hash = Some(ResumoHash {
+                    desfecho: nome_desfecho(h.desfecho).to_string(),
+                    hasheados: h.hasheados,
+                    reaproveitados: h.reaproveitados,
+                    bytes_lidos: h.bytes_lidos,
+                    erros: h.erros,
+                    duracao_ms: u64::try_from(h.duracao.as_millis()).unwrap_or(u64::MAX),
+                });
+                if cancelada {
+                    desfecho = "cancelada";
+                } else {
+                    if h.erros > 0 {
+                        desfecho = "concluida_com_erros";
+                    }
+                    dup = Some(self.atualizar_duplicados()?);
+                }
+            }
         }
         Ok(Resposta::ScanConcluido {
             execucao: ExecucaoId(r.execucao_id),
@@ -313,8 +430,140 @@ impl Agente {
             especiais: r.contadores.especiais,
             bytes_logicos: r.contadores.bytes_logicos,
             ignorados: r.contadores.ignorados,
-            erros: r.contadores.erros,
-            duracao_ms: u64::try_from(r.duracao.as_millis()).unwrap_or(u64::MAX),
+            erros,
+            duracao_ms: u64::try_from(duracao.as_millis()).unwrap_or(u64::MAX),
+            hash,
+            duplicados: dup,
+        })
+    }
+
+    /// Reconstrói os Grupos de Duplicados e reavalia as Marcações.
+    fn atualizar_duplicados(&mut self) -> Result<ResumoDuplicados, ErroAgente> {
+        if self.progresso.is_some() {
+            eprintln!("[duplicados] reconstruindo Grupos de Duplicados...");
+        }
+        let t = agora();
+        duplicados::reconstruir_grupos(&mut self.catalogo, Escopo::Tudo, self.autor, t)?;
+        if self.progresso.is_some() {
+            eprintln!("[marcações] reavaliando Marcações contra o hash atual...");
+        }
+        let pendentes = duplicados::reavaliar_marcacoes(&mut self.catalogo, self.autor, t)?;
+        let mut r = duplicados::resumo_duplicados(self.catalogo.armazem().conexao())?;
+        if pendentes > 0 && self.progresso.is_some() {
+            eprintln!(
+                "[marcações] {pendentes} Marcação(ões) ficaram pendentes (conteúdo mudou); confirme com `dag confirmar`."
+            );
+        }
+        r.marcacoes_pendentes = r.marcacoes_pendentes.max(pendentes);
+        Ok(r)
+    }
+
+    // ------------------------------------------------------------------ duplicados e marcações
+
+    fn listar_duplicados(
+        &self,
+        volume: Option<&str>,
+        tamanho_minimo: Option<u64>,
+        ordem: Option<OrdemDuplicados>,
+        limite: Option<u32>,
+        cursor: Option<String>,
+    ) -> Result<Resposta, ErroAgente> {
+        let conn = self.catalogo.armazem().conexao();
+        let filtro = FiltroGrupos {
+            volume: duplicados::filtro_por_volume(conn, volume)?,
+            tamanho_minimo: tamanho_minimo.unwrap_or(0),
+            ordem: ordem.unwrap_or_default(),
+        };
+        let p = duplicados::listar_grupos(
+            conn,
+            &filtro,
+            limite.unwrap_or(PAGINA_PADRAO).min(PAGINA_MAXIMA),
+            cursor.as_deref(),
+        )?;
+        Ok(Resposta::Duplicados {
+            grupos: p.grupos,
+            total: p.total,
+            proximo_cursor: p.proximo_cursor,
+        })
+    }
+
+    fn marcar(&mut self, tipo: TipoMarcacao, alvo: &Alvo) -> Result<Resposta, ErroAgente> {
+        Ok(Resposta::Marcacao {
+            resultado: duplicados::marcar(&mut self.catalogo, tipo, alvo, self.autor, agora())?,
+        })
+    }
+
+    fn relatorio(
+        &self,
+        tipo: TipoRelatorio,
+        nivel: Option<dag_core::NivelEspaco>,
+        limite: Option<u32>,
+        cursor: Option<&str>,
+        saida: Option<&str>,
+    ) -> Result<Resposta, ErroAgente> {
+        let conn = self.catalogo.armazem().conexao();
+        if let Some(destino) = saida {
+            let (formato, linhas) =
+                duplicados::exportar_relatorio(conn, tipo, Path::new(destino), agora())?;
+            return Ok(Resposta::RelatorioExportado {
+                tipo,
+                caminho: destino.to_string(),
+                formato,
+                linhas,
+            });
+        }
+        let limite = limite.unwrap_or(PAGINA_PADRAO).min(PAGINA_MAXIMA);
+        let (dados, proximo_cursor) = match tipo {
+            TipoRelatorio::Cobertura => {
+                duplicados::relatorio_cobertura(conn, None, limite, cursor)?
+            }
+            TipoRelatorio::SemCobertura => {
+                duplicados::relatorio_sem_cobertura(conn, None, limite, cursor)?
+            }
+            TipoRelatorio::Espaco => {
+                duplicados::relatorio_espaco(conn, nivel.unwrap_or_default(), limite, cursor)?
+            }
+            TipoRelatorio::Marcacoes => {
+                let depois = cursor
+                    .map(|c| {
+                        c.parse::<i64>()
+                            .map_err(|_| ErroAgente::Invalido(format!("cursor inválido: `{c}`")))
+                    })
+                    .transpose()?;
+                let (marcacoes, prox) = duplicados::listar_marcacoes(conn, depois, limite)?;
+                (
+                    dag_core::DadosRelatorio::Marcacoes { marcacoes },
+                    prox.map(|p| p.to_string()),
+                )
+            }
+        };
+        Ok(Resposta::Relatorio {
+            dados,
+            proximo_cursor,
+        })
+    }
+
+    /// Verificação de Integridade: relê arquivos já hasheados e compara com o hash guardado.
+    fn verificar(&mut self, raizes: &[String]) -> Result<Resposta, ErroAgente> {
+        let mut v = VerificacaoIntegridade::nova().com_controle(self.controle.clone());
+        if !raizes.is_empty() {
+            v = v.raizes(raizes.iter().map(PathBuf::from));
+        }
+        if self.progresso.is_some() {
+            v = v.com_progresso(progresso_hash_stderr());
+        }
+        let r = v.executar(&mut self.catalogo)?;
+        Ok(Resposta::Verificacao {
+            resumo: ResumoVerificacao {
+                desfecho: nome_desfecho(r.desfecho).to_string(),
+                verificados: r.verificados,
+                divergentes: r.divergentes.len() as u64,
+                arquivos_divergentes: r.divergentes,
+                alterados: r.alterados,
+                bytes_lidos: r.bytes_lidos,
+                erros: r.erros,
+                duracao_ms: u64::try_from(r.duracao.as_millis()).unwrap_or(u64::MAX),
+            },
         })
     }
 
@@ -453,7 +702,45 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
     }
 }
 
+fn nome_desfecho(d: DesfechoScan) -> &'static str {
+    match d {
+        DesfechoScan::Concluida => "concluida",
+        DesfechoScan::ConcluidaComErros => "concluida_com_erros",
+        DesfechoScan::Cancelada => "cancelada",
+    }
+}
+
 // ---------------------------------------------------------------------- progresso em stderr
+
+/// Progresso da etapa de hash (e da verificação) em stderr: uma linha por 2 s sem terminal.
+fn progresso_hash_stderr() -> impl FnMut(&ProgressoHash) + Send + 'static {
+    let tty = std::io::stderr().is_terminal();
+    let inicio = Instant::now();
+    let mut ultimo_ms = 0u64;
+    move |p: &ProgressoHash| {
+        let agora_ms = u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let fim = p.arquivos_total > 0 && p.arquivos_feitos >= p.arquivos_total;
+        if !tty && !fim && agora_ms < ultimo_ms + 2000 {
+            return;
+        }
+        ultimo_ms = agora_ms;
+        let linha = format!(
+            "[hash] {}/{} arquivos, {} de {} lidos | {}/s | {} reaproveitados",
+            inteiro_pt_br(p.arquivos_feitos),
+            inteiro_pt_br(p.arquivos_total),
+            bytes_humanos(p.bytes_lidos),
+            bytes_humanos(p.bytes_total),
+            bytes_humanos(p.bytes_por_seg as u64),
+            inteiro_pt_br(p.reaproveitados),
+        );
+        let mut e = std::io::stderr().lock();
+        let _ = if tty {
+            write!(e, "\r\x1b[2K{linha}{}", if fim { "\n" } else { "" })
+        } else {
+            writeln!(e, "{linha}")
+        };
+    }
+}
 
 fn progresso_stderr() -> CallbackProgresso {
     let tty = std::io::stderr().is_terminal();

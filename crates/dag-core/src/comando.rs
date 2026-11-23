@@ -4,8 +4,10 @@
 //! O transporte (socket local, etc.) não faz parte deste crate; só o formato.
 
 use crate::{
-    ArquivoId, Autor, DispositivoId, EstadoExecucao, EtapaVarredura, ExecucaoId, Finalidade,
-    GrupoId, HashCompleto, ModoVarredura, TipoDispositivo, VolumeId,
+    ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
+    ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId, MarcacaoInfo,
+    ModoVarredura, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados, ResumoHash,
+    ResumoVerificacao, TipoDispositivo, TipoRelatorio, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +18,21 @@ pub struct Pedido {
     pub comando: Comando,
 }
 
-/// Alvo de uma Marcação: caminho absoluto ou arquivo já conhecido do Catálogo.
+/// Alvo de uma Marcação (ou de uma escolha de Cópia Principal).
+///
+/// * `Caminho` / `Arquivo`: um arquivo. Se o caminho for de um hard link, vale o arquivo físico.
+/// * `Grupo`: Marcação de Backup = todas as cópias do grupo; Marcação para Deleção = todas as
+///   cópias **menos a Cópia Principal**.
+/// * `Volume` / `Pasta`: regra; vale para todos os arquivos sob o Volume ou a pasta.
+///   `Volume` aceita id numérico, rótulo, ponto de montagem ou `platform_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tipo", content = "valor", rename_all = "snake_case")]
 pub enum Alvo {
     Caminho(String),
     Arquivo(ArquivoId),
+    Grupo(GrupoId),
+    Volume(String),
+    Pasta(String),
 }
 
 /// Ação sobre o serviço em segundo plano (opt-in, A-14).
@@ -45,9 +56,14 @@ pub enum Comando {
     /// Lista Volumes conhecidos (conectados ou não).
     ListarVolumes,
     /// Inicia Full Scan ou Fast Scan sobre as Raízes (caminhos) dadas.
+    ///
+    /// O Full Scan segue com a etapa de Hash Completo, a reconstrução dos Grupos de Duplicados
+    /// e a reavaliação das Marcações; `sem_hash` pula essas três etapas (inventário rápido).
     IniciarScan {
         modo: ModoVarredura,
         raizes: Vec<String>,
+        #[serde(default)]
+        sem_hash: bool,
     },
     /// Pausa a execução indicada (ou a única em andamento).
     Pausar { execucao: Option<ExecucaoId> },
@@ -57,21 +73,46 @@ pub enum Comando {
     Cancelar { execucao: Option<ExecucaoId> },
     /// Consulta progresso das execuções.
     Status { execucao: Option<ExecucaoId> },
-    /// Lista Grupos de Duplicados, paginado.
+    /// Lista Grupos de Duplicados, paginado por cursor (keyset). `volume` filtra grupos com
+    /// ao menos uma cópia no Volume (id, rótulo, ponto de montagem); `tamanho_minimo` em bytes;
+    /// `ordem` padrão = maior espaço recuperável primeiro.
     ListarDuplicados {
+        volume: Option<String>,
+        tamanho_minimo: Option<u64>,
+        ordem: Option<OrdemDuplicados>,
         limite: Option<u32>,
-        deslocamento: Option<u32>,
+        cursor: Option<String>,
     },
-    /// Cria Marcação de Backup.
+    /// Um Grupo de Duplicados com todas as cópias, Marcações e Cobertura.
+    DetalharGrupo { grupo: GrupoId },
+    /// Troca manual da Cópia Principal do grupo; `arquivo: None` volta à escolha automática
+    /// pela Prioridade de Volume. A escolha manual persiste entre reconstruções.
+    DefinirCopiaPrincipal {
+        grupo: GrupoId,
+        arquivo: Option<Alvo>,
+    },
+    /// Cria Marcação de Backup (somente no Catálogo).
     MarcarBackup { alvo: Alvo },
     /// Cria Marcação para Deleção (não apaga nem move nada).
     MarcarDelecao { alvo: Alvo },
-    /// Remove a Marcação do alvo.
+    /// Remove a Marcação do alvo (Marcação de arquivo, de grupo ou regra de Volume/pasta).
     Desmarcar { alvo: Alvo },
-    /// Define a Prioridade de Volume: Volumes/pastas (caminhos) do mais ao menos prioritário.
+    /// Confirma de novo uma Marcação Pendente, adotando o Hash Completo atual do arquivo.
+    ConfirmarMarcacao { marcacao: MarcacaoId },
+    /// Define a Prioridade de Volume: Volumes ou pastas do mais ao menos prioritário. Cada item
+    /// é id/rótulo/ponto de montagem de um Volume ou o caminho de uma pasta catalogada.
     DefinirPrioridadeVolume { ordem: Vec<String> },
-    /// Gera relatório de espaço, duplicados e Cobertura.
-    Relatorio,
+    /// Relatório de Cobertura, arquivos sem Cobertura, espaço recuperável ou Marcações.
+    /// Com `saida` (`.csv` ou `.json`), grava o relatório inteiro nesse caminho (sem
+    /// sobrescrever arquivo existente); sem `saida`, devolve uma página (`limite`/`cursor`).
+    /// `nivel` só vale para `Espaco`.
+    Relatorio {
+        tipo: TipoRelatorio,
+        nivel: Option<NivelEspaco>,
+        limite: Option<u32>,
+        cursor: Option<String>,
+        saida: Option<String>,
+    },
     /// Verificação de Integridade sobre as Raízes (todas, se vazio).
     VerificarIntegridade { raizes: Vec<String> },
     /// Gerencia o serviço em segundo plano.
@@ -167,28 +208,6 @@ pub struct EntradaExploracao {
     pub mtime_ns: Option<i64>,
 }
 
-/// Grupo de Duplicados resumido.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrupoDuplicados {
-    pub id: GrupoId,
-    pub hash: HashCompleto,
-    pub tamanho: u64,
-    pub copias: Vec<ArquivoId>,
-    pub copia_principal: Option<ArquivoId>,
-    pub espaco_recuperavel_bytes: u64,
-}
-
-/// Relatório agregado.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Relatorio {
-    pub arquivos: u64,
-    pub bytes_logicos: u64,
-    pub grupos_duplicados: u64,
-    pub espaco_recuperavel_bytes: u64,
-    pub arquivos_com_cobertura: u64,
-    pub unicas_copias_marcadas_delecao: u64,
-}
-
 /// Resposta do worker a um [`Comando`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "resposta", rename_all = "snake_case")]
@@ -219,6 +238,12 @@ pub enum Resposta {
         ignorados: u64,
         erros: u64,
         duracao_ms: u64,
+        /// Etapa de Hash Completo (ausente com `sem_hash`).
+        #[serde(default)]
+        hash: Option<ResumoHash>,
+        /// Reconstrução de duplicados e reavaliação de Marcações (ausente com `sem_hash`).
+        #[serde(default)]
+        duplicados: Option<ResumoDuplicados>,
     },
     Explorar {
         /// Caminho explorado; `None` = Raízes.
@@ -228,10 +253,35 @@ pub enum Resposta {
     },
     Duplicados {
         grupos: Vec<GrupoDuplicados>,
+        /// Grupos que casam com o filtro (todas as páginas).
         total: u64,
+        proximo_cursor: Option<String>,
     },
+    Grupo {
+        detalhe: DetalheGrupo,
+    },
+    /// Marcação criada ou confirmada.
+    Marcacao {
+        resultado: ResultadoMarcacao,
+    },
+    /// Marcações removidas por `Desmarcar`.
+    Desmarcado {
+        removidas: Vec<MarcacaoInfo>,
+    },
+    /// Uma página de relatório.
     Relatorio {
-        relatorio: Relatorio,
+        dados: DadosRelatorio,
+        proximo_cursor: Option<String>,
+    },
+    /// Relatório gravado em `caminho`.
+    RelatorioExportado {
+        tipo: TipoRelatorio,
+        caminho: String,
+        formato: FormatoExportacao,
+        linhas: u64,
+    },
+    Verificacao {
+        resumo: ResumoVerificacao,
     },
     /// Falha; `codigo` é estável para máquinas, `mensagem` é para humanos.
     Erro {
@@ -256,6 +306,37 @@ mod tests {
             Comando::IniciarScan {
                 modo: ModoVarredura::FastScan,
                 raizes: vec!["/tmp".into()],
+                sem_hash: true,
+            },
+            Comando::ListarDuplicados {
+                volume: Some("SSD".into()),
+                tamanho_minimo: Some(10),
+                ordem: Some(OrdemDuplicados::Tamanho),
+                limite: Some(5),
+                cursor: None,
+            },
+            Comando::DefinirCopiaPrincipal {
+                grupo: GrupoId(2),
+                arquivo: Some(Alvo::Arquivo(ArquivoId(4))),
+            },
+            Comando::MarcarDelecao {
+                alvo: Alvo::Grupo(GrupoId(1)),
+            },
+            Comando::MarcarBackup {
+                alvo: Alvo::Volume("HD-Externo".into()),
+            },
+            Comando::Desmarcar {
+                alvo: Alvo::Pasta("/a/b".into()),
+            },
+            Comando::ConfirmarMarcacao {
+                marcacao: MarcacaoId(7),
+            },
+            Comando::Relatorio {
+                tipo: TipoRelatorio::Espaco,
+                nivel: Some(NivelEspaco::Pasta),
+                limite: None,
+                cursor: None,
+                saida: Some("/tmp/r.csv".into()),
             },
             Comando::Pausar { execucao: None },
             Comando::MarcarBackup {
@@ -285,10 +366,23 @@ mod tests {
         let c = Comando::IniciarScan {
             modo: ModoVarredura::FullScan,
             raizes: vec!["/x".into()],
+            sem_hash: false,
         };
         let v: serde_json::Value = serde_json::to_value(&c).unwrap();
         assert_eq!(v["comando"], "iniciar_scan");
         assert_eq!(v["modo"], "full_scan");
+        // `sem_hash` é opcional no JSON (compatível com clientes antigos).
+        let antigo: Comando = serde_json::from_str(
+            r#"{"comando":"iniciar_scan","modo":"full_scan","raizes":["/x"]}"#,
+        )
+        .unwrap();
+        assert_eq!(antigo, c);
+        let m = Comando::MarcarBackup {
+            alvo: Alvo::Volume("SSD".into()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["comando"], "marcar_backup");
+        assert_eq!(v["alvo"]["tipo"], "volume");
     }
 
     #[test]
@@ -301,7 +395,13 @@ mod tests {
         assert_eq!(serde_json::from_str::<Resposta>(&j).unwrap(), r);
         let p = Pedido {
             autor: Autor::Mcp,
-            comando: Comando::Relatorio,
+            comando: Comando::Relatorio {
+                tipo: TipoRelatorio::Marcacoes,
+                nivel: None,
+                limite: None,
+                cursor: None,
+                saida: None,
+            },
         };
         let j = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Pedido>(&j).unwrap(), p);

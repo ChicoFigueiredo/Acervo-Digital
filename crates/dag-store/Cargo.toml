@@ -11,6 +11,7 @@ bancada-armazem.workspace = true
 dag-core.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

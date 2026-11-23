@@ -2,8 +2,11 @@
 
 use dag_core::formato::{bytes_humanos, data_hora_utc, inteiro_pt_br};
 use dag_core::{
-    EntradaExploracao, EstadoExecucao, Finalidade, Resposta, StatusExecucao, TipoEntradaExploracao,
-    VolumeInfo,
+    ArquivoSemCobertura, ClasseRecuperavel, CoberturaArquivo, CoberturaPasta, CoberturaVolume,
+    DadosRelatorio, DetalheGrupo, EntradaExploracao, EscopoMarcacao, EspacoItem, EstadoExecucao,
+    EstadoMarcacao, Finalidade, FormatoExportacao, GrupoDuplicados, MarcacaoInfo, ModoPrincipal,
+    NivelEspaco, Resposta, ResultadoMarcacao, ResumoDuplicados, ResumoHash, ResumoVerificacao,
+    StatusExecucao, TipoEntradaExploracao, TipoMarcacao, TipoRelatorio, VolumeInfo,
 };
 
 /// Tabela de texto: colunas alinhadas à esquerda (`false`) ou à direita (`true`).
@@ -173,6 +176,8 @@ fn scan(
     ignorados: u64,
     erros: u64,
     ms: u64,
+    hash: Option<&ResumoHash>,
+    dup: Option<&ResumoDuplicados>,
 ) -> String {
     let seg = ms as f64 / 1000.0;
     let rotulo = match desfecho {
@@ -190,8 +195,523 @@ fn scan(
         inteiro_pt_br(ignorados),
         inteiro_pt_br(erros),
     );
+    if let Some(h) = hash {
+        s.push_str(&format!(
+            "Hash Completo: {} arquivo(s) lidos ({}), {} reaproveitados, {} erro(s).\n",
+            inteiro_pt_br(h.hasheados),
+            bytes_humanos(h.bytes_lidos),
+            inteiro_pt_br(h.reaproveitados),
+            inteiro_pt_br(h.erros),
+        ));
+    }
+    if let Some(d) = dup {
+        s.push_str(&format!(
+            "Duplicados: {} grupo(s), {} cópias; espaço recuperável (estimativa): {}.\n",
+            inteiro_pt_br(d.grupos),
+            inteiro_pt_br(d.copias),
+            bytes_humanos(d.espaco_recuperavel_bytes),
+        ));
+        if d.marcacoes_pendentes > 0 {
+            s.push_str(&format!(
+                "Atenção: {} Marcação(ões) pendente(s) (o conteúdo mudou); confirme com `dag confirmar <id>`.\n",
+                inteiro_pt_br(d.marcacoes_pendentes)
+            ));
+        }
+    }
     if desfecho == "cancelada" {
         s.push_str(&format!("Retome com: dag scan --retomar {execucao}\n"));
+    }
+    s
+}
+
+fn tipo_marcacao(t: TipoMarcacao) -> &'static str {
+    match t {
+        TipoMarcacao::Backup => "backup",
+        TipoMarcacao::Delecao => "deleção",
+    }
+}
+
+fn nome_marcacao(t: TipoMarcacao) -> &'static str {
+    match t {
+        TipoMarcacao::Backup => "Marcação de Backup",
+        TipoMarcacao::Delecao => "Marcação para Deleção",
+    }
+}
+
+fn escopo(e: EscopoMarcacao) -> &'static str {
+    match e {
+        EscopoMarcacao::RegraVolume => "regra de Volume",
+        EscopoMarcacao::RegraPasta => "regra de pasta",
+        EscopoMarcacao::ManualArquivo => "manual",
+        EscopoMarcacao::ManualGrupo => "manual (grupo)",
+    }
+}
+
+fn estado_marcacao(e: EstadoMarcacao) -> &'static str {
+    match e {
+        EstadoMarcacao::Ativa => "ativa",
+        EstadoMarcacao::Pendente => "PENDENTE",
+    }
+}
+
+fn hash_curto(h: &dag_core::HashCompleto) -> String {
+    h.to_string().chars().take(12).collect()
+}
+
+pub fn duplicados(grupos: &[GrupoDuplicados], total: u64, proximo: Option<&str>) -> String {
+    if grupos.is_empty() {
+        return "Nenhum Grupo de Duplicados.\n".into();
+    }
+    let linhas: Vec<Vec<String>> = grupos
+        .iter()
+        .map(|g| {
+            let off = if g.copias_offline > 0 {
+                format!(" ({} offline)", g.copias_offline)
+            } else {
+                String::new()
+            };
+            vec![
+                g.id.to_string(),
+                bytes_humanos(g.tamanho),
+                format!("{}{off}", g.copias),
+                bytes_humanos(g.bytes_marcados_delecao),
+                bytes_humanos(g.bytes_redundantes_estimados),
+                bytes_humanos(g.espaco_recuperavel_bytes),
+                match (g.copia_principal, g.modo_principal) {
+                    (Some(a), ModoPrincipal::Manual) => format!("arq {a} (manual)"),
+                    (Some(a), ModoPrincipal::Auto) => format!("arq {a} (auto)"),
+                    (None, _) => "-".into(),
+                },
+                hash_curto(&g.hash),
+            ]
+        })
+        .collect();
+    let mut s = tabela(
+        &[
+            "GRUPO",
+            "TAMANHO",
+            "CÓPIAS",
+            "MARCADO P/ DELEÇÃO",
+            "REDUNDANTE (EST.)",
+            "RECUPERÁVEL",
+            "CÓPIA PRINCIPAL",
+            "HASH",
+        ],
+        &[true, true, false, true, true, true, false, false],
+        &linhas,
+    );
+    s.push_str(&format!(
+        "\n{} grupo(s) no total; espaço recuperável é estimativa (veja `dag relatorio espaco` para as limitações).\n",
+        inteiro_pt_br(total)
+    ));
+    if let Some(c) = proximo {
+        s.push_str(&format!("Há mais: repita com --cursor {c}\n"));
+    }
+    s
+}
+
+fn cobertura_txt(c: &CoberturaArquivo) -> String {
+    match (c.coberto, c.nao_verificada_desde) {
+        (true, Some(t)) => format!("sim (não verificada desde {})", data_hora_utc(t)),
+        (true, None) => "sim".into(),
+        (false, _) => "não".into(),
+    }
+}
+
+pub fn grupo(d: &DetalheGrupo) -> String {
+    let g = &d.grupo;
+    let mut s = format!(
+        "Grupo {} — {} × {} cópia(s) (hash {}…), Cópia Principal {}\n",
+        g.id,
+        bytes_humanos(g.tamanho),
+        g.copias,
+        hash_curto(&g.hash),
+        match g.modo_principal {
+            ModoPrincipal::Auto => "automática",
+            ModoPrincipal::Manual => "manual",
+        }
+    );
+    s.push_str(&format!(
+        "Espaço recuperável: {} marcado para Deleção + {} estimado = {}\n\n",
+        bytes_humanos(g.bytes_marcados_delecao),
+        bytes_humanos(g.bytes_redundantes_estimados),
+        bytes_humanos(g.espaco_recuperavel_bytes),
+    ));
+    let linhas: Vec<Vec<String>> = d
+        .copias
+        .iter()
+        .map(|c| {
+            let vol = c
+                .volume_rotulo
+                .clone()
+                .unwrap_or_else(|| c.volume.to_string());
+            let vol = if c.conectado {
+                vol
+            } else {
+                format!(
+                    "{vol} (offline{})",
+                    c.visto_em
+                        .map_or(String::new(), |t| format!(" desde {}", data_hora_utc(t)))
+                )
+            };
+            let mut caminho = c.caminho.clone();
+            if c.outros_caminhos > 0 {
+                caminho.push_str(&format!(" (+{} hard link)", c.outros_caminhos));
+            }
+            vec![
+                c.arquivo.to_string(),
+                vol,
+                caminho,
+                if c.principal { "sim" } else { "-" }.into(),
+                c.marcacao.as_ref().map_or("-".into(), |m| {
+                    format!(
+                        "{} #{} {} ({})",
+                        tipo_marcacao(m.tipo),
+                        m.id,
+                        estado_marcacao(m.estado),
+                        escopo(m.escopo)
+                    )
+                }),
+                cobertura_txt(&c.cobertura),
+                match c.recuperavel {
+                    ClasseRecuperavel::Nao => "-",
+                    ClasseRecuperavel::Marcada => "marcada",
+                    ClasseRecuperavel::Estimada => "estimada",
+                }
+                .into(),
+            ]
+        })
+        .collect();
+    s.push_str(&tabela(
+        &[
+            "ARQ",
+            "VOLUME",
+            "CAMINHO",
+            "PRINCIPAL",
+            "MARCAÇÃO",
+            "COBERTURA",
+            "RECUPERÁVEL",
+        ],
+        &[true, false, false, false, false, false, false],
+        &linhas,
+    ));
+    s
+}
+
+fn alerta_unica(r: &ResultadoMarcacao) -> String {
+    if r.unicas_copias_total == 0 {
+        return String::new();
+    }
+    let mut s = format!(
+        "\n⚠ ÚNICA CÓPIA: {} arquivo(s) marcado(s) para Deleção não têm nenhuma outra cópia no Catálogo.\n",
+        inteiro_pt_br(r.unicas_copias_total)
+    );
+    for a in &r.unicas_copias {
+        s.push_str(&format!("  ⚠ {}\n", a.caminho));
+    }
+    let resto = r
+        .unicas_copias_total
+        .saturating_sub(r.unicas_copias.len() as u64);
+    if resto > 0 {
+        s.push_str(&format!("  ... e mais {}\n", inteiro_pt_br(resto)));
+    }
+    s.push_str(
+        "  Se esta for a decisão errada, remova com `dag desmarcar`. O DAG nunca apaga nem move arquivos.\n",
+    );
+    s
+}
+
+pub fn marcacao(r: &ResultadoMarcacao) -> String {
+    let mut s = String::new();
+    for m in &r.marcacoes {
+        s.push_str(&format!(
+            "{} #{} {} ({}): {}\n",
+            nome_marcacao(m.tipo),
+            m.id,
+            if m.estado == EstadoMarcacao::Pendente {
+                "pendente"
+            } else {
+                "registrada"
+            },
+            escopo(m.escopo),
+            m.alvo
+        ));
+    }
+    if r.marcacoes.is_empty() {
+        s.push_str("Nada a marcar: as cópias já tinham esta Marcação.\n");
+    }
+    if r.ja_marcadas > 0 {
+        s.push_str(&format!(
+            "{} cópia(s) já tinham a Marcação.\n",
+            r.ja_marcadas
+        ));
+    }
+    for a in &r.avisos {
+        s.push_str(&format!("Aviso: {a}\n"));
+    }
+    s.push_str(&alerta_unica(r));
+    s.push_str("Somente o Catálogo foi alterado.\n");
+    s
+}
+
+pub fn desmarcado(v: &[MarcacaoInfo]) -> String {
+    let mut s = String::new();
+    for m in v {
+        s.push_str(&format!(
+            "{} #{} removida: {}\n",
+            nome_marcacao(m.tipo),
+            m.id,
+            m.alvo
+        ));
+    }
+    s
+}
+
+fn cobertura_volumes(v: &[CoberturaVolume]) -> String {
+    let linhas: Vec<Vec<String>> = v
+        .iter()
+        .map(|x| {
+            vec![
+                x.volume.to_string(),
+                x.rotulo.clone().unwrap_or_else(|| "-".into()),
+                if x.conectado { "conectado" } else { "offline" }.into(),
+                inteiro_pt_br(x.arquivos),
+                inteiro_pt_br(x.com_cobertura),
+                inteiro_pt_br(x.cobertura_nao_verificada),
+                inteiro_pt_br(x.sem_cobertura),
+                bytes_humanos(x.bytes_sem_cobertura),
+            ]
+        })
+        .collect();
+    tabela(
+        &[
+            "VOLUME",
+            "RÓTULO",
+            "ESTADO",
+            "ARQUIVOS",
+            "COM COBERTURA",
+            "NÃO VERIFICADA",
+            "SEM COBERTURA",
+            "TAMANHO SEM COB.",
+        ],
+        &[true, false, false, true, true, true, true, true],
+        &linhas,
+    )
+}
+
+fn cobertura_pastas(v: &[CoberturaPasta]) -> String {
+    let linhas: Vec<Vec<String>> = v
+        .iter()
+        .map(|x| {
+            vec![
+                x.caminho.clone(),
+                inteiro_pt_br(x.arquivos),
+                inteiro_pt_br(x.com_cobertura),
+                inteiro_pt_br(x.sem_cobertura),
+                bytes_humanos(x.bytes_sem_cobertura),
+            ]
+        })
+        .collect();
+    tabela(
+        &[
+            "PASTA",
+            "ARQUIVOS",
+            "COM COBERTURA",
+            "SEM COBERTURA",
+            "TAMANHO SEM COB.",
+        ],
+        &[false, true, true, true, true],
+        &linhas,
+    )
+}
+
+fn sem_cobertura(v: &[ArquivoSemCobertura]) -> String {
+    if v.is_empty() {
+        return "Todos os arquivos têm Cobertura.\n".into();
+    }
+    let linhas: Vec<Vec<String>> = v
+        .iter()
+        .map(|a| {
+            vec![
+                a.arquivo.to_string(),
+                a.volume_rotulo
+                    .clone()
+                    .unwrap_or_else(|| a.volume.to_string()),
+                bytes_humanos(a.tamanho),
+                if a.unica_copia {
+                    "⚠ ÚNICA CÓPIA"
+                } else {
+                    "-"
+                }
+                .into(),
+                a.caminho.clone(),
+            ]
+        })
+        .collect();
+    tabela(
+        &["ARQ", "VOLUME", "TAMANHO", "ALERTA", "CAMINHO"],
+        &[true, false, true, false, false],
+        &linhas,
+    )
+}
+
+fn espaco_item(i: &EspacoItem) -> Vec<String> {
+    vec![
+        i.id.map_or("-".into(), |x| x.to_string()),
+        match i.conectado {
+            Some(false) => format!("{} (offline)", i.nome),
+            _ => i.nome.clone(),
+        },
+        bytes_humanos(i.bytes_marcados_delecao),
+        bytes_humanos(i.bytes_redundantes_estimados),
+        bytes_humanos(i.bytes_total),
+        inteiro_pt_br(i.copias),
+    ]
+}
+
+fn espaco(total: &EspacoItem, itens: &[EspacoItem], limitacoes: &[String]) -> String {
+    let mut s = format!(
+        "Espaço recuperável deste computador: {} ({} marcado para Deleção + {} estimado), {} cópia(s).\n",
+        bytes_humanos(total.bytes_total),
+        bytes_humanos(total.bytes_marcados_delecao),
+        bytes_humanos(total.bytes_redundantes_estimados),
+        inteiro_pt_br(total.copias),
+    );
+    if !itens.is_empty() {
+        let nivel = match itens[0].nivel {
+            NivelEspaco::Computador => "COMPUTADOR",
+            NivelEspaco::Volume => "VOLUME",
+            NivelEspaco::Pasta => "PASTA",
+            NivelEspaco::Grupo => "GRUPO",
+        };
+        let linhas: Vec<Vec<String>> = itens.iter().map(espaco_item).collect();
+        s.push('\n');
+        s.push_str(&tabela(
+            &[
+                "ID",
+                nivel,
+                "MARCADO P/ DELEÇÃO",
+                "REDUNDANTE (EST.)",
+                "TOTAL",
+                "CÓPIAS",
+            ],
+            &[true, false, true, true, true, true],
+            &linhas,
+        ));
+    }
+    s.push_str("\nLimitações:\n");
+    for l in limitacoes {
+        s.push_str(&format!("  - {l}\n"));
+    }
+    s
+}
+
+fn marcacoes(v: &[MarcacaoInfo]) -> String {
+    if v.is_empty() {
+        return "Nenhuma Marcação.\n".into();
+    }
+    let linhas: Vec<Vec<String>> = v
+        .iter()
+        .map(|m| {
+            vec![
+                m.id.to_string(),
+                tipo_marcacao(m.tipo).into(),
+                estado_marcacao(m.estado).into(),
+                escopo(m.escopo).into(),
+                m.alvo.clone(),
+                m.hash_na_marcacao.as_ref().map_or("-".into(), hash_curto),
+                match m.autor {
+                    dag_core::Autor::Gui => "gui",
+                    dag_core::Autor::Cli => "cli",
+                    dag_core::Autor::Mcp => "mcp",
+                }
+                .into(),
+                data_hora_utc(m.criada_em),
+            ]
+        })
+        .collect();
+    tabela(
+        &[
+            "ID",
+            "TIPO",
+            "ESTADO",
+            "ESCOPO",
+            "ALVO",
+            "HASH",
+            "AUTOR",
+            "CRIADA (UTC)",
+        ],
+        &[true, false, false, false, false, false, false, false],
+        &linhas,
+    )
+}
+
+pub fn relatorio(d: &DadosRelatorio, proximo: Option<&str>) -> String {
+    let mut s = match d {
+        DadosRelatorio::Cobertura { volumes, pastas } => {
+            let mut s = cobertura_volumes(volumes);
+            if !pastas.is_empty() {
+                s.push_str("\nPastas com arquivos sem Cobertura:\n");
+                s.push_str(&cobertura_pastas(pastas));
+            }
+            s
+        }
+        DadosRelatorio::SemCobertura { arquivos } => sem_cobertura(arquivos),
+        DadosRelatorio::Espaco {
+            total,
+            itens,
+            limitacoes,
+        } => espaco(total, itens, limitacoes),
+        DadosRelatorio::Marcacoes { marcacoes: m } => marcacoes(m),
+    };
+    if let Some(c) = proximo {
+        s.push_str(&format!("\nHá mais: repita com --cursor {c}\n"));
+    }
+    s
+}
+
+pub fn exportado(
+    tipo: TipoRelatorio,
+    caminho: &str,
+    formato: FormatoExportacao,
+    linhas: u64,
+) -> String {
+    let nome = match tipo {
+        TipoRelatorio::Cobertura => "cobertura",
+        TipoRelatorio::SemCobertura => "sem-cobertura",
+        TipoRelatorio::Espaco => "espaço",
+        TipoRelatorio::Marcacoes => "marcações",
+    };
+    format!(
+        "Relatório de {nome} gravado em {caminho} ({} linha(s), {}).\n",
+        inteiro_pt_br(linhas),
+        match formato {
+            FormatoExportacao::Csv => "CSV",
+            FormatoExportacao::Json => "JSON",
+        }
+    )
+}
+
+pub fn verificacao(r: &ResumoVerificacao) -> String {
+    let mut s = format!(
+        "Verificação de Integridade {}: {} arquivo(s) conferido(s) ({}), {} divergente(s), {} alterado(s) desde o hash (pulados), {} erro(s).\n",
+        match r.desfecho.as_str() {
+            "concluida" => "concluída",
+            "concluida_com_erros" => "concluída com erros",
+            _ => "cancelada",
+        },
+        inteiro_pt_br(r.verificados),
+        bytes_humanos(r.bytes_lidos),
+        inteiro_pt_br(r.divergentes),
+        inteiro_pt_br(r.alterados),
+        inteiro_pt_br(r.erros),
+    );
+    if r.divergentes > 0 {
+        s.push_str(&format!(
+            "⚠ {} arquivo(s) com conteúdo diferente do hash guardado (possível corrupção silenciosa); nada foi alterado: ids {:?}\n",
+            r.divergentes,
+            r.arquivos_divergentes.iter().map(|a| a.0).collect::<Vec<_>>()
+        ));
     }
     s
 }
@@ -282,6 +802,8 @@ pub fn imprimir(r: &Resposta) {
             ignorados,
             erros,
             duracao_ms,
+            hash,
+            duplicados: dup,
         } => print!(
             "{}",
             scan(
@@ -293,9 +815,30 @@ pub fn imprimir(r: &Resposta) {
                 *bytes_logicos,
                 *ignorados,
                 *erros,
-                *duracao_ms
+                *duracao_ms,
+                hash.as_ref(),
+                dup.as_ref()
             )
         ),
+        Resposta::Duplicados {
+            grupos,
+            total,
+            proximo_cursor,
+        } => print!("{}", duplicados(grupos, *total, proximo_cursor.as_deref())),
+        Resposta::Grupo { detalhe } => print!("{}", grupo(detalhe)),
+        Resposta::Marcacao { resultado } => print!("{}", marcacao(resultado)),
+        Resposta::Desmarcado { removidas } => print!("{}", desmarcado(removidas)),
+        Resposta::Relatorio {
+            dados,
+            proximo_cursor,
+        } => print!("{}", relatorio(dados, proximo_cursor.as_deref())),
+        Resposta::RelatorioExportado {
+            tipo,
+            caminho,
+            formato,
+            linhas,
+        } => print!("{}", exportado(*tipo, caminho, *formato, *linhas)),
+        Resposta::Verificacao { resumo } => print!("{}", verificacao(resumo)),
         Resposta::Explorar {
             pasta,
             entradas,

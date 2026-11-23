@@ -4,6 +4,8 @@
 //!
 //! O worker é o único escritor; a GUI e a CLI leem pela conexão de leitura (WAL).
 
+pub mod inventario;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -11,10 +13,16 @@ pub use bancada_armazem::{Armazem, Erro, Resultado};
 use bancada_armazem::{Escada, Migracao, Pragmas, RelatorioMigracao};
 
 /// Degraus do esquema. Migração já publicada nunca é editada: só se acrescenta uma nova.
-pub const MIGRACOES: &[Migracao] = &[Migracao::sql(
-    "esquema inicial do Catálogo (Fase A rev. 2)",
-    include_str!("../migrations/0001_inicial.sql"),
-)];
+pub const MIGRACOES: &[Migracao] = &[
+    Migracao::sql(
+        "esquema inicial do Catálogo (Fase A rev. 2)",
+        include_str!("../migrations/0001_inicial.sql"),
+    ),
+    Migracao::sql(
+        "inventário do Full Scan: tipo de entrada, totais por volume, índices",
+        include_str!("../migrations/0002_inventario.sql"),
+    ),
+];
 
 /// Versão do esquema desta build (`PRAGMA user_version` esperado).
 #[must_use]

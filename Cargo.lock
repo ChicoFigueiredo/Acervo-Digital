@@ -812,11 +812,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "dag-platform-linux"
+version = "0.1.0"
+dependencies = [
+ "dag-core",
+ "rustix 1.1.6",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dag-scanner"
+version = "0.1.0"
+dependencies = [
+ "dag-core",
+ "dag-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "dag-store"
 version = "0.1.0"
 dependencies = [
  "bancada-armazem",
+ "dag-core",
  "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 

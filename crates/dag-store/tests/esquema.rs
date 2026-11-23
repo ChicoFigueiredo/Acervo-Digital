@@ -48,7 +48,7 @@ fn contar(c: &Connection, tabela: &str) -> i64 {
 fn migracao_em_banco_vazio_cria_todas_as_tabelas() {
     let catalogo = cat();
     assert_eq!(catalogo.versao().expect("versão"), versao_do_esquema());
-    assert_eq!(versao_do_esquema(), 1);
+    assert_eq!(versao_do_esquema(), 2);
     let c = catalogo.armazem().conexao();
     for t in [
         "dispositivos",
@@ -97,7 +97,7 @@ fn reabrir_e_idempotente() {
             .expect("ins");
     }
     let c = Catalogo::abrir(&caminho).expect("reabrir");
-    assert_eq!(c.versao().expect("v"), 1);
+    assert_eq!(c.versao().expect("v"), versao_do_esquema());
     assert_eq!(contar(c.armazem().conexao(), "volumes"), 1);
     assert_eq!(contar(c.armazem().conexao(), "service_state"), 1);
 }
@@ -306,7 +306,7 @@ fn copia_de_banco_wal_tem_mesmas_contagens_e_passa_na_integridade() {
     bancada_armazem::verificar_integridade_de_arquivo(&destino).expect("cópia íntegra");
 
     let copia = Catalogo::abrir(&destino).expect("abre cópia");
-    assert_eq!(copia.versao().expect("v"), 1);
+    assert_eq!(copia.versao().expect("v"), versao_do_esquema());
     for t in ["volumes", "folders", "files"] {
         assert_eq!(
             contar(copia.armazem().conexao(), t),

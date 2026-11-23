@@ -11,6 +11,8 @@ publish = false
 
 [workspace.dependencies]
 dag-core = { path = "crates/dag-core" }
+dag-platform-linux = { path = "crates/dag-platform-linux" }
+dag-scanner = { path = "crates/dag-scanner" }
 dag-store = { path = "crates/dag-store" }
 # Bancada fixada em commit (decisão do grilling de 23/11/2026). Atualizar = trocar o rev.
 bancada-armazem = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
@@ -21,6 +23,7 @@ serde_json = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+rustix = { version = "1", features = ["fs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

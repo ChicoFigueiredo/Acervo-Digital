@@ -5,6 +5,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod classificacao;
 pub mod comando;
 pub mod descoberta;
 pub mod hash;
@@ -12,6 +13,12 @@ pub mod ids;
 pub mod regras;
 pub mod tipos;
 
+pub use classificacao::{
+    BYTES_RECOMENDADOS, CategoriaFormato, ClassificacaoFinalidade, ConsolidacaoPasta, Divergencia,
+    EvidenciaFormato, IdentificacaoFormato, ProporcaoFinalidade, TipoFormato,
+    classificar_finalidade_caminho, consolidar_finalidade_pasta, identificar_formato,
+    identificar_por_assinatura, identificar_por_extensao, verificar_divergencia,
+};
 pub use comando::{
     AcaoServico, Alvo, Comando, GrupoDuplicados, Pedido, Relatorio, Resposta, StatusExecucao,
     VolumeInfo,

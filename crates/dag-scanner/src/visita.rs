@@ -1,0 +1,327 @@
+//! Visita de um diretório (lado worker). Só lê nomes e metadados: `read_dir` e `lstat` por
+//! entrada, mais `readlink` nos symlinks. Nunca abre o conteúdo de arquivos, nunca segue links e
+//! nunca escreve no filesystem varrido.
+
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::path::Path;
+use std::sync::mpsc::SyncSender;
+use std::time::UNIX_EPOCH;
+
+use dag_store::inventario::{Severidade, TipoEntrada};
+
+use crate::classificador::{Classificador, TipoDetectado};
+use crate::config::Exclusao;
+use crate::controle::ControleScan;
+
+/// Diretório a visitar.
+#[derive(Debug)]
+pub(crate) struct Job {
+    pub fila_id: i64,
+    pub caminho: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Natureza {
+    Pasta,
+    Outra(TipoEntrada),
+}
+
+/// Metadados de uma entrada, já em tipos do Catálogo.
+#[derive(Debug)]
+pub(crate) struct Entrada {
+    pub caminho: Vec<u8>,
+    pub off_nome: usize,
+    pub natureza: Natureza,
+    pub dev: u64,
+    pub inode: u64,
+    pub nlink: u64,
+    pub tamanho: u64,
+    pub alocado: Option<u64>,
+    pub mtime_ns: Option<i64>,
+    pub ctime_ns: Option<i64>,
+    pub birth_ns: Option<i64>,
+    pub attrs: String,
+    pub alvo: Option<Vec<u8>>,
+    pub tipo: Option<TipoDetectado>,
+}
+
+impl Entrada {
+    pub(crate) fn nome(&self) -> &[u8] {
+        &self.caminho[self.off_nome..]
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Ignorada {
+    pub caminho: Vec<u8>,
+    pub motivo: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct Problema {
+    pub caminho: Vec<u8>,
+    pub codigo: &'static str,
+    pub motivo: String,
+    pub severidade: Severidade,
+}
+
+#[derive(Debug)]
+pub(crate) enum Fim {
+    Ok,
+    Falha(Problema),
+    /// Cancelado no meio: o diretório volta para a fila.
+    Abortado,
+}
+
+#[derive(Debug)]
+pub(crate) enum Msg {
+    Lote {
+        fila_id: i64,
+        entradas: Vec<Entrada>,
+        ignoradas: Vec<Ignorada>,
+        problemas: Vec<Problema>,
+    },
+    Fim {
+        fila_id: i64,
+        fim: Fim,
+    },
+}
+
+impl Msg {
+    pub(crate) fn linhas(&self) -> usize {
+        match self {
+            Self::Lote {
+                entradas,
+                ignoradas,
+                problemas,
+                ..
+            } => entradas.len() + ignoradas.len() + problemas.len(),
+            Self::Fim { .. } => 1,
+        }
+    }
+}
+
+/// Mapeia um erro de E/S para (código estável, severidade).
+pub(crate) fn classificar_io(e: &io::Error) -> (&'static str, Severidade) {
+    match e.kind() {
+        io::ErrorKind::PermissionDenied => ("permissao_negada", Severidade::Aviso),
+        io::ErrorKind::NotFound => ("nao_encontrado", Severidade::Aviso),
+        io::ErrorKind::NotADirectory => ("nao_e_diretorio", Severidade::Aviso),
+        _ => ("erro_es", Severidade::Erro),
+    }
+}
+
+fn ns_desde_epoca(s: i64, ns: i64) -> Option<i64> {
+    s.checked_mul(1_000_000_000)?.checked_add(ns)
+}
+
+fn birth_ns(m: &fs::Metadata) -> Option<i64> {
+    let t = m.created().ok()?;
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).ok(),
+        Err(e) => i64::try_from(e.duration().as_nanos()).ok().map(|n| -n),
+    }
+}
+
+fn natureza_de(m: &fs::Metadata) -> Natureza {
+    let t = m.file_type();
+    if t.is_dir() {
+        Natureza::Pasta
+    } else if t.is_file() {
+        Natureza::Outra(TipoEntrada::Arquivo)
+    } else if t.is_symlink() {
+        Natureza::Outra(TipoEntrada::Symlink)
+    } else if t.is_fifo() {
+        Natureza::Outra(TipoEntrada::Fifo)
+    } else if t.is_socket() {
+        Natureza::Outra(TipoEntrada::Socket)
+    } else if t.is_block_device() {
+        Natureza::Outra(TipoEntrada::DispositivoBloco)
+    } else if t.is_char_device() {
+        Natureza::Outra(TipoEntrada::DispositivoChar)
+    } else {
+        Natureza::Outra(TipoEntrada::Outro)
+    }
+}
+
+/// Monta a [`Entrada`] a partir de metadados `lstat`.
+pub(crate) fn entrada_de(caminho: Vec<u8>, off_nome: usize, m: &fs::Metadata) -> Entrada {
+    let natureza = natureza_de(m);
+    let alocado = m.blocks().checked_mul(512);
+    Entrada {
+        caminho,
+        off_nome,
+        natureza,
+        dev: m.dev(),
+        inode: m.ino(),
+        nlink: m.nlink(),
+        tamanho: m.size(),
+        alocado,
+        mtime_ns: ns_desde_epoca(m.mtime(), m.mtime_nsec()),
+        ctime_ns: ns_desde_epoca(m.ctime(), m.ctime_nsec()),
+        birth_ns: birth_ns(m),
+        attrs: format!(
+            "{{\"mode\":{},\"uid\":{},\"gid\":{}}}",
+            m.mode(),
+            m.uid(),
+            m.gid()
+        ),
+        alvo: None,
+        tipo: None,
+    }
+}
+
+pub(crate) struct Contexto<'a> {
+    pub exclusoes: &'a [Exclusao],
+    pub classificador: &'a dyn Classificador,
+    pub controle: &'a ControleScan,
+    pub entradas_por_mensagem: usize,
+}
+
+fn juntar(dir: &[u8], nome: &[u8]) -> (Vec<u8>, usize) {
+    let mut c = Vec::with_capacity(dir.len() + 1 + nome.len());
+    c.extend_from_slice(dir);
+    if dir.last() != Some(&b'/') {
+        c.push(b'/');
+    }
+    let off = c.len();
+    c.extend_from_slice(nome);
+    (c, off)
+}
+
+/// Lê um diretório e envia lotes pelo canal. Devolve `false` se o escritor já saiu.
+pub(crate) fn visitar(job: &Job, ctx: &Contexto<'_>, saida: &SyncSender<Msg>) -> bool {
+    let dir = Path::new(OsStr::from_bytes(&job.caminho));
+    let leitura = match fs::read_dir(dir) {
+        Ok(l) => l,
+        Err(e) => {
+            let (codigo, severidade) = classificar_io(&e);
+            let fim = Fim::Falha(Problema {
+                caminho: job.caminho.clone(),
+                codigo,
+                motivo: format!("não foi possível listar o diretório: {e}"),
+                severidade,
+            });
+            return saida
+                .send(Msg::Fim {
+                    fila_id: job.fila_id,
+                    fim,
+                })
+                .is_ok();
+        }
+    };
+    let mut entradas = Vec::new();
+    let mut ignoradas = Vec::new();
+    let mut problemas = Vec::new();
+    macro_rules! enviar {
+        () => {
+            if !(entradas.is_empty() && ignoradas.is_empty() && problemas.is_empty()) {
+                let msg = Msg::Lote {
+                    fila_id: job.fila_id,
+                    entradas: std::mem::take(&mut entradas),
+                    ignoradas: std::mem::take(&mut ignoradas),
+                    problemas: std::mem::take(&mut problemas),
+                };
+                if saida.send(msg).is_err() {
+                    return false;
+                }
+            }
+        };
+    }
+    for item in leitura {
+        if ctx.controle.cancelado() {
+            enviar!();
+            return saida
+                .send(Msg::Fim {
+                    fila_id: job.fila_id,
+                    fim: Fim::Abortado,
+                })
+                .is_ok();
+        }
+        let item = match item {
+            Ok(i) => i,
+            Err(e) => {
+                let (codigo, severidade) = classificar_io(&e);
+                problemas.push(Problema {
+                    caminho: job.caminho.clone(),
+                    codigo,
+                    motivo: format!("falha ao ler uma entrada do diretório: {e}"),
+                    severidade,
+                });
+                continue;
+            }
+        };
+        let nome = item.file_name();
+        let (caminho, off) = juntar(&job.caminho, nome.as_bytes());
+        if let Some(ex) = ctx
+            .exclusoes
+            .iter()
+            .find(|x| x.casa(&caminho, &caminho[off..]))
+        {
+            ignoradas.push(Ignorada {
+                caminho,
+                motivo: ex.motivo.clone(),
+            });
+        } else {
+            // DirEntry::metadata não segue symlink (equivale a lstat).
+            match item.metadata() {
+                Ok(m) => {
+                    let mut entrada = entrada_de(caminho, off, &m);
+                    match entrada.natureza {
+                        Natureza::Outra(TipoEntrada::Symlink) => {
+                            match fs::read_link(OsStr::from_bytes(&entrada.caminho)) {
+                                Ok(alvo) => {
+                                    entrada.alvo = Some(alvo.as_os_str().as_bytes().to_vec())
+                                }
+                                Err(e) => {
+                                    let (codigo, severidade) = classificar_io(&e);
+                                    problemas.push(Problema {
+                                        caminho: entrada.caminho.clone(),
+                                        codigo,
+                                        motivo: format!(
+                                            "não foi possível ler o alvo do symlink: {e}"
+                                        ),
+                                        severidade,
+                                    });
+                                }
+                            }
+                        }
+                        Natureza::Outra(TipoEntrada::Arquivo) => {
+                            entrada.tipo = ctx.classificador.tipo_do_arquivo(entrada.nome());
+                        }
+                        _ => {}
+                    }
+                    entradas.push(entrada);
+                }
+                Err(e) => {
+                    let (codigo, severidade) = classificar_io(&e);
+                    problemas.push(Problema {
+                        caminho,
+                        codigo,
+                        motivo: format!("não foi possível ler os metadados: {e}"),
+                        severidade,
+                    });
+                }
+            }
+        }
+        if entradas.len() + ignoradas.len() + problemas.len() >= ctx.entradas_por_mensagem {
+            enviar!();
+        }
+    }
+    enviar!();
+    saida
+        .send(Msg::Fim {
+            fila_id: job.fila_id,
+            fim: Fim::Ok,
+        })
+        .is_ok()
+}
+
+/// Metadados `lstat` de um caminho (usado nas raízes).
+pub(crate) fn lstat(caminho: &[u8]) -> io::Result<fs::Metadata> {
+    fs::symlink_metadata(OsStr::from_bytes(caminho))
+}

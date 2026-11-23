@@ -8,7 +8,9 @@ publish.workspace = true
 
 [dependencies]
 bancada-armazem.workspace = true
+dag-core.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

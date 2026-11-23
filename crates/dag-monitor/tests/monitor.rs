@@ -385,6 +385,12 @@ fn fila_saturada_vira_lacuna_e_fast_scan() {
     for i in 0..12 {
         gravar(&s.raiz.join(format!("rajada/p{i}/f.txt")), &[b'r'; 4]);
     }
+    // Os eventos reais podem chegar espaçados numa máquina carregada (CI) e nunca
+    // encher a fila; as dicas em rajada garantem a saturação de forma determinística.
+    for i in 0..12 {
+        s.injetor
+            .injetar_dica(s.raiz.join(format!("rajada/p{i}")), 0);
+    }
     s.esperar("tudo catalogado apesar da fila pequena", |s| {
         (0..12).all(|i| s.tamanho(&format!("rajada/p{i}/f.txt")) == Some(4))
     });

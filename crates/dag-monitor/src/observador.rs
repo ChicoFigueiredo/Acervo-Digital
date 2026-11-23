@@ -239,7 +239,18 @@ impl Observador {
             let caminho = self.raizes[r].caminho.clone();
             self.remover_arvore(&caminho);
             self.fila.travar().parciais.remove(&r);
-            self.adicionar_arvore(r, caminho);
+            self.adicionar_arvore(r, caminho.clone());
+            // Entre o Fast Scan que pediu o rearme e o watch novo, mudanças não geram evento:
+            // registrar a lacuna faz o escritor reconciliar a raiz de novo, já com o watch ativo.
+            self.fila.lacuna(Lacuna {
+                tipo: TipoLacuna::WatchesRefeitos,
+                raiz: Some(r),
+                detalhe: format!(
+                    "watches refeitos em {}",
+                    dag_store::inventario::exibir(&caminho)
+                ),
+                observado_em: agora(),
+            });
             self.publicar();
         }
     }

@@ -16,6 +16,9 @@ pub enum TipoLacuna {
     FilaSaturada,
     /// Raiz sumiu (desmontada, renomeada, `st_dev` diferente).
     RaizDesmontada,
+    /// Watches de uma raiz que voltou foram refeitos depois da reconciliação: o que mudou
+    /// entre o fim do Fast Scan e o novo watch não gerou evento.
+    WatchesRefeitos,
     /// Injetada por teste ou operador.
     Injetada,
 }
@@ -28,6 +31,7 @@ impl TipoLacuna {
             Self::LimiteDeWatches => "limite_de_watches",
             Self::FilaSaturada => "fila_saturada",
             Self::RaizDesmontada => "raiz_desmontada",
+            Self::WatchesRefeitos => "watches_refeitos",
             Self::Injetada => "injetada",
         }
     }

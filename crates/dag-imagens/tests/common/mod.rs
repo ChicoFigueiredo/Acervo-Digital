@@ -5,6 +5,7 @@ pub mod exfat;
 pub mod fat;
 pub mod fuzz;
 pub mod iso;
+pub mod ntfs;
 pub mod part;
 pub mod virt;
 

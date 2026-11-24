@@ -32,6 +32,7 @@
 
 mod classificador;
 mod config;
+mod conteineres;
 mod controle;
 mod elevado;
 mod erro;
@@ -43,6 +44,7 @@ mod visita;
 
 pub use classificador::{Classificador, FonteEvidencia, SemClassificacao, TipoDetectado};
 pub use config::{Casamento, ConfigScan, Exclusao, FaseProgresso, Progresso};
+pub use conteineres::{Cofre, ConfigConteineres, EtapaConteineres, ResultadoConteineres, SemCofre};
 pub use controle::{ControleScan, EstadoControle};
 pub use elevado::{EntradaElevada, LeitorElevado, TipoElevado};
 pub use erro::ErroScan;

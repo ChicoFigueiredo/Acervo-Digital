@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 dag-agent = { path = "crates/dag-agent" }
+dag-conteineres = { path = "crates/dag-conteineres" }
 dag-core = { path = "crates/dag-core" }
 dag-mcp = { path = "crates/dag-mcp" }
 dag-monitor = { path = "crates/dag-monitor" }
@@ -29,6 +30,18 @@ tempfile = "3"
 rustix = { version = "1", features = ["fs", "event", "net", "process"] }
 ctrlc = { version = "3", features = ["termination"] }
 blake3 = "1"
+# Leitura de Contêineres (ADR 0006): tudo Rust puro, só leitura em fluxo. Versões fixadas.
+zip = { version = "9.8.2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "lzma"] }
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["aes256", "bzip2", "compress"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1.11"
+bzip2 = "0.6.1"
+lzma-rust2 = "0.25.0"
+ruzstd = "0.9.1"
+rars = { version = "0.13.0", default-features = false, features = ["encryption"] }
+bancada-segredos = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "getrandom"] }
+getrandom = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

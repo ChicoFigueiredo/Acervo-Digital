@@ -112,6 +112,26 @@ pub struct ProgressoHash {
     pub discos: Vec<ProgressoDiscoHash>,
 }
 
+/// Andamento da etapa "Conteúdo de contêineres" (ADR 0006): a leitura em fluxo dos compactados
+/// depois do Hash Completo. `andamento` tem o mesmo formato do hash (Contêineres no lugar de
+/// arquivos, bytes de Contêiner lidos, um item por disco físico).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProgressoConteineres {
+    pub andamento: ProgressoHash,
+    /// Membros gravados no Catálogo até agora, nesta etapa.
+    #[serde(default)]
+    pub membros: u64,
+    /// Contêineres cifrados que esperam senha (Fila de Serviço).
+    #[serde(default)]
+    pub aguardando_senha: u64,
+    /// Contêineres com Falha de Leitura.
+    #[serde(default)]
+    pub falhas: u64,
+    /// Contêineres que reaproveitaram os Membros de uma cópia idêntica.
+    #[serde(default)]
+    pub copiados: u64,
+}
+
 /// O que a rotina de abertura do agente está fazendo agora (dado estruturado: a interface não
 /// precisa interpretar o texto das mensagens).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +175,8 @@ pub enum Progresso {
     Hash(ProgressoHash),
     /// Verificação de Integridade.
     Verificacao(ProgressoHash),
+    /// Conteúdo de contêineres (compactados lidos em fluxo, depois do Hash Completo).
+    Conteineres(ProgressoConteineres),
     /// Mudança de etapa sem contadores (classificação, duplicados, monitor...).
     Mensagem { texto: String },
     /// Passo estruturado da rotina de abertura (retomada, passada de verificação). Um passo novo

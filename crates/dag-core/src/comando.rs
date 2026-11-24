@@ -8,7 +8,7 @@ use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
     EventoInfo, ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId,
     MarcacaoInfo, ModoVarredura, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados,
-    ResumoHash, ResumoMonitorInfo, ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo,
+    ResumoHash, ResumoMonitorInfo, ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo, Senha,
     TipoDispositivo, TipoRelatorio, VolumeId,
 };
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,9 @@ pub enum Comando {
         max_discos: Option<u32>,
     },
     /// Pausa a execução indicada (ou a única em andamento).
-    Pausar { execucao: Option<ExecucaoId> },
+    Pausar {
+        execucao: Option<ExecucaoId>,
+    },
     /// Retoma uma execução pausada.
     ///
     /// `threads_por_disco`/`max_discos` valem só para a retomada de execução gravada no
@@ -112,17 +114,27 @@ pub enum Comando {
         max_discos: Option<u32>,
     },
     /// Cancela uma execução.
-    Cancelar { execucao: Option<ExecucaoId> },
+    Cancelar {
+        execucao: Option<ExecucaoId>,
+    },
     /// Lista os trabalhos do agente (em andamento e na fila), seja quem for que os iniciou.
     ListarJobs,
     /// Pausa o trabalho `job` (id do agente, como em `ListarJobs`).
-    PausarJob { job: u64 },
+    PausarJob {
+        job: u64,
+    },
     /// Retoma o trabalho pausado `job`.
-    RetomarJob { job: u64 },
+    RetomarJob {
+        job: u64,
+    },
     /// Cancela o trabalho `job`, em andamento ou ainda na fila.
-    CancelarJob { job: u64 },
+    CancelarJob {
+        job: u64,
+    },
     /// Consulta progresso das execuções.
-    Status { execucao: Option<ExecucaoId> },
+    Status {
+        execucao: Option<ExecucaoId>,
+    },
     /// Lista Grupos de Duplicados, paginado por cursor (keyset). `volume` filtra grupos com
     /// ao menos uma cópia no Volume (id, rótulo, ponto de montagem); `tamanho_minimo` em bytes;
     /// `ordem` padrão = maior espaço recuperável primeiro.
@@ -137,7 +149,9 @@ pub enum Comando {
     /// (trabalho longo em Catálogos grandes; acompanha-se pelo progresso "Agrupando duplicados").
     ReconstruirDuplicados,
     /// Um Grupo de Duplicados com todas as cópias, Marcações e Cobertura.
-    DetalharGrupo { grupo: GrupoId },
+    DetalharGrupo {
+        grupo: GrupoId,
+    },
     /// Troca manual da Cópia Principal do grupo; `arquivo: None` volta à escolha automática
     /// pela Prioridade de Volume. A escolha manual persiste entre reconstruções.
     DefinirCopiaPrincipal {
@@ -145,16 +159,26 @@ pub enum Comando {
         arquivo: Option<Alvo>,
     },
     /// Cria Marcação de Backup (somente no Catálogo).
-    MarcarBackup { alvo: Alvo },
+    MarcarBackup {
+        alvo: Alvo,
+    },
     /// Cria Marcação para Deleção (não apaga nem move nada).
-    MarcarDelecao { alvo: Alvo },
+    MarcarDelecao {
+        alvo: Alvo,
+    },
     /// Remove a Marcação do alvo (Marcação de arquivo, de grupo ou regra de Volume/pasta).
-    Desmarcar { alvo: Alvo },
+    Desmarcar {
+        alvo: Alvo,
+    },
     /// Confirma de novo uma Marcação Pendente, adotando o Hash Completo atual do arquivo.
-    ConfirmarMarcacao { marcacao: MarcacaoId },
+    ConfirmarMarcacao {
+        marcacao: MarcacaoId,
+    },
     /// Define a Prioridade de Volume: Volumes ou pastas do mais ao menos prioritário. Cada item
     /// é id/rótulo/ponto de montagem de um Volume ou o caminho de uma pasta catalogada.
-    DefinirPrioridadeVolume { ordem: Vec<String> },
+    DefinirPrioridadeVolume {
+        ordem: Vec<String>,
+    },
     /// Relatório de Cobertura, arquivos sem Cobertura, espaço recuperável ou Marcações.
     /// Com `saida` (`.csv` ou `.json`), grava o relatório inteiro nesse caminho (sem
     /// sobrescrever arquivo existente); sem `saida`, devolve uma página (`limite`/`cursor`).
@@ -178,7 +202,9 @@ pub enum Comando {
         sem_hash: bool,
     },
     /// Últimos eventos persistidos (criado, alterado, removido, renomeado, lacunas...).
-    Eventos { limite: Option<u32> },
+    Eventos {
+        limite: Option<u32>,
+    },
     /// Saúde do monitor e pendências de reconciliação.
     SaudeMonitor,
     /// Verificação de Integridade sobre as Raízes (todas, se vazio).
@@ -198,9 +224,60 @@ pub enum Comando {
         max_discos: Option<u32>,
     },
     /// Gerencia o serviço em segundo plano.
-    Servico { acao: AcaoServico },
+    Servico {
+        acao: AcaoServico,
+    },
     /// Backup consistente do Catálogo (SQLite) para `destino`.
-    BackupCatalogo { destino: String },
+    BackupCatalogo {
+        destino: String,
+    },
+    /// Lê o conteúdo dos Contêineres pendentes (etapa "Conteúdo de contêineres"; trabalho longo).
+    LerConteineres,
+    /// Andamento da etapa de Contêineres e da Fila de Serviço.
+    StatusConteineres,
+    /// Itens da Fila de Serviço (por padrão só os abertos).
+    ListarPedidos {
+        #[serde(default)]
+        incluir_encerrados: bool,
+    },
+    /// Resolve um Pedido de Senha: guarda a senha (cifrada, ligada ao Hash do Contêiner) e
+    /// reenfileira o Contêiner. A senha nunca volta numa resposta.
+    ResolverPedido {
+        id: i64,
+        senha: Senha,
+    },
+    /// Dispensa um item da Fila de Serviço (o Contêiner fica sem conteúdo catalogado).
+    DispensarPedido {
+        id: i64,
+    },
+    /// Reenfileira um Contêiner com Falha de Leitura ("tentar de novo").
+    TentarDeNovo {
+        id: i64,
+    },
+    /// Guarda uma senha no Cofre de Senhas para tentar em Contêineres cifrados.
+    CofreAdicionar {
+        rotulo: String,
+        senha: Senha,
+    },
+    /// Rótulos do Cofre de Senhas (nunca os valores) e a situação do keyring.
+    CofreListar,
+    CofreRemover {
+        id: i64,
+    },
+    /// Filhos diretos de uma pasta virtual dentro de um Contêiner catalogado.
+    ExplorarConteiner {
+        /// Caminho do arquivo Contêiner.
+        conteiner: String,
+        /// `ordem` do Membro aninhado em que entrar (`None` = raiz do Contêiner).
+        #[serde(default)]
+        pai_ordem: Option<i64>,
+        /// Pasta virtual dentro do Contêiner, sem barra inicial (vazio = raiz).
+        #[serde(default)]
+        pasta: String,
+        limite: Option<u32>,
+        /// Último nome da página anterior.
+        cursor: Option<String>,
+    },
     /// Filhos diretos de `pasta` (ou as Raízes catalogadas, se `None`), do maior para o menor.
     /// `cursor` é o `proximo_cursor` opaco da página anterior.
     Explorar {
@@ -428,6 +505,25 @@ pub enum Resposta {
     },
     Grupo {
         detalhe: DetalheGrupo,
+    },
+    /// Andamento da etapa de Contêineres.
+    Conteineres {
+        status: crate::StatusConteineres,
+    },
+    /// Itens da Fila de Serviço.
+    Pedidos {
+        pedidos: Vec<crate::PedidoInfo>,
+    },
+    /// Rótulos do Cofre de Senhas (nunca os valores).
+    Cofre {
+        situacao: crate::SituacaoCofre,
+        itens: Vec<crate::ItemCofre>,
+    },
+    /// Conteúdo de uma pasta virtual de um Contêiner.
+    Membros {
+        conteiner: String,
+        entradas: Vec<crate::EntradaMembroInfo>,
+        proximo_cursor: Option<String>,
     },
     /// Marcação criada ou confirmada.
     Marcacao {

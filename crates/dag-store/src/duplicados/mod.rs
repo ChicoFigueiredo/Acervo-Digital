@@ -207,6 +207,21 @@ pub(crate) struct CopiaCarregada {
     pub marca: Option<MarcaEfetiva>,
 }
 
+/// Um Membro de Contêiner que é cópia do grupo, com a Marcação que vale para o Contêiner.
+#[derive(Debug, Clone)]
+pub(crate) struct MembroCarregado {
+    pub membro: i64,
+    pub conteiner: i64,
+    pub conteiner_caminho: String,
+    pub caminho_interno: String,
+    pub volume: i64,
+    pub rotulo: Option<String>,
+    pub dispositivo: Option<i64>,
+    pub conectado: bool,
+    pub visto_em: Option<i64>,
+    pub marca: Option<MarcaEfetiva>,
+}
+
 /// Grupo com todas as cópias.
 #[derive(Debug, Clone)]
 pub(crate) struct GrupoCarregado {
@@ -216,6 +231,8 @@ pub(crate) struct GrupoCarregado {
     pub principal: Option<i64>,
     pub manual: bool,
     pub copias: Vec<CopiaCarregada>,
+    /// Membros de Contêineres do grupo (contam como cópia; nunca como espaço recuperável).
+    pub membros: Vec<MembroCarregado>,
 }
 
 const SELECT_COPIAS: &str =
@@ -306,8 +323,44 @@ fn grupo_da_linha(l: &rusqlite::Row<'_>) -> rusqlite::Result<LinhaGrupo> {
     Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?, l.get(4)?))
 }
 
-fn montar_grupo(g: LinhaGrupo, copias: Vec<CopiaCarregada>) -> GrupoCarregado {
+/// Membros de Contêineres do grupo, em ordem de id.
+fn carregar_membros(conn: &Connection, grupo_id: i64) -> rusqlite::Result<Vec<MembroCarregado>> {
+    let mut st = conn.prepare_cached(
+        "SELECT m.id, m.conteiner_file_id, f.path_display, m.caminho_display, f.volume_id,
+                v.rotulo, v.device_id, v.mounted, v.last_seen_at
+         FROM grupo_membros_conteiner g
+         JOIN membros m ON m.id = g.membro_id
+         JOIN files f ON f.id = m.conteiner_file_id
+         JOIN volumes v ON v.id = f.volume_id
+         WHERE g.grupo_id = ?1 ORDER BY m.id",
+    )?;
+    let linhas = st
+        .query_map([grupo_id], |l| {
+            let conteiner: i64 = l.get(1)?;
+            Ok(MembroCarregado {
+                membro: l.get(0)?,
+                conteiner,
+                conteiner_caminho: l.get(2)?,
+                caminho_interno: l.get(3)?,
+                volume: l.get(4)?,
+                rotulo: l.get(5)?,
+                dispositivo: l.get(6)?,
+                conectado: l.get::<_, i64>(7)? != 0,
+                visto_em: l.get(8)?,
+                marca: marca_efetiva(conn, conteiner)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(linhas)
+}
+
+fn montar_grupo(
+    g: LinhaGrupo,
+    copias: Vec<CopiaCarregada>,
+    membros: Vec<MembroCarregado>,
+) -> GrupoCarregado {
     GrupoCarregado {
+        membros,
         id: g.0,
         tamanho: u(g.1),
         hash: hash_de(&g.2).unwrap_or(HashCompleto([0; 32])),
@@ -339,7 +392,8 @@ pub(crate) fn carregar_grupo(
     let copias = st
         .query_map([grupo_id], |l| copia_da_linha(conn, l).map(|x| x.1))?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(montar_grupo(g, copias)))
+    let membros = carregar_membros(conn, grupo_id)?;
+    Ok(Some(montar_grupo(g, copias, membros)))
 }
 
 /// Percorre todos os grupos em ordem de id (um por vez na memória). `f` devolve `false` para
@@ -362,7 +416,8 @@ pub(crate) fn percorrer_grupos(
         let cs = copias
             .query_map([id], |l| copia_da_linha(conn, l).map(|x| x.1))?
             .collect::<Result<Vec<_>, _>>()?;
-        if !f(montar_grupo(g, cs))? {
+        let ms = carregar_membros(conn, id)?;
+        if !f(montar_grupo(g, cs, ms))? {
             break;
         }
     }
@@ -382,7 +437,12 @@ pub(crate) fn tem_outra_copia(conn: &Connection, file_id: i64) -> rusqlite::Resu
               AND h.ctime_ns IS f.ctime_ns AND h.native_file_id IS f.native_file_id
               AND NOT (f.volume_id = f0.volume_id
                        AND (f.id = f0.id
-                            OR (f0.hardlink_group IS NOT NULL AND f.hardlink_group = f0.hardlink_group))))",
+                            OR (f0.hardlink_group IS NOT NULL AND f.hardlink_group = f0.hardlink_group))))
+         OR EXISTS (
+            -- Um Membro de Contêiner com o mesmo conteúdo também é cópia (ADR 0006).
+            SELECT 1 FROM hashes h0 JOIN membros m ON m.hash = h0.hash AND m.tamanho = h0.size_bytes
+            JOIN files c ON c.id = m.conteiner_file_id AND c.state = 'ativo'
+            WHERE h0.file_id = ?1 AND m.hash IS NOT NULL AND m.tipo = 'arquivo' AND m.estado = 'lido')",
     )?
     .query_row([file_id], |l| l.get::<_, i64>(0))
     .map(|n| n != 0)

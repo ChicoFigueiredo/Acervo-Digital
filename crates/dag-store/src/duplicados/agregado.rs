@@ -86,6 +86,20 @@ const CLASSE: &str = "CASE
              AND NOT (r.n_surv + r.principal_sem = 0 AND m.fid = r.min_est) THEN 'estimada'
     END";
 
+/// Preenche `copias_em_conteineres` dos grupos de uma página (uma consulta pelo índice do grupo).
+pub(crate) fn preencher_membros(
+    conn: &Connection,
+    grupos: &mut [GrupoDuplicados],
+) -> Resultado<()> {
+    let mut st =
+        conn.prepare_cached("SELECT COUNT(*) FROM grupo_membros_conteiner WHERE grupo_id = ?1")?;
+    for g in grupos {
+        g.copias_em_conteineres =
+            u32::try_from(st.query_row([g.id.0], |l| l.get::<_, i64>(0))?).unwrap_or(u32::MAX);
+    }
+    Ok(())
+}
+
 fn i(x: u64) -> i64 {
     i64::try_from(x).unwrap_or(i64::MAX)
 }
@@ -115,6 +129,7 @@ fn grupo_da_linha(l: &rusqlite::Row<'_>) -> rusqlite::Result<(u64, GrupoDuplicad
             tamanho: tam,
             copias: u32::try_from(l.get::<_, i64>(5)?).unwrap_or(u32::MAX),
             copias_offline: u32::try_from(l.get::<_, i64>(6)?).unwrap_or(u32::MAX),
+            copias_em_conteineres: 0,
             copia_principal: principal.map(ArquivoId),
             modo_principal: if l.get::<_, String>(4)? == "manual" {
                 ModoPrincipal::Manual

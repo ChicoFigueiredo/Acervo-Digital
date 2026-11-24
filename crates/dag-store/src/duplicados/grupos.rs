@@ -95,15 +95,26 @@ pub fn reconstruir_grupos(
                        AND {HASH_VALIDO}
                        AND (f.hardlink_group IS NULL OR f.id = {rep}){filtro_f}
                        AND (h.size_bytes, h.hash) IN (
-                           SELECT size_bytes, hash FROM hashes
-                           GROUP BY size_bytes, hash HAVING COUNT(*) >= 2)",
+                           SELECT k, x FROM (
+                               SELECT size_bytes AS k, hash AS x FROM hashes
+                               UNION ALL
+                               SELECT tamanho, hash FROM membros
+                               WHERE hash IS NOT NULL AND tipo = 'arquivo' AND estado = 'lido'
+                                 AND tamanho > 0)
+                           GROUP BY k, x HAVING COUNT(*) >= 2)",
                     rep = representante_sql("f")
                 ),
                 [],
             )?;
+            // Grupo precisa de 2+ cópias, contando os Membros de Contêineres (e ao menos um
+            // arquivo comum: a Cópia Principal é sempre um arquivo comum).
             tx.execute(
                 "DELETE FROM _alvo WHERE (logical_bytes, hash) IN (
-                     SELECT logical_bytes, hash FROM _alvo GROUP BY logical_bytes, hash HAVING COUNT(*) < 2)",
+                     SELECT a.logical_bytes, a.hash FROM _alvo a GROUP BY a.logical_bytes, a.hash
+                     HAVING COUNT(*) + (SELECT COUNT(*) FROM membros m
+                                        WHERE m.hash IS NOT NULL AND m.hash = a.hash
+                                          AND m.tamanho = a.logical_bytes
+                                          AND m.tipo = 'arquivo' AND m.estado = 'lido') < 2)",
                 [],
             )?;
             // 2. Membros que saem: não estão no alvo, ou o alvo os põe em outra chave.
@@ -148,6 +159,23 @@ pub fn reconstruir_grupos(
                 "DELETE FROM grupos_duplicados WHERE id NOT IN (SELECT DISTINCT grupo_id FROM grupo_membros)",
                 [],
             )? as u64;
+            // 4b. Membros de Contêineres nos grupos que sobraram (nunca criam grupo sozinhos).
+            tx.execute(
+                &format!(
+                    "DELETE FROM grupo_membros_conteiner WHERE grupo_id IN (
+                         SELECT g.id FROM grupos_duplicados g WHERE true{filtro_g})"
+                ),
+                [],
+            )?;
+            tx.execute(
+                &format!(
+                    "INSERT OR REPLACE INTO grupo_membros_conteiner (membro_id, grupo_id)
+                     SELECT m.id, g.id FROM grupos_duplicados g
+                     JOIN membros m ON m.hash = g.hash AND m.tamanho = g.logical_bytes
+                     WHERE m.hash IS NOT NULL AND m.tipo = 'arquivo' AND m.estado = 'lido'{filtro_g}"
+                ),
+                [],
+            )?;
             // 5. Cópia Principal.
             r.principais_alteradas = recalcular_principais(tx, None, agora)?;
             tx.execute_batch("DELETE FROM _alvo; DELETE FROM _escopo;")?;
@@ -342,6 +370,7 @@ fn resumo(g: &GrupoCarregado) -> GrupoDuplicados {
         tamanho: g.tamanho,
         copias: g.copias.len() as u32,
         copias_offline: g.copias.iter().filter(|c| !c.conectado).count() as u32,
+        copias_em_conteineres: g.membros.len() as u32,
         copia_principal: g.principal.map(ArquivoId),
         modo_principal: if g.manual {
             ModoPrincipal::Manual
@@ -411,8 +440,10 @@ pub fn listar_grupos(
     } else {
         None
     };
+    let mut grupos: Vec<GrupoDuplicados> = pagina.into_iter().map(|x| x.1).collect();
+    agregado::preencher_membros(conn, &mut grupos)?;
     Ok(PaginaGrupos {
-        grupos: pagina.into_iter().map(|x| x.1).collect(),
+        grupos,
         total,
         proximo_cursor,
     })
@@ -524,9 +555,29 @@ pub fn detalhar_grupo(conn: &Connection, grupo: GrupoId) -> Resultado<DetalheGru
             },
         })
         .collect();
+    let copias_em_conteineres = g
+        .membros
+        .iter()
+        .map(|m| dag_core::CopiaEmConteiner {
+            conteiner: ArquivoId(m.conteiner),
+            conteiner_caminho: m.conteiner_caminho.clone(),
+            caminho_interno: m.caminho_interno.clone(),
+            rotulo: format!("dentro de {}", m.conteiner_caminho),
+            volume: VolumeId(m.volume),
+            volume_rotulo: m.rotulo.clone(),
+            conectado: m.conectado,
+            marcacao: m.marca.map(|x| MarcacaoDaCopia {
+                id: dag_core::MarcacaoId(x.id),
+                tipo: x.tipo,
+                estado: x.estado,
+                escopo: x.escopo,
+            }),
+        })
+        .collect();
     Ok(DetalheGrupo {
         grupo: resumo(&g),
         copias,
+        copias_em_conteineres,
     })
 }
 

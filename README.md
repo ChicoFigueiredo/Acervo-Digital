@@ -14,7 +14,7 @@
 - **Fast Scan** que reaproveita metadados e hash do que não mudou, trata renomeações e remoções sem confundir com volume desconectado, e **monitoramento** por inotify com lacunas (overflow) registradas e reconciliadas. **Verificação de Integridade** relê o conteúdo e aponta divergência sem alterar o arquivo.
 - **Interfaces sobre o mesmo núcleo:** CLI `dag` (saída legível e `--json`), GUI `dag-app` (Bancada: Início, Discos, Varredura, Explorador, Análise com Tree View e Treemap, Duplicados, Monitoramento, Configurações) e servidor **MCP** (`dag mcp`, [docs/MCP.md](docs/MCP.md)). Um único escritor por Catálogo: com o agente/serviço ativo, GUI, CLI e MCP falam com ele pelo socket local.
 - **Serviço opcional** (`dag servico instalar` recomendado: habilita e inicia, entrega o Catálogo ao serviço sem interromper o hash em curso, `--iniciar-no-boot` liga o linger; `dag servico ...`, systemd de usuário, três modos: não instalado, sem autostart, com autostart) e **elevação sob demanda** (`dag scan --elevar`: Polkit + `dag-helper`, que lê só metadados; a senha só no diálogo do sistema). Veja [packaging/README.md](packaging/README.md).
-- **Backup consistente do Catálogo** (`dag catalogo backup`) com verificação de integridade; esquema versionado por migrações ([crates/dag-store/ESQUEMA.md](crates/dag-store/ESQUEMA.md), versão 3).
+- **Backup consistente do Catálogo** (`dag catalogo backup`) com verificação de integridade; esquema versionado por migrações ([crates/dag-store/ESQUEMA.md](crates/dag-store/ESQUEMA.md), versão 7).
 - **Escala:** ensaio de 1 milhão de entradas com hash e duplicados em modo release (números em [docs/ACEITE-FASE-A.md](docs/ACEITE-FASE-A.md)).
 - **Fronteira de plataforma:** a trait `Plataforma` (`dag-core`) isola o que depende do SO; só `PlataformaLinux` existe. Windows e macOS são apenas contrato.
 
@@ -47,14 +47,14 @@ dag-app                                  # GUI
 Segundo plano e integrações:
 
 ```sh
-dag servico instalar && dag servico iniciar     # opt-in; `dag servico autostart on`, `linger on`, `remover`
+dag servico instalar --iniciar-no-boot          # ativa, inicia e assume o Catálogo; `status`, `parar`, `remover`
 dag agente                                       # o agente em primeiro plano (a unidade systemd usa isto)
 dag monitorar ~/Documentos                       # inotify + reconciliação, até Ctrl-C
 dag scan --full --elevar /mnt/dados             # pastas sem permissão: pede o Polkit (metadados apenas)
 claude mcp add dag -- dag mcp                    # registra o MCP no Claude Code (docs/MCP.md)
 ```
 
-O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite`. O escritor único é o agente: CLI, GUI e MCP o lançam sozinhos se não houver um (`--sem-agente` ou `DAG_SEM_AGENTE=1` mantém o modo antigo em processo; o agente lançado fica fora do escopo da janela: unidade systemd instalada, senão `systemd-run --user`, senão `setsid`; fechar a GUI nunca para os trabalhos, e para tê-lo no ar desde o login use `dag servico instalar && dag servico autostart on`, veja [packaging/README.md](packaging/README.md)) e qualquer cliente vê e controla os trabalhos dos outros: `dag jobs`, `dag status --seguir` (ou `dag acompanhar`), `dag pausar|retomar|cancelar --job N` ([ADR 0004](docs/adr/0004-agente-escritor-unico-e-assinatura-de-eventos.md)). Ao atualizar, feche a GUI antiga antes (ela segura a trava); o agente retoma o hash interrompido. Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`, `duplicados`, a GUI) funcionam durante uma varredura.
+O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite`. O escritor único é o agente: CLI, GUI e MCP o lançam sozinhos se não houver um (`--sem-agente` ou `DAG_SEM_AGENTE=1` mantém o modo antigo em processo; o agente lançado fica fora do escopo da janela: unidade systemd instalada, senão `systemd-run --user`, senão `setsid`; fechar a GUI nunca para os trabalhos, e para tê-lo no ar desde o login use `dag servico instalar` (ativa e inicia; `--iniciar-no-boot` também liga o linger), veja [packaging/README.md](packaging/README.md)) e qualquer cliente vê e controla os trabalhos dos outros: `dag jobs`, `dag status --seguir` (ou `dag acompanhar`), `dag pausar|retomar|cancelar --job N` ([ADR 0004](docs/adr/0004-agente-escritor-unico-e-assinatura-de-eventos.md)). Ao atualizar, feche a GUI antiga antes (ela segura a trava); o agente retoma o hash interrompido. Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`, `duplicados`, a GUI) funcionam durante uma varredura.
 
 O Hash Completo lê **um disco físico por thread, todos os discos ao mesmo tempo** (volumes do mesmo disco ficam em sequência). Se o processo morrer ou a execução for cancelada no meio do hash, `dag scan --retomar <id>` continua só o que falta: a fila é refeita a partir dos hashes já gravados, sem reler nada e sem mudar o Catálogo.
 

@@ -6,6 +6,7 @@ pub mod fat;
 pub mod fuzz;
 pub mod iso;
 pub mod part;
+pub mod virt;
 
 use dag_imagens::{Controle, Imagem, Resumo, TipoMembro, abrir};
 use std::collections::BTreeMap;

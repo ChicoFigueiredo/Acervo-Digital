@@ -783,7 +783,20 @@ pub fn reconciliar(cat: &mut Catalogo, autor: Autor, agora: i64) -> Resultado<Re
 pub fn chaves_de_hash(conn: &Connection, ids: &[i64]) -> Resultado<Vec<(u64, [u8; 32])>> {
     let mut v = Vec::new();
     let mut st = conn.prepare("SELECT size_bytes, hash FROM hashes WHERE file_id = ?1")?;
+    // Se algum for Contêiner, os Membros dele mudam de situação junto (não contam Na Lixeira).
+    let mut sm = conn.prepare(
+        "SELECT DISTINCT tamanho, hash FROM membros
+         WHERE conteiner_file_id = ?1 AND hash IS NOT NULL AND tipo = 'arquivo' AND tamanho > 0",
+    )?;
     for id in ids {
+        for (t, h) in sm
+            .query_map([id], |l| Ok((l.get::<_, i64>(0)?, l.get::<_, Vec<u8>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+        {
+            if let Ok(h) = <[u8; 32]>::try_from(h.as_slice()) {
+                v.push((u(t), h));
+            }
+        }
         if let Some((t, h)) = st
             .query_row([id], |l| Ok((l.get::<_, i64>(0)?, l.get::<_, Vec<u8>>(1)?)))
             .optional()?

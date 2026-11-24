@@ -2,9 +2,11 @@
 
 pub mod analise;
 pub mod configuracoes;
+pub mod conteudo;
 pub mod discos;
 pub mod duplicados;
 pub mod explorador;
+pub mod fila;
 pub mod inicio;
 pub mod lixeira;
 pub mod monitoramento;
@@ -50,7 +52,7 @@ impl DefPagina {
 }
 
 /// Todas as páginas, na ordem das abas do Ribbon.
-pub fn todas() -> [&'static DefPagina; 9] {
+pub fn todas() -> [&'static DefPagina; 10] {
     [
         &inicio::PAGINA,
         &discos::PAGINA,
@@ -59,6 +61,7 @@ pub fn todas() -> [&'static DefPagina; 9] {
         &analise::PAGINA,
         &duplicados::PAGINA,
         &lixeira::PAGINA,
+        &fila::PAGINA,
         &monitoramento::PAGINA,
         &configuracoes::PAGINA,
     ]

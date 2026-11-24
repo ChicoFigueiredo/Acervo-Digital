@@ -37,7 +37,7 @@ fn marcacao_core(c: &CopiaCarregada, m: MarcaEfetiva, hash: HashCompleto) -> Mar
 /// só em cópias de Volumes desconectados é mantida com `nao_verificada_desde` (último contato
 /// com o Volume).
 pub(crate) fn cobertura_do_grupo(g: &GrupoCarregado) -> Vec<CoberturaArquivo> {
-    let copias: Vec<Copia> = g
+    let mut copias: Vec<Copia> = g
         .copias
         .iter()
         .filter_map(|c| {
@@ -48,7 +48,16 @@ pub(crate) fn cobertura_do_grupo(g: &GrupoCarregado) -> Vec<CoberturaArquivo> {
             })
         })
         .collect();
-    let backups: Vec<(Marcacao, bool, i64)> = g
+    // Um Membro conta como cópia no Dispositivo do Contêiner; ids negativos não colidem com
+    // arquivos reais.
+    copias.extend(g.membros.iter().filter_map(|m| {
+        m.dispositivo.map(|d| Copia {
+            arquivo: ArquivoId(-m.membro),
+            volume: dag_core::VolumeId(m.volume),
+            dispositivo: DispositivoId(d),
+        })
+    }));
+    let mut backups: Vec<(Marcacao, bool, i64)> = g
         .copias
         .iter()
         .filter(|c| c.dispositivo.is_some())
@@ -64,6 +73,33 @@ pub(crate) fn cobertura_do_grupo(g: &GrupoCarregado) -> Vec<CoberturaArquivo> {
                 })
         })
         .collect();
+    // Marcação de Backup do Contêiner cobre as cópias de outros Dispositivos Físicos.
+    backups.extend(
+        g.membros
+            .iter()
+            .filter(|m| m.dispositivo.is_some())
+            .filter_map(|m| {
+                m.marca
+                    .filter(|x| x.tipo == TipoMarcacao::Backup && x.estado == EstadoMarcacao::Ativa)
+                    .map(|x| {
+                        (
+                            Marcacao {
+                                arquivo: ArquivoId(-m.membro),
+                                tipo: x.tipo,
+                                estado: x.estado,
+                                origem: if x.escopo.eh_regra() {
+                                    OrigemMarcacao::Regra
+                                } else {
+                                    OrigemMarcacao::Manual
+                                },
+                                hash_na_marcacao: g.hash,
+                            },
+                            m.conectado,
+                            m.visto_em.unwrap_or(0),
+                        )
+                    })
+            }),
+    );
     let todas: Vec<Marcacao> = backups.iter().map(|b| b.0.clone()).collect();
     let online: Vec<Marcacao> = backups
         .iter()

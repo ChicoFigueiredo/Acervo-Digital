@@ -28,6 +28,8 @@ pub enum TipoJob {
     Monitor,
     /// Reconstrução dos Grupos de Duplicados (`dag duplicados reconstruir`).
     Duplicados,
+    /// Conteúdo de Contêineres (BLAKE3 dos Membros; ADR 0006).
+    Conteineres,
 }
 
 impl TipoJob {
@@ -41,6 +43,7 @@ impl TipoJob {
             Self::Abertura => "Abertura",
             Self::Monitor => "Monitor",
             Self::Duplicados => "Agrupando duplicados",
+            Self::Conteineres => "Conteúdo de contêineres",
         }
     }
 }
@@ -163,6 +166,15 @@ impl JobInfo {
         })
     }
 
+    /// Último progresso da etapa "Conteúdo de contêineres".
+    #[must_use]
+    pub fn conteineres_atual(&self) -> Option<&crate::ProgressoConteineres> {
+        self.progresso.iter().rev().find_map(|p| match p {
+            Progresso::Conteineres(c) => Some(c),
+            _ => None,
+        })
+    }
+
     /// Último progresso de inventário (ou reconciliação) e se é a reconciliação.
     #[must_use]
     pub fn inventario_atual(&self) -> Option<(&ProgressoInventario, bool)> {
@@ -191,6 +203,7 @@ impl JobInfo {
         e.passo = self.passo.as_ref();
         e.etapa_texto = self.etapa.as_deref();
         e.hash = hash.map(|(h, _)| h);
+        e.conteineres = self.conteineres_atual();
         e.verificacao = hash.is_some_and(|(_, v)| v);
         e.inventario = inv.map(|(i, _)| ContagemInventario::from(i));
         e.reconciliacao = inv.is_some_and(|(_, r)| r);

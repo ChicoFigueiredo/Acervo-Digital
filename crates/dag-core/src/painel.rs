@@ -8,8 +8,8 @@
 
 use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::{
-    EstadoJob, LeituraEmCurso, OrigemJob, PassoAbertura, ProgressoDiscoHash, ProgressoHash,
-    TipoJob, TipoPasso,
+    EstadoJob, LeituraEmCurso, OrigemJob, PassoAbertura, ProgressoConteineres, ProgressoDiscoHash,
+    ProgressoHash, TipoJob, TipoPasso,
 };
 
 /// Janela mínima (ms) de medição para a estimativa de tempo restante deixar de ser "estimando…".
@@ -87,6 +87,8 @@ pub struct EntradaPainel<'a> {
     /// Full Scan pedido sem hash.
     pub sem_hash: bool,
     pub hash: Option<&'a ProgressoHash>,
+    /// Conteúdo de contêineres (etapa depois do hash).
+    pub conteineres: Option<&'a ProgressoConteineres>,
     /// O `hash` é a Verificação de Integridade.
     pub verificacao: bool,
     pub inventario: Option<ContagemInventario>,
@@ -112,6 +114,7 @@ impl EntradaPainel<'_> {
             etapa_texto: None,
             sem_hash: false,
             hash: None,
+            conteineres: None,
             verificacao: false,
             inventario: None,
             reconciliacao: false,
@@ -135,6 +138,8 @@ pub enum EtapaPainel {
     PreparandoHash,
     Hash,
     Verificacao,
+    /// Lendo o conteúdo dos compactados (Membros e hashes), depois do Hash Completo.
+    Conteineres,
 }
 
 /// Estado de um disco na etapa de hash.
@@ -211,6 +216,17 @@ pub struct PainelHash {
     pub max_discos: u32,
 }
 
+/// Totais da etapa "Conteúdo de contêineres" (a tabela por disco reaproveita [`PainelHash`]:
+/// "arquivos" são Contêineres).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PainelConteineres {
+    pub leitura: PainelHash,
+    pub membros: u64,
+    pub aguardando_senha: u64,
+    pub falhas: u64,
+    pub copiados: u64,
+}
+
 /// O painel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PainelJob {
@@ -223,6 +239,7 @@ pub struct PainelJob {
     pub pausado: bool,
     pub decorrido_s: Option<u64>,
     pub hash: Option<PainelHash>,
+    pub conteineres: Option<PainelConteineres>,
     pub inventario: Option<ContagemInventario>,
     pub catalogo: Option<TotaisCatalogoPainel>,
     /// Texto livre da última mudança de etapa (classificação, duplicados...).
@@ -373,6 +390,9 @@ fn titulo(e: &EntradaPainel<'_>, etapa: EtapaPainel) -> String {
         EtapaPainel::Hash | EtapaPainel::PreparandoHash | EtapaPainel::Verificacao
     );
     let exec = e.execucao.map(|x| format!("#{x}"));
+    if etapa == EtapaPainel::Conteineres {
+        return "Conteúdo de contêineres (compactados)".into();
+    }
     if let Some(p) = e.passo {
         match p.tipo {
             TipoPasso::Retomada => {
@@ -425,6 +445,7 @@ fn titulo(e: &EntradaPainel<'_>, etapa: EtapaPainel) -> String {
         }
         Some(TipoJob::Monitor) => "Monitor".into(),
         Some(TipoJob::Duplicados) => "Agrupando duplicados".into(),
+        Some(TipoJob::Conteineres) => "Conteúdo de contêineres".into(),
         Some(TipoJob::FullScan) | None => {
             if etapa == EtapaPainel::Verificacao {
                 "Verificação de integridade".into()
@@ -445,6 +466,7 @@ impl PainelJob {
     #[must_use]
     pub fn montar(e: &EntradaPainel<'_>) -> Self {
         let etapa = match (e.hash, e.inventario, e.estado) {
+            _ if e.conteineres.is_some() => EtapaPainel::Conteineres,
             (Some(_), _, _) if e.verificacao => EtapaPainel::Verificacao,
             (Some(h), _, _) if h.preparando => EtapaPainel::PreparandoHash,
             (Some(_), _, _) => EtapaPainel::Hash,
@@ -454,6 +476,13 @@ impl PainelJob {
             (None, None, _) => EtapaPainel::Preparando,
         };
         let hash = e.hash.map(|h| painel_hash(h, e.pausado));
+        let conteineres = e.conteineres.map(|c| PainelConteineres {
+            leitura: painel_hash(&c.andamento, e.pausado),
+            membros: c.membros,
+            aguardando_senha: c.aguardando_senha,
+            falhas: c.falhas,
+            copiados: c.copiados,
+        });
         Self {
             titulo: titulo(e, etapa),
             etapa,
@@ -463,6 +492,7 @@ impl PainelJob {
             pausado: e.pausado || e.estado == Some(EstadoJob::Pausado),
             decorrido_s: e.decorrido_s,
             hash,
+            conteineres,
             // O inventário só aparece enquanto é a etapa em curso.
             inventario: match etapa {
                 EtapaPainel::Inventario | EtapaPainel::Reconciliacao => e.inventario,
@@ -476,6 +506,9 @@ impl PainelJob {
     /// Percentual global quando existe denominador (hash); inventário não tem.
     #[must_use]
     pub fn pct_global(&self) -> Option<f64> {
+        if let Some(c) = &self.conteineres {
+            return c.leitura.pct_arquivos;
+        }
         self.hash.as_ref().and_then(|h| h.pct_arquivos)
     }
 
@@ -485,6 +518,20 @@ impl PainelJob {
         let mut t = self.titulo.clone();
         if self.pausado {
             t.push_str(" — pausado");
+        }
+        if let Some(c) = &self.conteineres {
+            t.push_str(&format!(
+                " — {} ({} de {} contêineres, {} membros) · {}",
+                pct_texto(c.leitura.pct_arquivos),
+                inteiro_pt_br(c.leitura.arquivos_feitos),
+                inteiro_pt_br(c.leitura.arquivos_total),
+                inteiro_pt_br(c.membros),
+                vazao_texto(c.leitura.bytes_por_seg)
+            ));
+            if let Some(s) = c.leitura.eta_s {
+                t.push_str(&format!(" · faltam ~{}", duracao_curta(s)));
+            }
+            return t;
         }
         match (&self.hash, &self.inventario) {
             (Some(_), _) if self.etapa == EtapaPainel::PreparandoHash => {
@@ -515,6 +562,16 @@ impl PainelJob {
     /// Uma linha curta para listas de trabalhos.
     #[must_use]
     pub fn resumo(&self) -> String {
+        if let Some(c) = &self.conteineres {
+            return format!(
+                "contêineres {} de {} ({}), {} membros, {} lidos",
+                inteiro_pt_br(c.leitura.arquivos_feitos),
+                inteiro_pt_br(c.leitura.arquivos_total),
+                pct_texto(c.leitura.pct_arquivos),
+                inteiro_pt_br(c.membros),
+                bytes_humanos(c.leitura.bytes_lidos)
+            );
+        }
         match (&self.hash, &self.inventario) {
             (Some(_), _) if self.etapa == EtapaPainel::PreparandoHash => {
                 "montando a fila de hash…".into()
@@ -581,7 +638,23 @@ impl PainelJob {
                 v.push(format!("  Erros: {}", inteiro_pt_br(i.erros)));
             }
         }
-        if let Some(h) = self
+        if let Some(c) = &self.conteineres {
+            v.push(format!(
+                "  Conteúdo de contêineres: {} de {} lidos ({}) · {} membros · {} aguardando senha · {} com falha de leitura · {} cópias idênticas reaproveitadas",
+                inteiro_pt_br(c.leitura.arquivos_feitos),
+                inteiro_pt_br(c.leitura.arquivos_total),
+                pct_texto(c.leitura.pct_arquivos),
+                inteiro_pt_br(c.membros),
+                inteiro_pt_br(c.aguardando_senha),
+                inteiro_pt_br(c.falhas),
+                inteiro_pt_br(c.copiados)
+            ));
+            v.extend(
+                linhas_hash(&c.leitura)
+                    .into_iter()
+                    .filter(|l| !l.starts_with("  Arquivos da execução")),
+            );
+        } else if let Some(h) = self
             .hash
             .as_ref()
             .filter(|h| self.etapa != EtapaPainel::PreparandoHash || h.arquivos_total > 0)

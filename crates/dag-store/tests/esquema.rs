@@ -48,7 +48,7 @@ fn contar(c: &Connection, tabela: &str) -> i64 {
 fn migracao_em_banco_vazio_cria_todas_as_tabelas() {
     let catalogo = cat();
     assert_eq!(catalogo.versao().expect("versão"), versao_do_esquema());
-    assert_eq!(versao_do_esquema(), 8);
+    assert_eq!(versao_do_esquema(), 9);
     let c = catalogo.armazem().conexao();
     for t in [
         "dispositivos",

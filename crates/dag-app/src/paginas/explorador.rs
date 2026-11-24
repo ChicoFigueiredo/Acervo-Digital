@@ -149,6 +149,8 @@ pub struct Estado {
     pub trilha: Carga<Vec<InfoPasta>>,
     pub arquivos: Carga<PaginaArquivos>,
     pub propriedades: bool,
+    /// Compactados da pasta aberta, expandidos como pastas virtuais.
+    pub conteudo: super::conteudo::Estado,
 }
 
 impl Default for Estado {
@@ -161,6 +163,7 @@ impl Default for Estado {
             trilha: Carga::default(),
             arquivos: Carga::default(),
             propriedades: true,
+            conteudo: super::conteudo::Estado::default(),
         }
     }
 }
@@ -182,6 +185,7 @@ impl Estado {
     pub fn atualizar(&mut self, leitor: &Leitor, geracao: u64) {
         if self.vista != geracao {
             self.vista = geracao;
+            self.conteudo.limpar();
             self.raizes
                 .pedir(leitor.consultar(|c| raizes(c).map_err(erro)));
             // A pasta selecionada pode ter mudado de tamanho: relê os arquivos dela.
@@ -492,6 +496,12 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                             carregar_mais_arquivos = true;
                         }
                     });
+                    super::conteudo::desenhar(
+                        ui,
+                        &mut est.conteudo,
+                        leitor,
+                        pg.itens.iter().map(|a| (a.id, a.nome.clone())),
+                    );
                 }
             }
         });

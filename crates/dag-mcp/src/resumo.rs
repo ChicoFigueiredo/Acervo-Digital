@@ -139,6 +139,21 @@ pub fn resumir(r: &Resposta) -> String {
             mais(proximo_cursor)
         ),
         Resposta::Grupo { .. } => "Detalhe do grupo de duplicados.".into(),
+        Resposta::Conteineres { status } => format!(
+            "Contêineres: {} lido(s), {} pendente(s), {} esperando senha, {} falha(s); {} item(ns) aberto(s) na Fila de Serviço.",
+            status.lidos,
+            status.pendentes,
+            status.aguardando_senha,
+            status.falhas,
+            status.pedidos_abertos
+        ),
+        Resposta::Pedidos { pedidos } => format!("{} item(ns) na Fila de Serviço.", pedidos.len()),
+        Resposta::Cofre { itens, .. } => {
+            format!("Cofre de Senhas: {} senha(s) guardada(s).", itens.len())
+        }
+        Resposta::Membros { entradas, .. } => {
+            format!("{} entrada(s) no contêiner.", entradas.len())
+        }
         Resposta::Marcacao { .. } => {
             "Marcação registrada no Catálogo (nada foi apagado nem movido no disco).".into()
         }
@@ -241,6 +256,16 @@ pub fn texto_progresso(p: &Progresso) -> String {
                 dag_core::painel::eta_texto(eta)
             )
         }
+        Progresso::Conteineres(c) => format!(
+            "contêineres: {}/{} lido(s), {} membro(s), {} esperando senha, {} falha(s), {}/{}",
+            c.andamento.arquivos_feitos,
+            c.andamento.arquivos_total,
+            c.membros,
+            c.aguardando_senha,
+            c.falhas,
+            bytes(c.andamento.bytes_lidos),
+            bytes(c.andamento.bytes_total)
+        ),
         Progresso::Mensagem { texto } => texto.clone(),
         Progresso::Passo(p) => match p.tipo {
             dag_core::TipoPasso::Retomada => format!(

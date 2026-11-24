@@ -526,6 +526,8 @@ impl Encaminhador {
                 Evento::Hash(h.clone())
             }
             Progresso::Passo(p) => Evento::Passo(p.clone()),
+            // O andamento dos contêineres chega pelo painel do trabalho (JobInfo).
+            Progresso::Conteineres(_) => return,
             // Passos da recuperação ao abrir (retomada, passadas de verificação) viram o texto da
             // faixa/barra de status; as demais mensagens são só do terminal.
             Progresso::Mensagem { texto } => match texto.strip_prefix("abertura: ") {
@@ -560,7 +562,7 @@ impl Tradutor {
             }
             Progresso::Hash(h) | Progresso::Verificacao(h) => saida.push(Evento::Hash(h.clone())),
             Progresso::Passo(p) => saida.push(Evento::Passo(p.clone())),
-            Progresso::Mensagem { .. } => {}
+            Progresso::Mensagem { .. } | Progresso::Conteineres(_) => {}
         }
     }
 

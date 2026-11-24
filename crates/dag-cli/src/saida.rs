@@ -1164,6 +1164,119 @@ pub fn explorar(
 
 /// Tabela dos trabalhos do agente (qualquer cliente que os tenha iniciado), seguida do painel de
 /// cada trabalho em execução: o que faz, onde roda, totais, threads e andamento por disco.
+/// Fila de Serviço: pedidos de senha e falhas de leitura.
+pub fn pedidos_servico(pedidos: &[dag_core::PedidoInfo]) -> String {
+    if pedidos.is_empty() {
+        return "Fila de Serviço: nenhum item aberto\n".into();
+    }
+    let linhas: Vec<Vec<String>> = pedidos
+        .iter()
+        .map(|p| {
+            vec![
+                p.id.to_string(),
+                match p.tipo.as_str() {
+                    dag_core::PEDIDO_SENHA => "Pedido de Senha".to_string(),
+                    dag_core::FALHA_LEITURA => "Falha de Leitura".to_string(),
+                    outro => outro.to_string(),
+                },
+                p.estado.clone(),
+                p.objeto.clone().unwrap_or_else(|| "-".into()),
+                p.motivo.clone(),
+            ]
+        })
+        .collect();
+    format!(
+        "Fila de Serviço\n{}Use `dag fila senha <id>` para fornecer a senha, `dag fila tentar-de-novo <id>` ou `dag fila descartar <id>`.\n",
+        tabela(
+            &["ID", "TIPO", "ESTADO", "CONTÊINER", "MOTIVO"],
+            &[true, false, false, false, false],
+            &linhas,
+        )
+    )
+}
+
+/// Cofre de Senhas: situação do chaveiro e rótulos (nunca valores).
+pub fn cofre(situacao: dag_core::SituacaoCofre, itens: &[dag_core::ItemCofre]) -> String {
+    use dag_core::SituacaoCofre as S;
+    let sit = match situacao {
+        S::Chaveiro => "chaveiro do sistema",
+        S::Aberto => "arquivo cifrado (aberto)",
+        S::Trancado => "arquivo cifrado (trancado)",
+        S::Indisponivel => "indisponível (sem chaveiro do sistema)",
+    };
+    let mut s = format!("Cofre de Senhas: {sit}\n");
+    if itens.is_empty() {
+        s.push_str("nenhuma senha guardada\n");
+    } else {
+        let linhas: Vec<Vec<String>> = itens
+            .iter()
+            .map(|i| vec![i.id.to_string(), i.rotulo.clone()])
+            .collect();
+        s.push_str(&tabela(&["ID", "RÓTULO"], &[true, false], &linhas));
+    }
+    s
+}
+
+/// Andamento da etapa de conteúdo de contêineres.
+pub fn status_conteineres(c: &dag_core::StatusConteineres) -> String {
+    format!(
+        "Conteúdo de contêineres\n  lidos: {} ({} membro(s), {} lidos)\n  pendentes: {} ({} a ler)\n  lendo agora: {}\n  aguardando senha: {} | aguardando chaveiro: {}\n  falhas de leitura: {} | não são contêineres: {}\n  itens abertos na Fila de Serviço: {}\n",
+        inteiro_pt_br(c.lidos),
+        inteiro_pt_br(c.membros),
+        bytes_humanos(c.bytes_lidos),
+        inteiro_pt_br(c.pendentes),
+        bytes_humanos(c.bytes_pendentes),
+        inteiro_pt_br(c.lendo),
+        inteiro_pt_br(c.aguardando_senha),
+        inteiro_pt_br(c.aguardando_chaveiro),
+        inteiro_pt_br(c.falhas),
+        inteiro_pt_br(c.nao_conteineres),
+        inteiro_pt_br(c.pedidos_abertos),
+    )
+}
+
+/// Conteúdo de uma pasta virtual de um contêiner.
+pub fn membros(
+    conteiner: &str,
+    entradas: &[dag_core::EntradaMembroInfo],
+    proximo_cursor: Option<&str>,
+) -> String {
+    if entradas.is_empty() {
+        return format!("{conteiner}: sem conteúdo catalogado nesta pasta\n");
+    }
+    let linhas: Vec<Vec<String>> = entradas
+        .iter()
+        .map(|e| {
+            vec![
+                if e.navegavel {
+                    format!("{}/", e.nome)
+                } else {
+                    e.nome.clone()
+                },
+                bytes_humanos(e.bytes),
+                e.aninhado_ordem
+                    .map_or_else(|| "-".into(), |o| o.to_string()),
+                e.estado.clone().unwrap_or_else(|| "-".into()),
+                e.hash
+                    .as_deref()
+                    .map_or_else(|| "-".into(), |h| h[..16.min(h.len())].to_string()),
+            ]
+        })
+        .collect();
+    let mut s = format!(
+        "dentro de {conteiner}\n{}",
+        tabela(
+            &["NOME", "TAMANHO", "ORDEM", "ESTADO", "BLAKE3"],
+            &[false, true, true, false, false],
+            &linhas,
+        )
+    );
+    if let Some(c) = proximo_cursor {
+        s.push_str(&format!("próxima página: --cursor {c}\n"));
+    }
+    s
+}
+
 pub fn jobs(jobs: &[dag_core::JobInfo]) -> String {
     jobs_com_catalogo(jobs, None, Some(agora_s()))
 }
@@ -1328,6 +1441,17 @@ pub fn imprimir(r: &Resposta, todos: bool) {
         } => print!(
             "{}",
             explorar(pasta.as_deref(), entradas, proximo_cursor.as_deref())
+        ),
+        Resposta::Pedidos { pedidos } => print!("{}", pedidos_servico(pedidos)),
+        Resposta::Cofre { situacao, itens } => print!("{}", cofre(*situacao, itens)),
+        Resposta::Conteineres { status } => print!("{}", status_conteineres(status)),
+        Resposta::Membros {
+            conteiner,
+            entradas,
+            proximo_cursor,
+        } => print!(
+            "{}",
+            membros(conteiner, entradas, proximo_cursor.as_deref())
         ),
         Resposta::Erro { mensagem, .. } => eprintln!("erro: {mensagem}"),
         outra => {

@@ -624,7 +624,7 @@ impl Limitador {
     }
 }
 
-fn abrir_somente_leitura(caminho: &Path) -> std::io::Result<File> {
+pub(crate) fn abrir_somente_leitura(caminho: &Path) -> std::io::Result<File> {
     let base = (OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32;
     let tentativa = |extra: i32| {
         OpenOptions::new()

@@ -35,6 +35,7 @@ use rusqlite::{Connection, OpenFlags, params};
 
 use crate::caminho::preparar;
 use crate::classificador::ClassificadorPorExtensao;
+use crate::cofre::CofreLazy;
 use crate::erro::ErroAgente;
 use crate::exibir::progresso_stderr;
 use crate::explorar::explorar;
@@ -49,6 +50,13 @@ const PAGINA_PADRAO: u32 = 50;
 const PAGINA_MAXIMA: u32 = 1000;
 /// Heartbeat mais antigo que isto (s) = monitor morto (a trava é solta com o processo).
 const HEARTBEAT_VALIDO_S: i64 = 15;
+
+/// Diretório do arquivo de reserva do Cofre: ao lado do Catálogo.
+fn dir_do_cofre(catalogo: &Path) -> PathBuf {
+    catalogo
+        .parent()
+        .map_or_else(|| PathBuf::from("segredos"), |p| p.join("segredos"))
+}
 
 pub(crate) fn agora() -> i64 {
     SystemTime::now()
@@ -72,6 +80,10 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::ListarJobs
             | Comando::ListarLixeira { .. }
             | Comando::MoverParaLixeira { simular: true, .. }
+            | Comando::StatusConteineres
+            | Comando::ListarPedidos { .. }
+            | Comando::CofreListar
+            | Comando::ExplorarConteiner { .. }
             | Comando::ConfigHash {
                 threads_por_disco: None,
                 max_discos: None
@@ -101,13 +113,15 @@ pub struct Agente {
     caminho: PathBuf,
     guarda: Option<GuardaEscritor>,
     pub(crate) controle: ControleScan,
-    progresso: Option<CallbackProgresso>,
+    pub(crate) progresso: Option<CallbackProgresso>,
     volumes_fixos: Option<Vec<VolumeDescoberto>>,
     pub(crate) autor: Autor,
     /// Conferência de `st_dev` do `rename` da Lixeira (injetável nos testes).
     pub(crate) dispositivos: Arc<dyn crate::lixeira::Dispositivos>,
     /// Paralelismo do hash dado por flag do agente (vence o persistido, perde para o pedido).
     opcoes_hash: OpcoesHash,
+    /// Cofre de Senhas (chave no keyring do sistema; abre só quando alguém o usa).
+    pub(crate) cofre: Arc<CofreLazy>,
 }
 
 impl fmt::Debug for Agente {
@@ -160,6 +174,7 @@ impl Agente {
     }
 
     fn montar(catalogo: Catalogo, caminho: PathBuf, guarda: Option<GuardaEscritor>) -> Self {
+        let cofre = Arc::new(CofreLazy::novo(dir_do_cofre(&caminho), None));
         Self {
             catalogo,
             caminho,
@@ -170,7 +185,15 @@ impl Agente {
             autor: Autor::Cli,
             dispositivos: Self::dispositivos_padrao(),
             opcoes_hash: OpcoesHash::default(),
+            cofre,
         }
+    }
+
+    /// Usa outro chaveiro do sistema no Cofre de Senhas (testes passam um falso em memória).
+    #[must_use]
+    pub fn com_chaveiro(mut self, c: Arc<dyn bancada_segredos::ChaveiroDoSistema>) -> Self {
+        self.cofre = Arc::new(CofreLazy::novo(dir_do_cofre(&self.caminho), Some(c)));
+        self
     }
 
     /// Paralelismo do Hash Completo vindo de flag do agente (`--threads-por-disco`,
@@ -371,6 +394,24 @@ impl Agente {
                 cursor.as_deref(),
             ),
             Comando::BackupCatalogo { destino } => self.backup(Path::new(&destino)),
+            Comando::LerConteineres => self.ler_conteineres(),
+            Comando::StatusConteineres => self.status_conteineres(),
+            Comando::ListarPedidos { incluir_encerrados } => {
+                self.listar_pedidos(incluir_encerrados)
+            }
+            Comando::ResolverPedido { id, senha } => self.resolver_pedido(id, &senha),
+            Comando::DispensarPedido { id } => self.dispensar_pedido(id),
+            Comando::TentarDeNovo { id } => self.tentar_de_novo(id),
+            Comando::CofreAdicionar { rotulo, senha } => self.cofre_adicionar(&rotulo, &senha),
+            Comando::CofreListar => self.cofre_listar(),
+            Comando::CofreRemover { id } => self.cofre_remover(id),
+            Comando::ExplorarConteiner {
+                conteiner,
+                pai_ordem,
+                pasta,
+                limite,
+                cursor,
+            } => self.explorar_conteiner(&conteiner, pai_ordem, &pasta, limite, cursor.as_deref()),
             Comando::ListarDuplicados {
                 volume,
                 tamanho_minimo,
@@ -746,8 +787,9 @@ impl Agente {
         if !sem_hash {
             let autor = self.autor;
             let agente = self.opcoes_hash;
+            let cofre = Arc::clone(&self.cofre);
             monitor = monitor.com_pos_reconciliacao(move |cat, execucoes| {
-                pos_reconciliacao(cat, execucoes, autor, agente).map_err(|e| e.to_string())
+                pos_reconciliacao(cat, execucoes, autor, agente, &cofre).map_err(|e| e.to_string())
             });
         }
         self.mensagem("monitorando (Ctrl-C para encerrar)...");
@@ -885,7 +927,14 @@ impl Agente {
                     erros: h.erros,
                     duracao_ms: u64::try_from(h.duracao.as_millis()).unwrap_or(u64::MAX),
                 });
-                if cancelada {
+                // Conteúdo de contêineres: nova etapa depois do Hash Completo (ADR 0006).
+                let mut conteineres_cancelada = false;
+                if !cancelada {
+                    let c = self.etapa_conteineres()?;
+                    duracao += c.duracao;
+                    conteineres_cancelada = c.desfecho == DesfechoScan::Cancelada;
+                }
+                if cancelada || conteineres_cancelada {
                     desfecho = "cancelada";
                 } else {
                     if h.erros > 0 {
@@ -1210,6 +1259,7 @@ fn pos_reconciliacao(
     execucoes: &[i64],
     autor: Autor,
     agente: OpcoesHash,
+    cofre: &Arc<CofreLazy>,
 ) -> Result<(), ErroAgente> {
     for id in execucoes {
         // Lê o persistido a cada passada: mudança de configuração vale na próxima.
@@ -1218,6 +1268,11 @@ fn pos_reconciliacao(
             .com_config(cfg)
             .executar(cat)?;
     }
+    // Contêineres novos ou alterados: lê o conteúdo (retomável; cifrados viram Pedido de Senha).
+    let cofre: Arc<dyn dag_scanner::Cofre> = cofre.clone();
+    dag_scanner::EtapaConteineres::nova()
+        .com_cofre(cofre)
+        .executar(cat)?;
     let t = agora();
     let lixeira = dag_store::lixeira::reconciliar(cat, autor, t)?;
     if lixeira.mudou_copias() || hashes::grupos_desatualizados(cat.armazem().conexao())? {

@@ -163,6 +163,9 @@ pub struct GrupoDuplicados {
     pub copias: u32,
     /// Quantas das cópias estão em Volumes desconectados.
     pub copias_offline: u32,
+    /// Cópias que são Membros de Contêineres (além das `copias` em arquivos comuns).
+    #[serde(default)]
+    pub copias_em_conteineres: u32,
     pub copia_principal: Option<ArquivoId>,
     pub modo_principal: ModoPrincipal,
     /// Bytes das cópias com Marcação para Deleção ativa.
@@ -173,11 +176,34 @@ pub struct GrupoDuplicados {
     pub espaco_recuperavel_bytes: u64,
 }
 
+/// Cópia de um Grupo de Duplicados que está dentro de um Contêiner (um Membro). Conta como
+/// cópia (evita Única Cópia, dá Cobertura quando o Contêiner tem Marcação de Backup em outro
+/// Dispositivo Físico) e nunca soma espaço recuperável.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopiaEmConteiner {
+    /// Arquivo Contêiner que guarda o Membro.
+    pub conteiner: ArquivoId,
+    /// Caminho do Contêiner.
+    pub conteiner_caminho: String,
+    /// Caminho do Membro dentro do Contêiner.
+    pub caminho_interno: String,
+    /// `dentro de <contêiner>`.
+    pub rotulo: String,
+    pub volume: VolumeId,
+    pub volume_rotulo: Option<String>,
+    pub conectado: bool,
+    /// Marcação que vale para o Contêiner (Membro não tem marcação própria).
+    pub marcacao: Option<MarcacaoDaCopia>,
+}
+
 /// Grupo com todas as suas cópias.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetalheGrupo {
     pub grupo: GrupoDuplicados,
     pub copias: Vec<CopiaGrupo>,
+    /// Cópias que são Membros de Contêineres ("dentro de <contêiner>").
+    #[serde(default)]
+    pub copias_em_conteineres: Vec<CopiaEmConteiner>,
 }
 
 /// Arquivo marcado para Deleção sem nenhuma outra cópia no Catálogo.

@@ -310,6 +310,7 @@ fn agente(marcas: &Arc<Marcas>) -> Agente {
                 Progresso::Reconciliacao(_) => "reconciliação".to_string(),
                 Progresso::Hash(_) => "hash".to_string(),
                 Progresso::Verificacao(_) => "verificação".to_string(),
+                Progresso::Conteineres(_) => "contêineres".to_string(),
                 Progresso::Mensagem { texto } => texto.clone(),
                 Progresso::Passo(_) => "passo da abertura".to_string(),
             };

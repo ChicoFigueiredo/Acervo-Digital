@@ -1405,3 +1405,66 @@ fn listagem_em_sql_aguenta_muitos_grupos_sem_alterar_a_semantica() {
     assert_eq!(p.total as i64, n / 50);
     assert!(p.grupos.iter().all(|g| g.tamanho == 50));
 }
+
+// ------------------------------------------------------------ Membros de Contêineres (ADR 0006)
+
+impl Fx {
+    /// Registra o Contêiner como lido e grava um Membro `caminho` de hash `hs`.
+    fn membro(&self, conteiner: i64, caminho: &str, tam: i64, hs: [u8; 32]) {
+        self.conn()
+            .execute(
+                "INSERT INTO conteineres (file_id, volume_id, estado, formato, hash_lido, enfileirado_em, atualizado_em)
+                 SELECT ?1, (SELECT volume_id FROM files WHERE id = ?1), 'lido', 'zip', hash, 1, 1 FROM hashes WHERE file_id = ?1",
+                [conteiner],
+            )
+            .unwrap();
+        self.conn()
+            .execute(
+                "INSERT INTO membros (conteiner_file_id, ordem, caminho_raw, caminho_display, tipo,
+                                      tamanho, hash, estado)
+                 VALUES (?1, 0, CAST(?2 AS BLOB), ?2, 'arquivo', ?3, ?4, 'lido')",
+                params![conteiner, caminho, tam, hs.as_slice()],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn membro_conta_como_copia_mas_nunca_como_espaco_recuperavel() {
+    let mut f = Fx::novo();
+    let (d1, d2) = (f.dispositivo("d1"), f.dispositivo("d2"));
+    let ssd = f.volume("SSD", Some(d1), true);
+    let hd = f.volume("HD", Some(d2), true);
+    let ps = f.pasta(ssd, None, "/s");
+    let ph = f.pasta(hd, None, "/h");
+    let solto = f.arq(ssd, ps, "/s/foto.bin", 1000, 1, Some(h(1)));
+    let zip = f.arq(hd, ph, "/h/pacote.zip", 5000, 2, Some(h(9)));
+    f.membro(zip, "dentro.bin", 1000, h(1));
+    f.reconstruir();
+    let gs = f.grupos();
+    assert_eq!(gs.len(), 1);
+    assert_eq!(gs[0].copias_em_conteineres, 1);
+    assert_eq!(
+        gs[0].espaco_recuperavel_bytes, 0,
+        "Membro nunca é espaço recuperável"
+    );
+    assert_eq!(
+        duplicados::espaco_de_grupos(f.conn())
+            .unwrap()
+            .computador
+            .total(),
+        0
+    );
+    assert!(!duplicados::eh_unica_copia(f.conn(), solto).unwrap());
+    let d = detalhar_grupo(f.conn(), gs[0].id).unwrap();
+    assert_eq!(d.copias_em_conteineres.len(), 1);
+    assert_eq!(d.copias_em_conteineres[0].rotulo, "dentro de /h/pacote.zip");
+    // Backup no Volume do contêiner cobre o arquivo solto.
+    f.marcar(TipoMarcacao::Backup, Alvo::Volume("HD".into()))
+        .unwrap();
+    assert!(
+        duplicados::cobertura_do_arquivo(f.conn(), solto)
+            .unwrap()
+            .coberto
+    );
+}

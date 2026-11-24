@@ -8,6 +8,7 @@
 pub mod classificacao;
 pub mod comando;
 pub mod config_hash;
+pub mod conteineres;
 pub mod descoberta;
 pub mod duplicados;
 pub mod formato;
@@ -37,13 +38,17 @@ pub use config_hash::{
     MAX_DISCOS_MAX, MAX_DISCOS_PADRAO, OpcoesHash, ParamsHash, THREADS_POR_DISCO_MAX,
     THREADS_POR_DISCO_PADRAO, resolver_precedencia,
 };
+pub use conteineres::{
+    EntradaMembroInfo, FALHA_LEITURA, ItemCofre, PEDIDO_SENHA, PedidoInfo, Senha, SituacaoCofre,
+    StatusConteineres,
+};
 pub use descoberta::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use duplicados::{
     AlertaUnicaCopia, ArquivoSemCobertura, ClasseRecuperavel, CoberturaArquivo, CoberturaPasta,
-    CoberturaVolume, CopiaGrupo, DadosRelatorio, DetalheGrupo, EscopoMarcacao, EspacoItem,
-    FormatoExportacao, GrupoDuplicados, LIMITACOES_ESPACO, LinhaMarcacao, MarcacaoDaCopia,
-    MarcacaoInfo, ModoPrincipal, NivelEspaco, OrdemDuplicados, ResultadoMarcacao, ResumoDuplicados,
-    ResumoHash, ResumoVerificacao, TipoRelatorio,
+    CoberturaVolume, CopiaEmConteiner, CopiaGrupo, DadosRelatorio, DetalheGrupo, EscopoMarcacao,
+    EspacoItem, FormatoExportacao, GrupoDuplicados, LIMITACOES_ESPACO, LinhaMarcacao,
+    MarcacaoDaCopia, MarcacaoInfo, ModoPrincipal, NivelEspaco, OrdemDuplicados, ResultadoMarcacao,
+    ResumoDuplicados, ResumoHash, ResumoVerificacao, TipoRelatorio,
 };
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
@@ -55,8 +60,8 @@ pub use lixeira::{
 pub use painel::{EntradaPainel, Onde, PainelJob};
 pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
 pub use progresso::{
-    FaseInventario, LeituraEmCurso, PassoAbertura, Progresso, ProgressoDiscoHash, ProgressoHash,
-    ProgressoInventario, TipoPasso,
+    FaseInventario, LeituraEmCurso, PassoAbertura, Progresso, ProgressoConteineres,
+    ProgressoDiscoHash, ProgressoHash, ProgressoInventario, TipoPasso,
 };
 pub use reconciliacao::{EventoInfo, ResumoMonitorInfo, ResumoReconciliacao, SaudeMonitorInfo};
 pub use tipos::{

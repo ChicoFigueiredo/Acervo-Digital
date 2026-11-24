@@ -23,7 +23,7 @@ use crate::confirmacao::{AcaoMarcacao, AlvoAcao, planejar};
 use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::leitor::{Acordador, Carga, Leitor, erro};
 use crate::paginas::{
-    self, DefPagina, analise, configuracoes, discos, duplicados, explorador, varredura,
+    self, DefPagina, analise, configuracoes, discos, duplicados, explorador, fila, varredura,
 };
 use crate::progresso::{AndamentoHash, FaseScan, ProgressoScan, restante_estimado, taxa_do_hash};
 use crate::selecao::Classificacao;
@@ -318,6 +318,7 @@ pub struct AppDag {
     pub analise: analise::Estado,
     pub duplicados: duplicados::Estado,
     pub lixeira: crate::lixeira::Estado,
+    pub fila: fila::Estado,
     pub configuracoes: configuracoes::Estado,
 }
 
@@ -388,6 +389,7 @@ impl AppDag {
             lixeira: crate::lixeira::Estado::default(),
             analise: analise::Estado::default(),
             duplicados: duplicados::Estado::default(),
+            fila: fila::Estado::default(),
             configuracoes: configuracoes::Estado::default(),
         }
     }
@@ -1124,6 +1126,14 @@ impl AppDag {
                     "Agrupando duplicados… (o agente avisa ao terminar)",
                 );
             }
+            "fila.atualizar" => self.invalidar(),
+            "fila.ler_conteineres" => {
+                self.enviar(Comando::LerConteineres, Proposito::Exportar);
+                self.aviso(
+                    Tom::Info,
+                    "Lendo o conteúdo dos contêineres… (o agente avisa ao terminar)",
+                );
+            }
             "duplicados.relatorio" => {
                 self.duplicados.painel_relatorio = true;
                 abrir("duplicados");
@@ -1416,7 +1426,7 @@ mod testes {
     use bancada_casca::{Disponibilidade, ListaDeAcoes};
     use std::collections::HashSet;
 
-    const ABAS: [&str; 9] = [
+    const ABAS: [&str; 10] = [
         "Início",
         "Discos",
         "Varredura",
@@ -1424,6 +1434,7 @@ mod testes {
         "Análise",
         "Duplicados",
         "Lixeira",
+        "Fila de Serviço",
         "Monitoramento",
         "Configurações",
     ];

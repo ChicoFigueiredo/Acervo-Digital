@@ -179,8 +179,9 @@ fn inicializar() -> Value {
     a única escrita possível é mover (rename) cópias com Marcação para Deleção para a DAG-Lixeira do \
     próprio Volume e de volta, pelas ferramentas mover_para_lixeira (exige duas confirmações \
     explícitas como parâmetros, depois de uma simulação mostrada ao usuário) e restaurar_da_lixeira. \
-    Esvaziar a Lixeira é sempre ato do usuário. Ações de serviço podem abrir um diálogo do sistema onde \
-    o usuário digita a senha; o MCP nunca recebe senhas."
+    Esvaziar a Lixeira é sempre ato do usuário. Conteúdo de contêineres é lido em memória, nada é \
+    extraído. Ações de serviço podem abrir um diálogo do sistema onde o usuário digita a senha; o MCP \
+    só fornece senhas de contêineres (`fornecer_senha`) e nunca recebe nenhuma de volta."
     })
 }
 

@@ -7,6 +7,7 @@
 pub mod confianca;
 pub mod configuracao;
 pub mod consulta_gui;
+pub mod conteineres;
 pub mod duplicados;
 pub mod hashes;
 pub mod inventario;
@@ -52,6 +53,10 @@ pub const MIGRACOES: &[Migracao] = &[
     Migracao::sql(
         "Lixeira em dois níveis: estado Na Lixeira por arquivo e histórico de Descartados",
         include_str!("../migrations/0008_lixeira.sql"),
+    ),
+    Migracao::sql(
+        "contêineres: Membros, fila da etapa, senhas cifradas, Cofre e Fila de Serviço (ADR 0006)",
+        include_str!("../migrations/0009_conteineres.sql"),
     ),
 ];
 

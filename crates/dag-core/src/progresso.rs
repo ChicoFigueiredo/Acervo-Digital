@@ -34,6 +34,19 @@ pub struct ProgressoInventario {
     pub entradas_por_segundo: f64,
 }
 
+/// Andamento de um Dispositivo Físico na etapa de hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgressoDiscoHash {
+    pub disco: String,
+    pub arquivos_feitos: u64,
+    pub arquivos_total: u64,
+    pub bytes_lidos: u64,
+    pub bytes_total: u64,
+    pub bytes_por_seg: f64,
+    pub ativo: bool,
+    pub concluido: bool,
+}
+
 /// Andamento da etapa de Hash Completo (ou da Verificação de Integridade), com bytes reais.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProgressoHash {
@@ -46,6 +59,9 @@ pub struct ProgressoHash {
     pub bytes_total: u64,
     pub bytes_por_seg: f64,
     pub reaproveitados: u64,
+    /// Um item por disco físico (a etapa lê um disco por thread, vários discos ao mesmo tempo).
+    #[serde(default)]
+    pub discos: Vec<ProgressoDiscoHash>,
 }
 
 /// Um evento de progresso.
@@ -77,6 +93,7 @@ mod tests {
             bytes_total: 40,
             bytes_por_seg: 2.5,
             reaproveitados: 0,
+            discos: Vec::new(),
         });
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["etapa"], "hash");

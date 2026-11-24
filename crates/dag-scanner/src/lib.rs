@@ -48,8 +48,8 @@ pub use elevado::{EntradaElevada, LeitorElevado, TipoElevado};
 pub use erro::ErroScan;
 pub use fast::{FastScan, ResumoFast};
 pub use hash::{
-    ConfigHash, Desfecho, EtapaHash, ProgressoHash, ResultadoHash, ResultadoVerificacao,
-    VerificacaoIntegridade,
+    ConfigHash, Desfecho, EtapaHash, ProgressoDisco, ProgressoHash, ResultadoHash,
+    ResultadoVerificacao, VerificacaoIntegridade,
 };
 pub use reconciliar::{DirSujo, RaizMonitorada, ResultadoLote, reconciliar_diretorios};
 pub use scan::{DesfechoScan, FullScan, ResultadoScan};

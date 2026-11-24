@@ -219,9 +219,30 @@ pub fn reservar(
     limite: usize,
     agora: i64,
 ) -> Resultado<Vec<ItemFila>> {
+    reservar_volumes(conn, tipo, &[], limite, agora)
+}
+
+/// Como [`reservar`], mas só itens cujos arquivos estão em `volumes` (vazio = qualquer volume).
+/// É o que permite ao agendador dar a cada Dispositivo Físico a sua própria sequência de leitura.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn reservar_volumes(
+    conn: &Connection,
+    tipo: TipoFila,
+    volumes: &[i64],
+    limite: usize,
+    agora: i64,
+) -> Resultado<Vec<ItemFila>> {
     let mut itens = Vec::with_capacity(limite);
     {
-        let mut st = conn.prepare_cached(
+        let filtro = if volumes.is_empty() {
+            String::new()
+        } else {
+            let ph = vec!["?"; volumes.len()].join(",");
+            format!(" AND f.volume_id IN ({ph})")
+        };
+        let sql = format!(
             "SELECT q.id, f.id, f.folder_id, f.volume_id, f.path_raw,
                     COALESCE(h.size_bytes, f.logical_bytes),
                     CASE WHEN h.file_id IS NULL THEN f.mtime_ns ELSE h.mtime_ns END,
@@ -230,10 +251,14 @@ pub fn reservar(
                     h.hash
              FROM fila_hash q JOIN files f ON f.id = q.file_id
              LEFT JOIN hashes h ON h.file_id = f.id AND q.tipo = 'verificacao'
-             WHERE q.tipo = ?1 AND q.state = 'pendente'
-             ORDER BY q.priority DESC, q.id LIMIT ?2",
-        )?;
-        let mut rows = st.query(params![tipo.como_str(), limite as i64])?;
+             WHERE q.tipo = ? AND q.state = 'pendente'{filtro}
+             ORDER BY q.priority DESC, q.id LIMIT ?"
+        );
+        let mut st = conn.prepare_cached(&sql)?;
+        let mut args: Vec<rusqlite::types::Value> = vec![tipo.como_str().to_owned().into()];
+        args.extend(volumes.iter().map(|v| rusqlite::types::Value::from(*v)));
+        args.push((limite as i64).into());
+        let mut rows = st.query(rusqlite::params_from_iter(args))?;
         while let Some(l) = rows.next()? {
             itens.push(ItemFila {
                 fila_id: l.get(0)?,
@@ -257,6 +282,142 @@ pub fn reservar(
         up.execute(params![i.fila_id, agora])?;
     }
     Ok(itens)
+}
+
+/// Volume com trabalho pendente na fila, com o Dispositivo Físico que o hospeda (se conhecido).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumePendente {
+    pub volume_id: i64,
+    pub dispositivo_id: Option<i64>,
+    /// Nome para exibição do disco (rótulo, modelo ou identificador do dispositivo; sem
+    /// dispositivo, o rótulo do volume ou `volume N`).
+    pub nome_disco: String,
+    pub arquivos: u64,
+    pub bytes: u64,
+}
+
+/// Volumes com itens pendentes (`pendente`, `em_andamento`, `pausado`) de um tipo de fila, em
+/// ordem de id do volume. Volumes sem dispositivo conhecido aparecem com `dispositivo_id = None`.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn volumes_pendentes(conn: &Connection, tipo: TipoFila) -> Resultado<Vec<VolumePendente>> {
+    let mut st = conn.prepare(
+        "SELECT f.volume_id, v.device_id,
+                COALESCE(d.rotulo, d.modelo, d.identificador, v.rotulo, 'volume ' || f.volume_id),
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN q.tipo = 'verificacao'
+                    THEN (SELECT size_bytes FROM hashes WHERE file_id = f.id) ELSE f.logical_bytes END), 0)
+         FROM fila_hash q JOIN files f ON f.id = q.file_id
+         LEFT JOIN volumes v ON v.id = f.volume_id
+         LEFT JOIN dispositivos d ON d.id = v.device_id
+         WHERE q.tipo = ?1 AND q.state IN ('pendente','em_andamento','pausado')
+         GROUP BY f.volume_id ORDER BY f.volume_id",
+    )?;
+    let linhas = st
+        .query_map([tipo.como_str()], |l| {
+            Ok(VolumePendente {
+                volume_id: l.get(0)?,
+                dispositivo_id: l.get(1)?,
+                nome_disco: l.get(2)?,
+                arquivos: l.get::<_, i64>(3)? as u64,
+                bytes: l.get::<_, i64>(4)? as u64,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(linhas)
+}
+
+/// Andamento da fila de hash de um disco (para `dag status`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AndamentoDisco {
+    /// Dispositivo físico; `None` para volumes sem dispositivo conhecido (um grupo por volume).
+    pub dispositivo_id: Option<i64>,
+    pub volume_ids: Vec<i64>,
+    pub nome: String,
+    pub arquivos_feitos: u64,
+    pub arquivos_pendentes: u64,
+    pub arquivos_com_erro: u64,
+    pub bytes_feitos: u64,
+    pub bytes_pendentes: u64,
+}
+
+/// Fotografia da fila de hash para o `status`: por disco e o instante da última atividade.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AndamentoFila {
+    pub discos: Vec<AndamentoDisco>,
+    /// Maior `updated_at` da fila (segundos Unix), se a fila não estiver vazia.
+    pub ultima_atividade: Option<i64>,
+    /// Bytes concluídos com `updated_at >= desde` (para a vazão recente).
+    pub bytes_recentes: u64,
+}
+
+/// Lê o andamento da fila de `tipo`, agrupando os volumes por Dispositivo Físico. Só leitura.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn andamento_fila(conn: &Connection, tipo: TipoFila, desde: i64) -> Resultado<AndamentoFila> {
+    let mut st = conn.prepare(
+        "SELECT f.volume_id, v.device_id,
+                COALESCE(d.rotulo, d.modelo, d.identificador, v.rotulo, 'volume ' || f.volume_id),
+                q.state, COUNT(*), COALESCE(SUM(f.logical_bytes), 0),
+                COALESCE(SUM(CASE WHEN q.updated_at >= ?2 THEN q.bytes_lidos ELSE 0 END), 0)
+         FROM fila_hash q JOIN files f ON f.id = q.file_id
+         LEFT JOIN volumes v ON v.id = f.volume_id
+         LEFT JOIN dispositivos d ON d.id = v.device_id
+         WHERE q.tipo = ?1 GROUP BY f.volume_id, q.state ORDER BY f.volume_id",
+    )?;
+    let mut rows = st.query(params![tipo.como_str(), desde])?;
+    let mut discos: Vec<AndamentoDisco> = Vec::new();
+    let mut recentes: u64 = 0;
+    while let Some(l) = rows.next()? {
+        let (vol, dev, nome, estado): (i64, Option<i64>, String, String) =
+            (l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?);
+        let (n, bytes, rec) = (
+            l.get::<_, i64>(4)? as u64,
+            l.get::<_, i64>(5)? as u64,
+            l.get::<_, i64>(6)? as u64,
+        );
+        let pos = discos.iter().position(|d| match (dev, d.dispositivo_id) {
+            (Some(a), Some(b)) => a == b,
+            _ => dev.is_none() && d.dispositivo_id.is_none() && d.volume_ids == [vol],
+        });
+        let d = if let Some(i) = pos {
+            &mut discos[i]
+        } else {
+            discos.push(AndamentoDisco {
+                dispositivo_id: dev,
+                nome,
+                ..AndamentoDisco::default()
+            });
+            discos.last_mut().expect("acabou de inserir")
+        };
+        if !d.volume_ids.contains(&vol) {
+            d.volume_ids.push(vol);
+        }
+        match estado.as_str() {
+            "concluido" => {
+                d.arquivos_feitos += n;
+                d.bytes_feitos += bytes;
+                recentes += rec;
+            }
+            "erro" => d.arquivos_com_erro += n,
+            _ => {
+                d.arquivos_pendentes += n;
+                d.bytes_pendentes += bytes;
+            }
+        }
+    }
+    let ultima: Option<i64> = conn.query_row(
+        "SELECT MAX(updated_at) FROM fila_hash WHERE tipo = ?1",
+        [tipo.como_str()],
+        |l| l.get(0),
+    )?;
+    Ok(AndamentoFila {
+        discos,
+        ultima_atividade: ultima,
+        bytes_recentes: recentes,
+    })
 }
 
 /// Devolve à fila (`pendente`) os itens reservados e não concluídos (retomada/cancelamento).

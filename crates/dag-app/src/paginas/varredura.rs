@@ -410,6 +410,19 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
             if !linha.is_empty() {
                 ui.weak(linha.join(" · "));
             }
+            if let Some(b) = &s.bytes_hash {
+                // Um disco físico por thread: mostra o andamento de cada disco.
+                for d in &b.discos {
+                    ui.weak(format!(
+                        "Disco {}: {} de {} lidos ({}/s){}",
+                        d.disco,
+                        bytes_humanos(d.bytes_lidos),
+                        bytes_humanos(d.bytes_total),
+                        bytes_humanos(d.bytes_por_seg as u64),
+                        if d.concluido { " — concluído" } else { "" }
+                    ));
+                }
+            }
         }
         None => {
             ui.weak(

@@ -37,7 +37,8 @@ dag relatorio marcacoes --saida marcacoes.csv   # exporta (.csv ou .json), sem s
 dag scan --fast                          # reconcilia o que mudou (todas as raízes já varridas)
 dag verificar                            # Verificação de Integridade (releitura e comparação de hash)
 dag explorar ~/Documentos --limite 20    # filhos por tamanho (lógico e alocado)
-dag status                               # execuções e totais; dag pausar | retomar | cancelar
+dag status                               # execuções e totais; na etapa de hash mostra arquivos/bytes feitos e pendentes por disco
+                                         # dag pausar | retomar | cancelar
 dag catalogo backup ~/dag-backup.sqlite  # cópia consistente do Catálogo
 dag --json duplicados                    # qualquer comando em JSON
 dag-app                                  # GUI
@@ -54,6 +55,8 @@ claude mcp add dag -- dag mcp                    # registra o MCP no Claude Code
 ```
 
 O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite`. Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`, `duplicados`, a GUI) funcionam durante uma varredura.
+
+O Hash Completo lê **um disco físico por thread, todos os discos ao mesmo tempo** (volumes do mesmo disco ficam em sequência). Se o processo morrer ou a execução for cancelada no meio do hash, `dag scan --retomar <id>` continua só o que falta: a fila é refeita a partir dos hashes já gravados, sem reler nada e sem mudar o Catálogo.
 
 ### Limitações conhecidas
 

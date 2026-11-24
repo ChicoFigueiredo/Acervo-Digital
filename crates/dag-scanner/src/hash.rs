@@ -3,11 +3,18 @@
 //! # Pipeline
 //!
 //! ```text
-//!  fila_hash (SQLite) ──reserva──▶ coordenador ──ItemFila──▶ N leitores (open O_RDONLY, read, BLAKE3)
-//!        ▲                            │  ▲                           │ (item, Saida)
-//!        └── hash gravado em tx curta ┘  └────────── canal ◀─────────┘
+//!  fila_hash (SQLite) ──reserva──▶ coordenador ──ItemFila──▶ leitores do disco A (O_RDONLY, BLAKE3)
+//!        ▲                            │  ▲     ├──────────────▶ leitores do disco B
+//!        └── hash gravado em tx curta ┘  │     └──────────────▶ ...
+//!                                        └──── canal único ◀── (grupo, item, Saida)
 //! ```
 //!
+//! * **Um grupo de leitores por Dispositivo Físico.** Os volumes pendentes são agrupados pelo
+//!   dispositivo (`volumes.device_id`); volumes sem dispositivo conhecido formam um grupo cada.
+//!   Cada grupo tem seu próprio canal e `threads_por_disco` leitores (padrão 1), então volumes do
+//!   mesmo disco nunca competem entre si pela cabeça de leitura e discos diferentes leem ao
+//!   mesmo tempo. No máximo `max_discos` grupos ativos de uma vez (os demais esperam a vez).
+//!   A fila persistente (`fila_hash`) não mudou: o filtro por disco é só a consulta de reserva.
 //! * Leitores só leem e calculam; o coordenador (a thread que chama `executar`) é o único
 //!   escritor do Catálogo e grava em transações curtas.
 //! * O hash só é gravado depois da leitura inteira **e** de uma segunda conferência (`fstat` e
@@ -50,8 +57,11 @@ pub type Desfecho = DesfechoScan;
 /// Parâmetros da etapa. Os padrões são conservadores: disco é o gargalo (A-21).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigHash {
-    /// Leitores simultâneos (padrão 2).
-    pub concorrencia: usize,
+    /// Leitores simultâneos **por Dispositivo Físico** (padrão 1: o gargalo é o disco, e mais de
+    /// uma leitura simultânea no mesmo HDD só aumenta as buscas).
+    pub threads_por_disco: usize,
+    /// Máximo de discos lendo ao mesmo tempo (padrão 16); os excedentes esperam um disco acabar.
+    pub max_discos: usize,
     /// Limite global de leitura em bytes por segundo (`None` = sem limite).
     pub limite_bytes_por_seg: Option<u64>,
     /// Tamanho do buffer de leitura de cada leitor (padrão 1 MiB).
@@ -63,7 +73,8 @@ pub struct ConfigHash {
 impl Default for ConfigHash {
     fn default() -> Self {
         Self {
-            concorrencia: 2,
+            threads_por_disco: 1,
+            max_discos: 16,
             limite_bytes_por_seg: None,
             tamanho_buffer: 1 << 20,
             intervalo_de_progresso: Duration::from_millis(250),
@@ -71,8 +82,27 @@ impl Default for ConfigHash {
     }
 }
 
+/// Andamento de um Dispositivo Físico (ou de um volume sem dispositivo conhecido).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressoDisco {
+    /// Nome para exibição (rótulo, modelo ou identificador do dispositivo).
+    pub disco: String,
+    /// Volumes do Catálogo que estão neste disco e têm trabalho.
+    pub volumes: Vec<i64>,
+    /// Leituras físicas resolvidas neste disco (hasheadas, com erro ou alteradas).
+    pub arquivos_feitos: u64,
+    pub arquivos_total: u64,
+    pub bytes_lidos: u64,
+    pub bytes_total: u64,
+    /// Vazão média desde que o disco começou a ser lido.
+    pub bytes_por_seg: f64,
+    /// Já começou e ainda tem trabalho.
+    pub ativo: bool,
+    pub concluido: bool,
+}
+
 /// Instantâneo de progresso da etapa.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProgressoHash {
     /// Linhas de arquivo resolvidas (hasheadas, reaproveitadas ou com erro).
     pub arquivos_feitos: u64,
@@ -83,6 +113,8 @@ pub struct ProgressoHash {
     pub bytes_total: u64,
     pub bytes_por_seg: f64,
     pub reaproveitados: u64,
+    /// Um item por disco, na ordem em que foram agendados.
+    pub discos: Vec<ProgressoDisco>,
 }
 
 /// Resultado da etapa de hash.
@@ -528,6 +560,7 @@ struct Leitor<'a> {
     limitador: Option<&'a Limitador>,
     gancho: Option<&'a Gancho>,
     bytes_lidos: &'a AtomicU64,
+    bytes_disco: &'a AtomicU64,
 }
 
 impl Leitor<'_> {
@@ -572,6 +605,7 @@ impl Leitor<'_> {
             hasher.update(&buf[..n]);
             lidos += n as u64;
             self.bytes_lidos.fetch_add(n as u64, Ordering::Relaxed);
+            self.bytes_disco.fetch_add(n as u64, Ordering::Relaxed);
             if let Some(l) = self.limitador {
                 l.consumir(n as u64, self.abortar);
             }
@@ -626,11 +660,63 @@ struct Contagem {
     divergentes: Vec<i64>,
 }
 
+/// Um Dispositivo Físico com trabalho: seus volumes, canal e contadores.
+struct Disco {
+    nome: String,
+    volumes: Vec<i64>,
+    arquivos_total: u64,
+    bytes_total: u64,
+    feitos: u64,
+    em_voo: usize,
+    esgotado: bool,
+    iniciado: Option<Instant>,
+    encerrado: bool,
+}
+
+/// Agrupa os volumes pendentes por Dispositivo Físico. Volumes sem dispositivo conhecido ficam
+/// cada um no seu grupo. Os grupos com mais bytes começam primeiro.
+fn agrupar_por_disco(volumes: Vec<hashes::VolumePendente>) -> Vec<Disco> {
+    let mut grupos: Vec<(Option<i64>, Disco)> = Vec::new();
+    for v in volumes {
+        let pos = v
+            .dispositivo_id
+            .and_then(|d| grupos.iter().position(|(g, _)| *g == Some(d)));
+        match pos {
+            Some(i) => {
+                let g = &mut grupos[i].1;
+                g.volumes.push(v.volume_id);
+                g.arquivos_total += v.arquivos;
+                g.bytes_total += v.bytes;
+            }
+            None => grupos.push((
+                v.dispositivo_id,
+                Disco {
+                    nome: v.nome_disco,
+                    volumes: vec![v.volume_id],
+                    arquivos_total: v.arquivos,
+                    bytes_total: v.bytes,
+                    feitos: 0,
+                    em_voo: 0,
+                    esgotado: false,
+                    iniciado: None,
+                    encerrado: false,
+                },
+            )),
+        }
+    }
+    let mut discos: Vec<Disco> = grupos.into_iter().map(|(_, d)| d).collect();
+    discos.sort_by_key(|d| std::cmp::Reverse(d.bytes_total));
+    discos
+}
+
+type SaidaItem = (usize, ItemFila, Saida);
+
 impl Motor {
     fn rodar(mut self, cat: &mut Catalogo, inicio: Instant) -> Result<Contagem, ErroScan> {
         let verificacao = self.tipo == TipoFila::Verificacao;
-        let leitores = self.config.concorrencia.max(1);
-        let alvo = leitores * 4;
+        let por_disco = self.config.threads_por_disco.max(1);
+        let max_ativos = self.config.max_discos.max(1);
+        let alvo = por_disco * 4;
         let buffer = self.config.tamanho_buffer.max(4096);
         let parar = AtomicBool::new(false);
         let bytes_lidos = AtomicU64::new(0);
@@ -645,9 +731,19 @@ impl Motor {
         let controle = self.controle.clone();
         let parar_ref = &parar;
         let abortar = move || controle.cancelado() || parar_ref.load(Ordering::Relaxed);
-        let (tx_item, rx_item) = mpsc::sync_channel::<ItemFila>(alvo);
-        let rx_item = Mutex::new(rx_item);
-        let (tx_saida, rx_saida) = mpsc::channel::<(ItemFila, Saida)>();
+        let mut discos = agrupar_por_disco(hashes::volumes_pendentes(
+            cat.armazem().conexao(),
+            self.tipo,
+        )?);
+        let mut txs: Vec<Option<mpsc::SyncSender<ItemFila>>> = Vec::new();
+        let mut rxs: Vec<Mutex<mpsc::Receiver<ItemFila>>> = Vec::new();
+        for _ in &discos {
+            let (tx, rx) = mpsc::sync_channel::<ItemFila>(alvo);
+            txs.push(Some(tx));
+            rxs.push(Mutex::new(rx));
+        }
+        let bytes_disco: Vec<AtomicU64> = discos.iter().map(|_| AtomicU64::new(0)).collect();
+        let (tx_saida, rx_saida) = mpsc::channel::<SaidaItem>();
         let gancho = self.gancho.take();
         let mut conta = Contagem::default();
         let mut feitos_linhas: u64 = self.reaproveitados;
@@ -656,65 +752,100 @@ impl Motor {
             .unwrap_or_else(Instant::now);
 
         let resultado: Result<(), ErroScan> = std::thread::scope(|s| {
-            for _ in 0..leitores {
-                let tx = tx_saida.clone();
-                let rx = &rx_item;
-                let leitor = Leitor {
-                    verificacao,
-                    abortar: &abortar,
-                    limitador: limitador.as_ref(),
-                    gancho: gancho.as_ref(),
-                    bytes_lidos: &bytes_lidos,
-                };
-                s.spawn(move || {
-                    let mut buf = vec![0u8; buffer];
-                    loop {
-                        let item = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
-                        let Ok(item) = item else { break };
-                        let saida = leitor.ler(&item, &mut buf);
-                        if tx.send((item, saida)).is_err() {
-                            break;
-                        }
-                    }
-                });
-            }
-            drop(tx_saida);
-
-            let mut em_voo: usize = 0;
-            let mut fila_vazia = false;
-            let r: Result<(), ErroScan> = loop {
+            let mut ativos: usize = 0;
+            let mut encerrados: usize = 0;
+            let total_discos = discos.len();
+            let mut em_voo_total: usize = 0;
+            let r: Result<(), ErroScan> = 'principal: loop {
                 let cancelado = self.controle.cancelado();
                 let pausado = self.controle.estado() == EstadoControle::Pausado;
-                if !cancelado && !pausado && !fila_vazia && em_voo < alvo / 2 {
-                    let t = agora();
-                    let falta = alvo - em_voo;
-                    let lote = cat.armazem_mut().transacao_imediata(
-                        |tx| -> Result<Vec<ItemFila>, ErroScan> {
-                            Ok(hashes::reservar(tx, self.tipo, falta, t)?)
-                        },
-                    );
-                    match lote {
-                        Ok(lote) => {
-                            if lote.len() < falta {
-                                fila_vazia = true;
-                            }
-                            for item in lote {
-                                em_voo += 1;
-                                if tx_item.send(item).is_err() {
-                                    break;
+                if !cancelado && !pausado {
+                    // Liga os próximos discos (até o limite de discos simultâneos).
+                    for g in 0..total_discos {
+                        if ativos >= max_ativos {
+                            break;
+                        }
+                        if discos[g].iniciado.is_some() || discos[g].encerrado {
+                            continue;
+                        }
+                        discos[g].iniciado = Some(Instant::now());
+                        ativos += 1;
+                        for _ in 0..por_disco {
+                            let tx = tx_saida.clone();
+                            let rx = &rxs[g];
+                            let leitor = Leitor {
+                                verificacao,
+                                abortar: &abortar,
+                                limitador: limitador.as_ref(),
+                                gancho: gancho.as_ref(),
+                                bytes_lidos: &bytes_lidos,
+                                bytes_disco: &bytes_disco[g],
+                            };
+                            s.spawn(move || {
+                                let mut buf = vec![0u8; buffer];
+                                loop {
+                                    let item =
+                                        rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                                    let Ok(item) = item else { break };
+                                    let saida = leitor.ler(&item, &mut buf);
+                                    if tx.send((g, item, saida)).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    // Abastece cada disco ativo com reservas só dos seus volumes.
+                    for g in 0..total_discos {
+                        let d = &mut discos[g];
+                        if d.iniciado.is_none() || d.encerrado || d.esgotado || d.em_voo >= alvo / 2
+                        {
+                            continue;
+                        }
+                        let t = agora();
+                        let falta = alvo - d.em_voo;
+                        let vols = d.volumes.clone();
+                        let lote = cat.armazem_mut().transacao_imediata(
+                            |tx| -> Result<Vec<ItemFila>, ErroScan> {
+                                Ok(hashes::reservar_volumes(tx, self.tipo, &vols, falta, t)?)
+                            },
+                        );
+                        match lote {
+                            Ok(lote) => {
+                                if lote.len() < falta {
+                                    d.esgotado = true;
+                                }
+                                for item in lote {
+                                    d.em_voo += 1;
+                                    em_voo_total += 1;
+                                    let Some(tx) = txs[g].as_ref() else { break };
+                                    if tx.send(item).is_err() {
+                                        break;
+                                    }
                                 }
                             }
+                            Err(e) => break 'principal Err(e),
                         }
-                        Err(e) => break Err(e),
                     }
                 }
-                if em_voo == 0 {
-                    if cancelado || fila_vazia {
+                // Disco sem trabalho e sem nada em voo: encerra os leitores dele.
+                for g in 0..total_discos {
+                    let d = &mut discos[g];
+                    if d.iniciado.is_some() && !d.encerrado && d.esgotado && d.em_voo == 0 {
+                        d.encerrado = true;
+                        txs[g] = None;
+                        ativos -= 1;
+                        encerrados += 1;
+                    }
+                }
+                if em_voo_total == 0 {
+                    if cancelado || encerrados == total_discos {
                         break Ok(());
                     }
                     if pausado {
                         self.emitir(
-                            &conta,
+                            &discos,
+                            &bytes_disco,
                             feitos_linhas,
                             &bytes_lidos,
                             inicio,
@@ -731,8 +862,8 @@ impl Motor {
                         while let Ok(m) = rx_saida.try_recv() {
                             lote.push(m);
                         }
-                        em_voo -= lote.len();
-                        match self.gravar_lote(cat, lote) {
+                        em_voo_total -= lote.len();
+                        match self.gravar_lote(cat, &mut discos, lote) {
                             Ok(d) => {
                                 feitos_linhas += d.linhas;
                                 conta.feitos_ok += d.ok;
@@ -747,7 +878,8 @@ impl Motor {
                     Err(RecvTimeoutError::Disconnected) => break Ok(()),
                 }
                 self.emitir(
-                    &conta,
+                    &discos,
+                    &bytes_disco,
                     feitos_linhas,
                     &bytes_lidos,
                     inicio,
@@ -758,21 +890,22 @@ impl Motor {
             if r.is_err() {
                 parar.store(true, Ordering::Relaxed);
             }
-            drop(tx_item);
+            drop(tx_saida);
+            txs.clear();
             // Recolhe o que ainda estava em voo: abortados voltam à fila; concluídos a tempo
             // (leitura inteira já feita) são gravados.
             let mut resto = Vec::new();
-            while em_voo > 0 {
+            while em_voo_total > 0 {
                 match rx_saida.recv() {
                     Ok(m) => {
                         resto.push(m);
-                        em_voo -= 1;
+                        em_voo_total -= 1;
                     }
                     Err(_) => break,
                 }
             }
             if !resto.is_empty()
-                && let Ok(d) = self.gravar_lote(cat, resto)
+                && let Ok(d) = self.gravar_lote(cat, &mut discos, resto)
             {
                 feitos_linhas += d.linhas;
                 conta.feitos_ok += d.ok;
@@ -793,7 +926,8 @@ impl Motor {
                 })?;
         conta.cancelado = self.controle.cancelado() && restantes.0 > 0;
         self.emitir(
-            &conta,
+            &discos,
+            &bytes_disco,
             feitos_linhas,
             &bytes_lidos,
             inicio,
@@ -803,9 +937,11 @@ impl Motor {
         Ok(conta)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emitir(
         &mut self,
-        conta: &Contagem,
+        discos: &[Disco],
+        bytes_disco: &[AtomicU64],
         feitos: u64,
         bytes: &AtomicU64,
         inicio: Instant,
@@ -821,6 +957,29 @@ impl Motor {
         *ultimo = Instant::now();
         let lidos = bytes.load(Ordering::Relaxed);
         let seg = inicio.elapsed().as_secs_f64();
+        let por_disco = discos
+            .iter()
+            .zip(bytes_disco)
+            .map(|(d, b)| {
+                let lidos_d = b.load(Ordering::Relaxed);
+                let seg_d = d.iniciado.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                ProgressoDisco {
+                    disco: d.nome.clone(),
+                    volumes: d.volumes.clone(),
+                    arquivos_feitos: d.feitos,
+                    arquivos_total: d.arquivos_total,
+                    bytes_lidos: lidos_d,
+                    bytes_total: d.bytes_total,
+                    bytes_por_seg: if seg_d > 0.0 {
+                        lidos_d as f64 / seg_d
+                    } else {
+                        0.0
+                    },
+                    ativo: d.iniciado.is_some() && !d.encerrado,
+                    concluido: d.encerrado,
+                }
+            })
+            .collect();
         cb(&ProgressoHash {
             arquivos_feitos: feitos,
             arquivos_total: self.arquivos_total,
@@ -828,15 +987,16 @@ impl Motor {
             bytes_total: self.bytes_total,
             bytes_por_seg: if seg > 0.0 { lidos as f64 / seg } else { 0.0 },
             reaproveitados: self.reaproveitados,
+            discos: por_disco,
         });
-        let _ = conta;
     }
 
     /// Grava um lote de resultados numa transação curta.
     fn gravar_lote(
         &self,
         cat: &mut Catalogo,
-        lote: Vec<(ItemFila, Saida)>,
+        discos: &mut [Disco],
+        lote: Vec<SaidaItem>,
     ) -> Result<Delta, ErroScan> {
         let t = agora();
         let run_id = self.run_id;
@@ -845,7 +1005,7 @@ impl Motor {
         cat.armazem_mut()
             .transacao_imediata(|tx| -> Result<Delta, ErroScan> {
                 let mut d = Delta::default();
-                for (item, saida) in &lote {
+                for (_, item, saida) in &lote {
                     match saida {
                         Saida::Lido { hash, bytes } if tipo == TipoFila::Hash => {
                             let n = hashes::gravar_hash(tx, item, hash, *bytes, t)?;
@@ -921,6 +1081,14 @@ impl Motor {
                     }
                 }
                 Ok(d)
+            })
+            .inspect(|_| {
+                for (g, _, saida) in &lote {
+                    discos[*g].em_voo -= 1;
+                    if !matches!(saida, Saida::Abortado) {
+                        discos[*g].feitos += 1;
+                    }
+                }
             })
     }
 }

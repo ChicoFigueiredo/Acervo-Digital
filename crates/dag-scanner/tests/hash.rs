@@ -239,7 +239,7 @@ fn cancelar_e_retomar_nao_rele_arquivos_concluidos() {
     let mut cat = Catalogo::em_memoria().unwrap();
     let run = varrer(&raiz, &mut cat);
     let cfg = ConfigHash {
-        concorrencia: 2,
+        threads_por_disco: 2,
         tamanho_buffer: 64 << 10,
         intervalo_de_progresso: Duration::ZERO,
         ..ConfigHash::default()

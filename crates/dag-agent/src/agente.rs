@@ -13,8 +13,8 @@ use dag_core::{
     Alvo, Autor, ClasseVolume, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId,
     FaseInventario, ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario,
     Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
-    ResumoVerificacao, SaudeMonitorInfo, StatusExecucao, TipoDispositivo, TipoMarcacao,
-    TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
+    ResumoVerificacao, SaudeMonitorInfo, StatusDiscoHash, StatusExecucao, StatusHash,
+    TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
 };
 use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::PlataformaLinux;
@@ -25,6 +25,7 @@ use dag_scanner::{
 };
 use dag_store::Catalogo;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
+use dag_store::hashes;
 use dag_store::inventario::{self, EstadoScan, FaseScan};
 use dag_store::reconciliacao;
 use rusqlite::{Connection, OpenFlags, params};
@@ -882,7 +883,11 @@ impl Agente {
         for id in ids {
             let e = inventario::obter_execucao(conn, id)?
                 .ok_or_else(|| ErroAgente::NaoEncontrado(format!("execução {id} não existe")))?;
-            execucoes.push(status_de(&e));
+            let mut st = status_de(&e);
+            if e.fase == FaseScan::Hash {
+                aplicar_status_hash(conn, &mut st)?;
+            }
+            execucoes.push(st);
         }
         let (pastas, arquivos, bytes): (i64, i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(folder_count),0), COALESCE(SUM(file_count),0),
@@ -1021,6 +1026,64 @@ fn tipo_dispositivo(s: &str) -> Option<TipoDispositivo> {
     serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
 }
 
+/// Janela (segundos) sem atividade na fila de hash a partir da qual a etapa é dada como parada.
+const HASH_INATIVO_SEG: i64 = 600;
+/// Janela da vazão recente mostrada no status.
+const HASH_VAZAO_SEG: i64 = 60;
+
+/// Completa o status de uma execução na fase `hash` com o andamento da fila persistente.
+fn aplicar_status_hash(conn: &Connection, st: &mut StatusExecucao) -> Result<(), ErroAgente> {
+    let agora = agora();
+    let f = hashes::andamento_fila(conn, hashes::TipoFila::Hash, agora - HASH_VAZAO_SEG)?;
+    let mut h = StatusHash {
+        em_andamento: false,
+        arquivos_hasheados: 0,
+        arquivos_pendentes: 0,
+        arquivos_com_erro: 0,
+        bytes_hasheados: 0,
+        bytes_pendentes: 0,
+        bytes_por_seg: None,
+        discos: Vec::new(),
+    };
+    for d in &f.discos {
+        h.arquivos_hasheados += d.arquivos_feitos;
+        h.arquivos_pendentes += d.arquivos_pendentes;
+        h.arquivos_com_erro += d.arquivos_com_erro;
+        h.bytes_hasheados += d.bytes_feitos;
+        h.bytes_pendentes += d.bytes_pendentes;
+        h.discos.push(StatusDiscoHash {
+            disco: d.nome.clone(),
+            volumes: d.volume_ids.clone(),
+            arquivos_hasheados: d.arquivos_feitos,
+            arquivos_pendentes: d.arquivos_pendentes,
+            arquivos_com_erro: d.arquivos_com_erro,
+            bytes_hasheados: d.bytes_feitos,
+            bytes_pendentes: d.bytes_pendentes,
+        });
+    }
+    let recente = f
+        .ultima_atividade
+        .is_some_and(|t| agora - t <= HASH_INATIVO_SEG);
+    h.em_andamento = h.arquivos_pendentes > 0 && recente;
+    if h.em_andamento {
+        h.bytes_por_seg = Some(f.bytes_recentes / HASH_VAZAO_SEG as u64);
+    }
+    if h.arquivos_pendentes > 0 {
+        if h.em_andamento {
+            st.estado = EstadoExecucao::EmAndamento;
+            st.estado_detalhe = "hash_em_andamento".into();
+        } else {
+            st.estado = EstadoExecucao::Pausada;
+            st.estado_detalhe = "hash_parado".into();
+        }
+    } else {
+        st.estado_detalhe = "hash_finalizando".into();
+    }
+    st.erros += h.arquivos_com_erro;
+    st.hash = Some(h);
+    Ok(())
+}
+
 fn status_de(e: &inventario::Execucao) -> StatusExecucao {
     let c: serde_json::Value = serde_json::from_str(&e.contadores).unwrap_or_default();
     let n = |k: &str| c.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -1044,7 +1107,8 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
         etapa: match e.fase {
             FaseScan::Inventario => Some(EtapaVarredura::Inventario),
             FaseScan::Concluida => None,
-            _ => Some(EtapaVarredura::Agregacao),
+            FaseScan::Hash | FaseScan::Verificacao => Some(EtapaVarredura::Hash),
+            FaseScan::Estatisticas => Some(EtapaVarredura::Agregacao),
         },
         itens_processados: pastas + arquivos + especiais,
         erros: n("erros"),
@@ -1057,6 +1121,7 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
         especiais,
         bytes_logicos: n("bytes_logicos"),
         ignorados: n("ignorados"),
+        hash: None,
     }
 }
 
@@ -1104,6 +1169,20 @@ fn sink_hash(
             bytes_total: h.bytes_total,
             bytes_por_seg: h.bytes_por_seg,
             reaproveitados: h.reaproveitados,
+            discos: h
+                .discos
+                .iter()
+                .map(|d| dag_core::ProgressoDiscoHash {
+                    disco: d.disco.clone(),
+                    arquivos_feitos: d.arquivos_feitos,
+                    arquivos_total: d.arquivos_total,
+                    bytes_lidos: d.bytes_lidos,
+                    bytes_total: d.bytes_total,
+                    bytes_por_seg: d.bytes_por_seg,
+                    ativo: d.ativo,
+                    concluido: d.concluido,
+                })
+                .collect(),
         };
         p(&if verificacao {
             Progresso::Verificacao(ev)

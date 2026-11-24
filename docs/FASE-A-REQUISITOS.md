@@ -18,7 +18,7 @@ A Fase A passa a entregar a especificação v1.0 inteira **mais** o escopo da an
 ## 2. Requisitos mantidos da v1.0
 
 A-01 a A-22 continuam obrigatórios como escritos na v1.0, com dois ajustes:
-- **A-03** ganha a etapa "Hash" entre classificação e agregação, executada após o inventário, com fila persistente própria.
+- **A-03** ganha a etapa "Hash" entre classificação e agregação, executada após o inventário, com fila persistente própria. O hash roda **um grupo de leitores por Dispositivo Físico** (padrão 1 thread por disco, até 16 discos ao mesmo tempo; volumes do mesmo disco ficam em sequência, volumes sem dispositivo conhecido contam como um disco cada), com um único escritor do Catálogo. `dag status` mostra a etapa de hash (arquivos e bytes feitos/pendentes, por disco, vazão recente) lida da fila persistente; sem mudança de esquema, uma execução parada no hash retoma com `dag scan --retomar <id>` e a fila é refeita a partir dos hashes já gravados.
 - **A-12** passa a reaproveitar também o Hash Completo de arquivos inalterados (mesmo inode, tamanho, mtime e ctime).
 
 ## 3. Requisitos novos

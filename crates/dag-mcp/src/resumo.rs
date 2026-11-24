@@ -42,8 +42,18 @@ pub fn resumir(r: &Resposta) -> String {
             catalogo,
             ..
         } => format!(
-            "{} execução(ões); Catálogo: {} volume(s), {} pasta(s), {} arquivo(s), {}.",
+            "{} execução(ões){}; Catálogo: {} volume(s), {} pasta(s), {} arquivo(s), {}.",
             execucoes.len(),
+            execucoes
+                .iter()
+                .filter_map(|e| e.hash.as_ref().map(|h| (e.id.0, h)))
+                .map(|(id, h)| format!(
+                    " [execução {id}: hash {} de {} arquivos, {} disco(s)]",
+                    h.arquivos_hasheados,
+                    h.arquivos_hasheados + h.arquivos_pendentes + h.arquivos_com_erro,
+                    h.discos.len()
+                ))
+                .collect::<String>(),
             catalogo.volumes,
             catalogo.pastas,
             catalogo.arquivos,

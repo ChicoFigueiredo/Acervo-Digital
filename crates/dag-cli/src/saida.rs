@@ -138,6 +138,12 @@ fn tabela_volumes(v: &[&VolumeInfo], com_classe: bool) -> String {
 }
 
 fn estado(e: &StatusExecucao) -> String {
+    match e.estado_detalhe.as_str() {
+        "hash_em_andamento" => return "hash em andamento".into(),
+        "hash_parado" => return "hash parado (retomável)".into(),
+        "hash_finalizando" => return "hash finalizando".into(),
+        _ => {}
+    }
     match e.estado {
         EstadoExecucao::Concluida if e.estado_detalhe == "concluida_com_erros" => {
             "concluída c/ erros".into()
@@ -196,7 +202,80 @@ pub fn status(execs: &[StatusExecucao], cat: &dag_core::ResumoCatalogo) -> Strin
         &[true, false, false, false, true, true, true, true, false],
         &linhas,
     ));
+    for e in execs {
+        if let Some(h) = &e.hash {
+            s.push_str(&status_hash(e.id.0, h));
+        }
+    }
     s
+}
+
+/// Etapa de hash de uma execução: totais, vazão e uma linha por disco.
+fn status_hash(id: i64, h: &dag_core::StatusHash) -> String {
+    let feitos = h.arquivos_hasheados;
+    let total = feitos + h.arquivos_pendentes + h.arquivos_com_erro;
+    let bytes_total = h.bytes_hasheados + h.bytes_pendentes;
+    let mut s = format!(
+        "\nExecução {id}: etapa de hash ({}) — {} de {} arquivos ({}), {} de {}; pendentes: {} arquivos, {}",
+        if h.em_andamento {
+            "em andamento"
+        } else {
+            "parada"
+        },
+        inteiro_pt_br(feitos),
+        inteiro_pt_br(total),
+        percentual(feitos, total),
+        bytes_humanos(h.bytes_hasheados),
+        bytes_humanos(bytes_total),
+        inteiro_pt_br(h.arquivos_pendentes),
+        bytes_humanos(h.bytes_pendentes),
+    );
+    if h.arquivos_com_erro > 0 {
+        s.push_str(&format!(
+            ", {} com erro",
+            inteiro_pt_br(h.arquivos_com_erro)
+        ));
+    }
+    if let Some(v) = h.bytes_por_seg {
+        s.push_str(&format!(" | {}/s", bytes_humanos(v)));
+    }
+    s.push('\n');
+    let linhas: Vec<Vec<String>> = h
+        .discos
+        .iter()
+        .map(|d| {
+            let tot = d.arquivos_hasheados + d.arquivos_pendentes + d.arquivos_com_erro;
+            vec![
+                d.disco.clone(),
+                d.volumes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                format!(
+                    "{}/{}",
+                    inteiro_pt_br(d.arquivos_hasheados),
+                    inteiro_pt_br(tot)
+                ),
+                percentual(d.arquivos_hasheados, tot),
+                bytes_humanos(d.bytes_hasheados),
+                bytes_humanos(d.bytes_pendentes),
+            ]
+        })
+        .collect();
+    s.push_str(&tabela(
+        &["DISCO", "VOLUMES", "ARQUIVOS", "%", "HASHEADO", "PENDENTE"],
+        &[false, false, true, true, true, true],
+        &linhas,
+    ));
+    s
+}
+
+fn percentual(feito: u64, total: u64) -> String {
+    if total == 0 {
+        return "100%".into();
+    }
+    format!("{}%", feito.saturating_mul(100) / total)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1071,5 +1150,50 @@ mod testes_volumes {
             "{t}"
         );
         assert!(!t.contains("use --todos"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod testes_status_hash {
+    use super::*;
+    use dag_core::{StatusDiscoHash, StatusHash};
+
+    #[test]
+    fn status_hash_mostra_totais_e_cada_disco() {
+        let h = StatusHash {
+            em_andamento: true,
+            arquivos_hasheados: 25,
+            arquivos_pendentes: 75,
+            arquivos_com_erro: 0,
+            bytes_hasheados: 1 << 30,
+            bytes_pendentes: 3 << 30,
+            bytes_por_seg: Some(100 << 20),
+            discos: vec![
+                StatusDiscoHash {
+                    disco: "WDC-1".into(),
+                    volumes: vec![1, 2],
+                    arquivos_hasheados: 20,
+                    arquivos_pendentes: 30,
+                    arquivos_com_erro: 0,
+                    bytes_hasheados: 1 << 30,
+                    bytes_pendentes: 1 << 30,
+                },
+                StatusDiscoHash {
+                    disco: "SEA-2".into(),
+                    volumes: vec![3],
+                    arquivos_hasheados: 5,
+                    arquivos_pendentes: 45,
+                    arquivos_com_erro: 0,
+                    bytes_hasheados: 0,
+                    bytes_pendentes: 2 << 30,
+                },
+            ],
+        };
+        let t = status_hash(7, &h);
+        assert!(t.contains("etapa de hash (em andamento)"), "{t}");
+        assert!(t.contains("25 de 100 arquivos (25%)"), "{t}");
+        assert!(t.contains("WDC-1") && t.contains("SEA-2"), "{t}");
+        assert!(t.contains("1,2"), "{t}");
+        assert!(t.contains("/s"), "{t}");
     }
 }

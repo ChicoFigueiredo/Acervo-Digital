@@ -100,8 +100,19 @@ fn linha_inventario(rotulo: &str, i: &ProgressoInventario) -> String {
 }
 
 fn linha_hash(rotulo: &str, p: &ProgressoHash) -> String {
+    let ativos: Vec<String> = p
+        .discos
+        .iter()
+        .filter(|d| d.ativo)
+        .map(|d| format!("{} {}/s", d.disco, bytes_humanos(d.bytes_por_seg as u64)))
+        .collect();
+    let discos = if ativos.is_empty() {
+        String::new()
+    } else {
+        format!(" | discos: {}", ativos.join("; "))
+    };
     format!(
-        "[{rotulo}] {}/{} arquivos, {} de {} lidos | {}/s | {} reaproveitados",
+        "[{rotulo}] {}/{} arquivos, {} de {} lidos | {}/s | {} reaproveitados{discos}",
         inteiro_pt_br(p.arquivos_feitos),
         inteiro_pt_br(p.arquivos_total),
         bytes_humanos(p.bytes_lidos),

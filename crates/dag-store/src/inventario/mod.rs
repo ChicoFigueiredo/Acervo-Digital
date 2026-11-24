@@ -119,6 +119,10 @@ impl EstadoScan {
 pub enum FaseScan {
     Inventario,
     Estatisticas,
+    /// Hash Completo em andamento ou pendente (gravada por `EtapaHash`; o estado da execução
+    /// continua o do inventário, `concluida`).
+    Hash,
+    Verificacao,
     Concluida,
 }
 
@@ -128,6 +132,8 @@ impl FaseScan {
         match self {
             Self::Inventario => "inventario",
             Self::Estatisticas => "estatisticas",
+            Self::Hash => "hash",
+            Self::Verificacao => "verificacao",
             Self::Concluida => "concluida",
         }
     }
@@ -137,6 +143,8 @@ impl FaseScan {
         Some(match s {
             "inventario" => Self::Inventario,
             "estatisticas" => Self::Estatisticas,
+            "hash" => Self::Hash,
+            "verificacao" => Self::Verificacao,
             "concluida" => Self::Concluida,
             _ => return None,
         })

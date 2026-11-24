@@ -304,6 +304,88 @@ fn status_mostra_execucoes_e_totais() {
     assert_eq!(codigo(&r), "nao_encontrado");
 }
 
+/// Deixa o catálogo como um processo morto no meio do hash o deixaria: execução `concluida` na
+/// fase `hash`, 2 dos 4 arquivos sem hash e com a fila `pendente`, atividade da fila em `quando`.
+fn simular_hash_no_meio(c: &Cenario, quando: i64) {
+    let cat = Catalogo::abrir(&c.catalogo).unwrap();
+    let con = cat.armazem().conexao();
+    con.execute("UPDATE scan_runs SET phase = 'hash'", [])
+        .unwrap();
+    con.execute(
+        "DELETE FROM hashes WHERE file_id IN (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2)",
+        [],
+    )
+    .unwrap();
+    con.execute(
+        "UPDATE fila_hash SET state = 'pendente'
+         WHERE file_id IN (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2)",
+        [],
+    )
+    .unwrap();
+    con.execute("UPDATE fila_hash SET updated_at = ?1", [quando])
+        .unwrap();
+}
+
+#[test]
+fn status_mostra_a_etapa_de_hash_e_retomar_a_conclui() {
+    let c = cenario();
+    {
+        let mut a = agente(&c);
+        a.executar(scan_cmd(&c.raiz));
+    }
+    // Atividade recente: hash em andamento, 2 de 4 feitos, um disco.
+    let agora = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    simular_hash_no_meio(&c, agora);
+    let Resposta::Status { execucoes, .. } =
+        executar_comando(&c.catalogo, Comando::Status { execucao: None })
+    else {
+        panic!()
+    };
+    let e = &execucoes[0];
+    assert_eq!(e.etapa, Some(dag_core::EtapaVarredura::Hash));
+    assert_eq!(e.estado, EstadoExecucao::EmAndamento);
+    assert_eq!(e.estado_detalhe, "hash_em_andamento");
+    let h = e.hash.as_ref().unwrap();
+    assert!(h.em_andamento);
+    assert_eq!((h.arquivos_hasheados, h.arquivos_pendentes), (2, 2));
+    assert_eq!(h.discos.len(), 1);
+    assert_eq!(h.discos[0].arquivos_pendentes, 2);
+    assert_eq!(h.bytes_hasheados + h.bytes_pendentes, 14_100);
+    assert!(h.bytes_por_seg.is_some());
+    // Sem atividade recente: parada (retomável).
+    simular_hash_no_meio(&c, 1_000);
+    let Resposta::Status { execucoes, .. } =
+        executar_comando(&c.catalogo, Comando::Status { execucao: None })
+    else {
+        panic!()
+    };
+    assert_eq!(execucoes[0].estado, EstadoExecucao::Pausada);
+    assert_eq!(execucoes[0].estado_detalhe, "hash_parado");
+    assert!(!execucoes[0].hash.as_ref().unwrap().em_andamento);
+    // JSON do status carrega o bloco `hash`.
+    let json = serde_json::to_value(&execucoes[0]).unwrap();
+    assert_eq!(json["hash"]["arquivos_pendentes"], 2);
+    assert_eq!(json["etapa"], "hash");
+    // Retomar uma execução que parou no hash roda só o hash que falta.
+    let id = execucoes[0].id;
+    let mut a = agente(&c);
+    let r = a.executar(Comando::Retomar { execucao: Some(id) });
+    let Resposta::ScanConcluido { desfecho, hash, .. } = r else {
+        panic!("{r:?}")
+    };
+    assert_eq!(desfecho, "concluida");
+    let hash = hash.unwrap();
+    assert_eq!((hash.hasheados, hash.reaproveitados), (2, 2));
+    let Resposta::Status { execucoes, .. } = a.executar(Comando::Status { execucao: None }) else {
+        panic!()
+    };
+    assert_eq!(execucoes[0].estado, EstadoExecucao::Concluida);
+    assert!(execucoes[0].hash.is_none());
+}
+
 #[test]
 fn listar_volumes_registra_no_catalogo() {
     let c = cenario();

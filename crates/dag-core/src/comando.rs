@@ -199,6 +199,39 @@ pub struct StatusExecucao {
     pub especiais: u64,
     pub bytes_logicos: u64,
     pub ignorados: u64,
+    /// Andamento do Hash Completo, quando a execução está (ou parou) nessa etapa.
+    #[serde(default)]
+    pub hash: Option<StatusHash>,
+}
+
+/// Andamento da etapa de Hash Completo lido da fila persistente: contagens de leituras físicas
+/// (um hard link com vários caminhos conta uma vez) e bytes, por disco e no total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusHash {
+    /// A fila teve atividade recente (alguém está lendo). Falso: pausada, cancelada ou processo
+    /// morto; `dag scan --retomar <id>` continua de onde parou.
+    pub em_andamento: bool,
+    pub arquivos_hasheados: u64,
+    pub arquivos_pendentes: u64,
+    pub arquivos_com_erro: u64,
+    pub bytes_hasheados: u64,
+    pub bytes_pendentes: u64,
+    /// Vazão recente (média do último minuto), em bytes por segundo.
+    pub bytes_por_seg: Option<u64>,
+    pub discos: Vec<StatusDiscoHash>,
+}
+
+/// Andamento do hash em um Dispositivo Físico (volumes sem dispositivo conhecido aparecem um por
+/// linha).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusDiscoHash {
+    pub disco: String,
+    pub volumes: Vec<i64>,
+    pub arquivos_hasheados: u64,
+    pub arquivos_pendentes: u64,
+    pub arquivos_com_erro: u64,
+    pub bytes_hasheados: u64,
+    pub bytes_pendentes: u64,
 }
 
 /// Totais do Catálogo (soma dos agregados por Volume da última varredura de cada um).

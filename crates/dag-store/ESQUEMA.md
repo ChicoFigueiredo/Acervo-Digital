@@ -41,7 +41,7 @@ Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_
 | Tabela | Propósito e chaves | Regras |
 | --- | --- | --- |
 | `hashes` | Hash Completo BLAKE3 (32 bytes) por arquivo, PK `file_id`. Guarda a evidência do momento do hash (`size_bytes`, `mtime_ns`, `ctime_ns`, `native_file_id`) e a Verificação de Integridade (`verified_at`, `verification_state` ok/divergente). | Reuso (Fast Scan) só se toda a evidência continuar igual. Índice `(size_bytes, hash)` para achar duplicados. Hard links são lidos uma vez; os demais caminhos copiam o resultado. |
-| `fila_hash` | Fila persistente de hash/verificação (estado, prioridade, `bytes_lidos`). 1 linha por arquivo. | Base do progresso, pausa e retomada. |
+| `fila_hash` | Fila persistente de hash/verificação (estado, prioridade, `bytes_lidos`). 1 linha por arquivo. | Base do progresso, pausa e retomada. O agendador de hash filtra a reserva por volume (`files.volume_id` → `volumes.device_id`) para dar uma sequência de leitura a cada Dispositivo Físico; nenhuma coluna a mais. |
 | `grupos_duplicados` | Grupo por (`logical_bytes`, `hash`), único; tamanho > 0 (vazios ficam fora). `copia_principal_file_id` + modo `auto`/`manual`. | Modo `manual` exige cópia principal. Principal automática vem de `prioridades`. |
 | `grupo_membros` | Arquivo físico distinto → grupo (PK `file_id`: um arquivo em um grupo). | Mesmo Arquivo Físico entra uma vez só (a aplicação escolhe o representante). |
 | `prioridades` | Prioridade de Volume/pasta: `ordem` menor vence; `folder_id` NULL = volume. | Único por volume e por pasta. |

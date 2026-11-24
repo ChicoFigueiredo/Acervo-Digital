@@ -26,7 +26,7 @@ pub use classificacao::{
 };
 pub use comando::{
     AcaoServico, Alvo, Comando, EntradaExploracao, Pedido, Resposta, ResumoCatalogo,
-    StatusExecucao, TipoEntradaExploracao, VolumeInfo,
+    StatusDiscoHash, StatusExecucao, StatusHash, TipoEntradaExploracao, VolumeInfo,
 };
 pub use descoberta::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use duplicados::{
@@ -39,7 +39,9 @@ pub use duplicados::{
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
 pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
-pub use progresso::{FaseInventario, Progresso, ProgressoHash, ProgressoInventario};
+pub use progresso::{
+    FaseInventario, Progresso, ProgressoDiscoHash, ProgressoHash, ProgressoInventario,
+};
 pub use reconciliacao::{EventoInfo, ResumoMonitorInfo, ResumoReconciliacao, SaudeMonitorInfo};
 pub use tipos::{
     Autor, EstadoExecucao, EstadoMarcacao, EtapaVarredura, Finalidade, ModoVarredura,

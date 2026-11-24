@@ -188,7 +188,7 @@ fn vazao_do_hash() {
         let t = Instant::now();
         let r = EtapaHash::nova(ExecucaoId(run))
             .com_config(ConfigHash {
-                concorrencia: leitores,
+                threads_por_disco: leitores,
                 ..ConfigHash::default()
             })
             .executar(&mut cat)

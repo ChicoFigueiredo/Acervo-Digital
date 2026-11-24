@@ -307,8 +307,16 @@ impl FullScan {
         let t = agora();
         let exec = inventario::obter_execucao(catalogo.armazem().conexao(), execucao_id)?
             .ok_or(ErroScan::ExecucaoInexistente(execucao_id))?;
-        if exec.fase == FaseScan::Concluida || !exec.estado.retomavel() {
-            if exec.fase == FaseScan::Concluida {
+        // Fase `hash`: o inventário já terminou (estado `concluida`); o que falta é a etapa de
+        // hash, que o chamador reexecuta (a fila persistente é reconstruída a partir dos hashes
+        // já gravados, então nada é relido).
+        let inventario_pronto = matches!(exec.fase, FaseScan::Concluida | FaseScan::Hash)
+            && matches!(
+                exec.estado,
+                EstadoScan::Concluida | EstadoScan::ConcluidaComErros
+            );
+        if exec.fase == FaseScan::Concluida || inventario_pronto || !exec.estado.retomavel() {
+            if exec.fase == FaseScan::Concluida || inventario_pronto {
                 let c =
                     inventario::contadores_da_execucao(catalogo.armazem().conexao(), execucao_id)?;
                 let desfecho = if exec.estado == EstadoScan::ConcluidaComErros {

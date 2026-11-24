@@ -458,7 +458,7 @@ fn diretorio_ilegivel_protege_a_subarvore_dele() {
         Some("ativo")
     );
     assert!(rec.bloqueios >= 1);
-    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComErros);
+    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComAvisos);
 }
 
 #[test]

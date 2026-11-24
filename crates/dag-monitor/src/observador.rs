@@ -10,7 +10,7 @@ use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use dag_scanner::{Casamento, Exclusao, RaizMonitorada};
+use dag_scanner::{Exclusao, RaizMonitorada};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fd::OwnedFd;
 use rustix::fs::inotify::{self, CreateFlags, ReadFlags, WatchFlags};
@@ -45,10 +45,7 @@ fn pai(caminho: &[u8]) -> Option<&[u8]> {
 }
 
 fn excluida(ex: &[Exclusao], caminho: &[u8], nome: &[u8]) -> bool {
-    ex.iter().any(|x| match &x.casamento {
-        Casamento::Nome(n) => n == nome,
-        Casamento::Caminho(c) => c == caminho,
-    })
+    ex.iter().any(|x| x.casa(caminho, nome))
 }
 
 pub(crate) struct Observador {

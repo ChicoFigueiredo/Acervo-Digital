@@ -110,6 +110,8 @@ pub enum Proposito {
     Exportar,
     /// Salvar o paralelismo do hash em Configurações.
     ConfigHash,
+    /// Regras de erros aceitos e exclusões (página Varredura).
+    Erros,
     /// Simulação do primeiro diálogo de mover para a Lixeira.
     LixeiraPrevia,
     /// Mover de verdade (depois dos dois diálogos).
@@ -816,7 +818,7 @@ impl AppDag {
                 ..
             } => {
                 let tom = match desfecho.as_str() {
-                    "concluida" => Tom::Sucesso,
+                    "concluida" | "concluida_com_avisos" => Tom::Sucesso,
                     _ => Tom::Aviso,
                 };
                 let texto = match desfecho.as_str() {
@@ -825,8 +827,15 @@ impl AppDag {
                         execucao.0
                     ),
                     "concluida_com_erros" => {
-                        format!("Varredura #{} concluída com {erros} erro(s).", execucao.0)
+                        format!(
+                            "Varredura #{} concluída com erros reais (veja \"Erros da varredura\").",
+                            execucao.0
+                        )
                     }
+                    "concluida_com_avisos" => format!(
+                        "Varredura #{} concluída com avisos (esperados ou de acesso); nenhum erro real.",
+                        execucao.0
+                    ),
                     _ => format!("Varredura #{} concluída.", execucao.0),
                 };
                 self.aviso(tom, texto);
@@ -883,6 +892,19 @@ impl AppDag {
                 if matches!(proposito, Some(Proposito::Marcacao(_))) {
                     self.aviso(Tom::Sucesso, "Cópia Principal definida.");
                 }
+                self.invalidar();
+            }
+            Resposta::ErrosRegras {
+                aceitas, exclusoes, ..
+            } => {
+                self.aviso(
+                    Tom::Sucesso,
+                    format!(
+                        "Regras atualizadas: {} erro(s) aceito(s), {} exclusão(ões) (as exclusões valem nas próximas varreduras).",
+                        aceitas.len(),
+                        exclusoes.len()
+                    ),
+                );
                 self.invalidar();
             }
             Resposta::ConfigHash {

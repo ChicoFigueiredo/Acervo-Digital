@@ -35,10 +35,36 @@ type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesfechoScan {
     Concluida,
-    /// Terminou, mas houve problemas de acesso (agregados afetados ficam `parcial`).
+    /// Terminou com avisos, problemas esperados ou aceitos, mas sem erro real.
+    ConcluidaComAvisos,
+    /// Terminou, mas houve erros reais (agregados afetados ficam `parcial`).
     ConcluidaComErros,
     /// Parou a pedido; a fila persiste e `retomar` continua de onde parou.
     Cancelada,
+}
+
+impl DesfechoScan {
+    /// Desfecho correspondente ao estado final gravado (estados não terminais viram `Concluida`).
+    #[must_use]
+    pub const fn de_estado(e: EstadoScan) -> Self {
+        match e {
+            EstadoScan::ConcluidaComAvisos => Self::ConcluidaComAvisos,
+            EstadoScan::ConcluidaComErros => Self::ConcluidaComErros,
+            EstadoScan::Cancelada => Self::Cancelada,
+            _ => Self::Concluida,
+        }
+    }
+
+    /// Nome gravado no Catálogo.
+    #[must_use]
+    pub const fn nome(self) -> &'static str {
+        match self {
+            Self::Concluida => "concluida",
+            Self::ConcluidaComAvisos => "concluida_com_avisos",
+            Self::ConcluidaComErros => "concluida_com_erros",
+            Self::Cancelada => "cancelada",
+        }
+    }
 }
 
 /// Resultado de `executar`/`retomar`.
@@ -316,6 +342,7 @@ impl FullScan {
             && matches!(
                 exec.estado,
                 EstadoScan::Concluida
+                    | EstadoScan::ConcluidaComAvisos
                     | EstadoScan::ConcluidaComErros
                     | EstadoScan::EmAndamento
                     | EstadoScan::Pausada
@@ -325,11 +352,10 @@ impl FullScan {
             if exec.fase == FaseScan::Concluida || inventario_pronto {
                 let c =
                     inventario::contadores_da_execucao(catalogo.armazem().conexao(), execucao_id)?;
-                let desfecho = if exec.estado == EstadoScan::ConcluidaComErros || c.erros > 0 {
-                    DesfechoScan::ConcluidaComErros
-                } else {
-                    DesfechoScan::Concluida
-                };
+                let desfecho = DesfechoScan::de_estado(inventario::estado_final(
+                    catalogo.armazem().conexao(),
+                    execucao_id,
+                )?);
                 return Ok(ResultadoScan {
                     execucao_id,
                     desfecho,
@@ -634,11 +660,7 @@ impl FullScan {
                     None => c.json(),
                 };
                 inventario::salvar_contadores(tx, run_id, &json)?;
-                let estado = if c.erros > 0 {
-                    EstadoScan::ConcluidaComErros
-                } else {
-                    EstadoScan::Concluida
-                };
+                let estado = inventario::estado_final(tx, run_id)?;
                 inventario::definir_estado(tx, run_id, estado, Some(FaseScan::Concluida), agora())?;
                 Ok((c, estado))
             },
@@ -646,11 +668,7 @@ impl FullScan {
         self.emitir(&mut ctx, FaseProgresso::Concluido, 0, true);
         Ok(ResultadoScan {
             execucao_id: run_id,
-            desfecho: if estado == EstadoScan::ConcluidaComErros {
-                DesfechoScan::ConcluidaComErros
-            } else {
-                DesfechoScan::Concluida
-            },
+            desfecho: DesfechoScan::de_estado(estado),
             contadores,
             agregacao: Some(agregacao),
             duracao: inicio.elapsed(),

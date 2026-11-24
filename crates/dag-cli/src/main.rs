@@ -175,6 +175,57 @@ enum AcaoFila {
     TentarDeNovo { id: i64 },
 }
 
+/// Como agrupar o resumo de `dag erros`.
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum AgruparArg {
+    Codigo,
+    Pasta,
+}
+
+/// Regras de "Erros aceitos" (a classificação embutida aparece em `dag erros regras`).
+#[derive(Subcommand, Debug)]
+enum AcaoErros {
+    /// Mostra as regras embutidas, as regras aceitas e as exclusões
+    Regras,
+    /// Aceita um tipo de erro numa pasta: o que casar passa a contar como "aceito"
+    Aceitar {
+        /// Glob de caminho (`~`, `*`, `**`, `?`); uma pasta vale para tudo dentro dela
+        padrao: String,
+        /// Código de erro a aceitar (padrão: qualquer, `*`)
+        #[arg(long)]
+        codigo: Option<String>,
+        /// Por que este erro é aceitável
+        #[arg(long)]
+        motivo: Option<String>,
+    },
+    /// Remove uma regra aceita (id em `dag erros regras`)
+    Remover { id: i64 },
+    /// Remove uma exclusão (id em `dag erros regras`)
+    RemoverExclusao { id: i64 },
+}
+
+#[derive(clap::Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+struct ErrosArg {
+    #[command(subcommand)]
+    acao: Option<AcaoErros>,
+    /// Execução a examinar (padrão: a última terminada)
+    #[arg(long, value_name = "N")]
+    execucao: Option<i64>,
+    /// Agrupamento principal da saída (a outra visão aparece abaixo)
+    #[arg(long, value_enum, default_value = "codigo")]
+    agrupar: AgruparArg,
+    /// Só este código de erro
+    #[arg(long)]
+    codigo: Option<String>,
+    /// Só esta pasta (prefixo)
+    #[arg(long)]
+    pasta: Option<String>,
+    /// Amostras por grupo (padrão 3)
+    #[arg(long)]
+    amostras: Option<u32>,
+}
+
 /// Cofre de Senhas: senhas tentadas automaticamente nos Contêineres cifrados.
 #[derive(Subcommand, Debug)]
 enum AcaoCofre {
@@ -273,6 +324,16 @@ enum Sub {
         /// Não calcula Hash Completo após as reconciliações
         #[arg(long)]
         sem_hash: bool,
+    },
+    /// Erros da varredura: esperados, aceitos, avisos e erros reais, por código e por pasta
+    Erros(ErrosArg),
+    /// Exclui do escopo das próximas varreduras o que casar o glob (ex.: `~/.cache`)
+    Excluir {
+        /// Glob de caminho (`~`, `*`, `**`, `?`); o que casar não é varrido
+        padrao: String,
+        /// Justificativa registrada (A-19)
+        #[arg(long)]
+        motivo: Option<String>,
     },
     /// Lista os eventos de arquivos/volumes persistidos (mais recentes primeiro)
     Eventos {
@@ -671,6 +732,31 @@ fn montar(sub: Sub) -> Option<Comando> {
             sem_hash,
         },
         Sub::Eventos { limite } => Comando::Eventos { limite },
+        Sub::Excluir { padrao, motivo } => Comando::Excluir { padrao, motivo },
+        Sub::Erros(e) => match e.acao {
+            Some(AcaoErros::Regras) => Comando::ErrosRegras,
+            Some(AcaoErros::Aceitar {
+                padrao,
+                codigo,
+                motivo,
+            }) => Comando::ErrosAceitar {
+                padrao,
+                codigo,
+                motivo,
+            },
+            Some(AcaoErros::Remover { id }) => Comando::ErrosRemover { id },
+            Some(AcaoErros::RemoverExclusao { id }) => Comando::ExclusaoRemover { id },
+            None => Comando::ErrosDaVarredura {
+                execucao: e.execucao.map(ExecucaoId),
+                agrupar: Some(match e.agrupar {
+                    AgruparArg::Codigo => dag_core::erros::AgruparErros::Codigo,
+                    AgruparArg::Pasta => dag_core::erros::AgruparErros::Pasta,
+                }),
+                codigo: e.codigo,
+                pasta: e.pasta,
+                amostras: e.amostras,
+            },
+        },
         Sub::Explorar {
             pasta,
             limite,

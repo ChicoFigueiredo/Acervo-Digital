@@ -52,6 +52,8 @@ use crate::controle::{ControleScan, EstadoControle};
 use crate::erro::ErroScan;
 use crate::scan::DesfechoScan;
 
+mod reteste;
+
 /// Como a etapa terminou (mesmos desfechos do scan).
 pub type Desfecho = DesfechoScan;
 
@@ -310,6 +312,7 @@ impl EtapaHash {
         )?;
         let sem_hash_linhas = resumo.candidatos - resumo.reaproveitados;
         let controle = self.controle.clone();
+        let (gancho_reteste, pedaco_reteste) = (self.gancho.clone(), self.gancho_pedaco.clone());
         let motor = Motor {
             tipo: TipoFila::Hash,
             fase: "hash",
@@ -326,7 +329,7 @@ impl EtapaHash {
             amostras: VecDeque::new(),
             finalizado: false,
         };
-        let r = match motor.rodar(cat, inicio) {
+        let mut r = match motor.rodar(cat, inicio) {
             Ok(r) => r,
             Err(e) => {
                 // Falha do Catálogo no meio: não deixa `em_andamento` num processo que segue
@@ -346,13 +349,19 @@ impl EtapaHash {
                 return Err(e);
             }
         };
-        let desfecho = if r.cancelado {
-            Desfecho::Cancelada
-        } else if r.erros > 0 {
-            Desfecho::ConcluidaComErros
-        } else {
-            Desfecho::Concluida
-        };
+        // Reteste único dos arquivos vivos (mudaram ou sumiram durante o hash): estável = hasheado
+        // e sem erro nenhum; ainda mudando ou sumido = problema esperado.
+        if !r.cancelado {
+            let recuperados = reteste::executar(
+                cat,
+                run_id,
+                &controle,
+                gancho_reteste.as_ref(),
+                pedaco_reteste.as_ref(),
+            )?;
+            r.erros = r.erros.saturating_sub(recuperados);
+            r.feitos_ok += recuperados;
+        }
         let json = serde_json::json!({
             "candidatos": resumo.candidatos, "reaproveitados": resumo.reaproveitados,
             "sem_hash_no_inicio": sem_hash_linhas, "hasheados": r.feitos_ok,
@@ -364,21 +373,15 @@ impl EtapaHash {
         } else {
             fase_anterior
         };
+        let mut estado_final = EstadoScan::Concluida;
         cat.armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
                 hashes::salvar_contadores_etapa(tx, run_id, "hash", &json)?;
-                // Estado final: `concluida_com_erros` se a execução tem problemas (inventário ou
-                // hash), senão `concluida`. A fase diz se ainda falta hash.
-                let com_erros: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM scan_errors WHERE run_id = ?1 AND severity <> 'info'",
-                    [run_id],
-                    |l| l.get(0),
-                )?;
-                let final_ = if com_erros > 0 || r.erros > 0 {
-                    EstadoScan::ConcluidaComErros
-                } else {
-                    EstadoScan::Concluida
-                };
+                // Estado final: `concluida_com_erros` só com erro real; avisos, esperados e
+                // aceitos dão `concluida_com_avisos`; sem nada, `concluida`. A fase diz se ainda
+                // falta hash.
+                let final_ = inventario::estado_final(tx, run_id)?;
+                estado_final = final_;
                 if r.cancelado {
                     // Encerramento do programa continua sozinho na próxima abertura; cancelamento
                     // do usuário não.
@@ -406,6 +409,11 @@ impl EtapaHash {
                 }
                 Ok(())
             })?;
+        let desfecho = if r.cancelado {
+            Desfecho::Cancelada
+        } else {
+            Desfecho::de_estado(estado_final)
+        };
         Ok(ResultadoHash {
             desfecho,
             hasheados: r.feitos_ok,
@@ -537,25 +545,17 @@ impl VerificacaoIntegridade {
             finalizado: false,
         };
         let r = motor.rodar(cat, inicio)?;
-        let desfecho = if r.cancelado {
-            Desfecho::Cancelada
-        } else if r.erros > 0 || !r.divergentes.is_empty() {
-            Desfecho::ConcluidaComErros
-        } else {
-            Desfecho::Concluida
-        };
         let json = serde_json::json!({
             "verificados": r.feitos_ok, "divergentes": r.divergentes.len(),
             "alterados": r.alterados, "bytes_lidos": r.bytes_lidos, "erros": r.erros,
         })
         .to_string();
-        let estado = match desfecho {
-            Desfecho::Concluida => EstadoScan::Concluida,
-            Desfecho::ConcluidaComErros => EstadoScan::ConcluidaComErros,
-            Desfecho::Cancelada => EstadoScan::Cancelada,
-        };
+        let mut estado = EstadoScan::Cancelada;
         cat.armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
+                if !r.cancelado {
+                    estado = inventario::estado_final(tx, run_id)?;
+                }
                 inventario::salvar_contadores(tx, run_id, &json)?;
                 inventario::definir_estado(tx, run_id, estado, None, agora())?;
                 if !r.cancelado {
@@ -563,6 +563,7 @@ impl VerificacaoIntegridade {
                 }
                 Ok(())
             })?;
+        let desfecho = Desfecho::de_estado(estado);
         Ok(ResultadoVerificacao {
             desfecho,
             execucao_id: run_id,

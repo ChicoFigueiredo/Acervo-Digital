@@ -73,7 +73,7 @@ fn logica() {
     // Sem leitor: comportamento de sempre.
     let mut cat = Catalogo::em_memoria().unwrap();
     let r = scan(&raiz).executar(&mut cat).unwrap();
-    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComErros);
+    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComAvisos);
     let probs =
         listar_problemas(cat.armazem().conexao(), r.execucao_id, 0, 10, Some(false)).unwrap();
     assert_eq!(probs.len(), 1);
@@ -130,8 +130,8 @@ fn logica() {
     let probs = listar_problemas(cat.armazem().conexao(), r.execucao_id, 0, 10, None).unwrap();
     assert_eq!(probs.len(), 2);
     assert!(probs.iter().all(|p| p.codigo == "permissao_negada_elevada"));
-    // O aviso mantém o desfecho "com erros", como no acesso negado comum (fica auditável).
-    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComErros);
+    // O aviso dá o desfecho "com avisos", como no acesso negado comum (fica auditável).
+    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComAvisos);
 
     // Leitor que falha: volta a registrar como inacessível.
     let mudo = Arc::new(Falso {
@@ -143,7 +143,7 @@ fn logica() {
         .com_leitor_elevado(mudo)
         .executar(&mut cat)
         .unwrap();
-    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComErros);
+    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComAvisos);
     let probs =
         listar_problemas(cat.armazem().conexao(), r.execucao_id, 0, 10, Some(false)).unwrap();
     assert_eq!(probs[0].codigo, "permissao_negada");

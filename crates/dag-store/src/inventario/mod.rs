@@ -64,6 +64,8 @@ pub enum EstadoScan {
     EmAndamento,
     Pausada,
     Concluida,
+    /// Só avisos, problemas esperados ou aceitos: nenhum erro real.
+    ConcluidaComAvisos,
     ConcluidaComErros,
     Cancelada,
     Falhou,
@@ -77,6 +79,7 @@ impl EstadoScan {
             Self::EmAndamento => "em_andamento",
             Self::Pausada => "pausada",
             Self::Concluida => "concluida",
+            Self::ConcluidaComAvisos => "concluida_com_avisos",
             Self::ConcluidaComErros => "concluida_com_erros",
             Self::Cancelada => "cancelada",
             Self::Falhou => "falhou",
@@ -90,6 +93,7 @@ impl EstadoScan {
             "em_andamento" => Self::EmAndamento,
             "pausada" => Self::Pausada,
             "concluida" => Self::Concluida,
+            "concluida_com_avisos" => Self::ConcluidaComAvisos,
             "concluida_com_erros" => Self::ConcluidaComErros,
             "cancelada" => Self::Cancelada,
             "falhou" => Self::Falhou,
@@ -440,7 +444,8 @@ pub fn detectar_interrompidas(
     let hash_parado: Option<(i64, String, String, String)> = conn
         .query_row(
             "SELECT id, mode, roots, phase FROM scan_runs
-             WHERE phase = 'hash' AND status IN ('concluida','concluida_com_erros')
+             WHERE phase = 'hash'
+               AND status IN ('concluida','concluida_com_avisos','concluida_com_erros')
                AND mode IN ('full','fast') AND parada_deliberada = 0
              ORDER BY id DESC LIMIT 1",
             [],
@@ -519,6 +524,24 @@ impl ContadoresDb {
         })
         .to_string()
     }
+}
+
+/// Estado final de uma execução que terminou: classifica os problemas ainda sem classe e decide
+/// entre `concluida` (nenhum problema), `concluida_com_avisos` (só avisos, esperados ou aceitos)
+/// e `concluida_com_erros` (algum erro real).
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn estado_final(conn: &Connection, run_id: i64) -> Resultado<EstadoScan> {
+    crate::erros::classificar_execucao(conn, run_id, crate::erros::pasta_home().as_deref())?;
+    let c = crate::erros::contar_desfecho(conn, run_id)?;
+    Ok(if c.reais > 0 {
+        EstadoScan::ConcluidaComErros
+    } else if c.avisos > 0 {
+        EstadoScan::ConcluidaComAvisos
+    } else {
+        EstadoScan::Concluida
+    })
 }
 
 /// Recalcula os contadores de uma execução a partir de `folders`, `files` e `scan_errors`.

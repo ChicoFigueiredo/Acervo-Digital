@@ -701,7 +701,7 @@ fn diretorio_sem_permissao_e_registrado_e_o_scan_continua() {
     let mut cat = Catalogo::em_memoria().unwrap();
     let r = scan(&raiz).executar(&mut cat).unwrap();
     fs::set_permissions(raiz.join("trancada"), fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComErros);
+    assert_eq!(r.desfecho, DesfechoScan::ConcluidaComAvisos);
     let probs =
         listar_problemas(cat.armazem().conexao(), r.execucao_id, 0, 10, Some(false)).unwrap();
     assert_eq!(probs.len(), 1);

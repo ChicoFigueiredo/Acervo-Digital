@@ -20,14 +20,15 @@ use dag_core::{
 use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::PlataformaLinux;
 use dag_scanner::{
-    ConfigHash, ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan,
-    Progresso as ProgressoScanner, ProgressoHash as ProgressoHashScanner, ResultadoScan,
-    VerificacaoIntegridade,
+    ConfigHash, ConfigScan, ControleScan, DesfechoScan, EtapaHash, Exclusao, FaseProgresso,
+    FastScan, FullScan, Progresso as ProgressoScanner, ProgressoHash as ProgressoHashScanner,
+    ResultadoScan, VerificacaoIntegridade,
 };
 use dag_store::Catalogo;
 use dag_store::confianca;
 use dag_store::configuracao;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
+use dag_store::erros as erros_db;
 use dag_store::hashes;
 use dag_store::inventario::{self, EstadoScan, FaseScan};
 use dag_store::reconciliacao;
@@ -82,6 +83,8 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::MoverParaLixeira { simular: true, .. }
             | Comando::StatusConteineres
             | Comando::ListarPedidos { .. }
+            | Comando::ErrosDaVarredura { .. }
+            | Comando::ErrosRegras
             | Comando::CofreListar
             | Comando::ExplorarConteiner { .. }
             | Comando::ConfigHash {
@@ -377,6 +380,66 @@ impl Agente {
                 sem_hash,
             } => self.monitorar(&raizes, reconciliar_a_cada_s, sem_hash),
             Comando::Eventos { limite } => self.eventos(limite),
+            Comando::ErrosDaVarredura {
+                execucao,
+                codigo,
+                pasta,
+                amostras,
+                agrupar,
+            } => self.erros_da_varredura(
+                execucao,
+                agrupar.unwrap_or_default(),
+                codigo.as_deref(),
+                pasta.as_deref(),
+                amostras,
+            ),
+            Comando::ErrosRegras => self.erros_regras(),
+            Comando::ErrosAceitar {
+                padrao,
+                codigo,
+                motivo,
+            } => {
+                let padrao = padrao.trim();
+                if padrao.is_empty() {
+                    return Err(ErroAgente::Invalido(
+                        "informe o padrão (glob de caminho)".into(),
+                    ));
+                }
+                erros_db::adicionar_regra(
+                    self.catalogo.armazem().conexao(),
+                    padrao,
+                    codigo.as_deref(),
+                    motivo.as_deref().unwrap_or(""),
+                    agora(),
+                )?;
+                self.erros_regras()
+            }
+            Comando::ErrosRemover { id } => {
+                if !erros_db::remover_regra(self.catalogo.armazem().conexao(), id)? {
+                    return Err(ErroAgente::Invalido(format!("não há regra {id}")));
+                }
+                self.erros_regras()
+            }
+            Comando::Excluir { padrao, motivo } => {
+                let padrao = padrao.trim();
+                if padrao.is_empty() {
+                    return Err(ErroAgente::Invalido(
+                        "informe o padrão (glob de caminho)".into(),
+                    ));
+                }
+                erros_db::adicionar_exclusao(
+                    self.catalogo.armazem().conexao(),
+                    padrao,
+                    motivo.as_deref().unwrap_or("excluído pelo usuário"),
+                )?;
+                self.erros_regras()
+            }
+            Comando::ExclusaoRemover { id } => {
+                if !erros_db::remover_exclusao(self.catalogo.armazem().conexao(), id)? {
+                    return Err(ErroAgente::Invalido(format!("não há exclusão {id}")));
+                }
+                self.erros_regras()
+            }
             Comando::SaudeMonitor => Ok(Resposta::SaudeMonitor {
                 saude: self.saude_monitor()?,
             }),
@@ -651,9 +714,23 @@ impl Agente {
 
     // ------------------------------------------------------------------ varredura
 
+    /// Configuração de varredura com as exclusões do usuário (`dag excluir`).
+    fn config_scan(&self) -> Result<ConfigScan, ErroAgente> {
+        let home = erros_db::pasta_home();
+        let exclusoes = erros_db::listar_exclusoes(self.catalogo.armazem().conexao())?
+            .into_iter()
+            .map(|e| Exclusao::glob(&e.padrao, e.motivo, home.as_deref()))
+            .collect();
+        Ok(ConfigScan {
+            exclusoes,
+            ..ConfigScan::default()
+        })
+    }
+
     fn novo_scan(&self, raizes: Vec<PathBuf>, elevar: bool) -> Result<FullScan, ErroAgente> {
         let elevado = crate::servico::leitor_elevado_se(&raizes, elevar);
         let mut scan = FullScan::novo(raizes, self.volumes_do_sistema()?)
+            .com_config(self.config_scan()?)
             .com_controle(self.controle.clone())
             .com_classificador(Arc::new(ClassificadorPorExtensao));
         if let Some(l) = elevado {
@@ -702,6 +779,7 @@ impl Agente {
         let raizes = self.raizes_com_lixeira(raizes)?;
         let elevado = crate::servico::leitor_elevado_se(&raizes, elevar);
         let mut scan = FastScan::novo(raizes, self.volumes_do_sistema()?)
+            .com_config(self.config_scan()?)
             .com_controle(self.controle.clone())
             .com_classificador(Arc::new(ClassificadorPorExtensao));
         if let Some(l) = elevado {
@@ -783,7 +861,12 @@ impl Agente {
         } else {
             raizes.iter().map(PathBuf::from).collect()
         };
-        let mut cfg = ConfigMonitor::default();
+        let scan = self.config_scan()?;
+        let mut cfg = ConfigMonitor {
+            exclusoes: scan.exclusoes.clone(),
+            scan,
+            ..ConfigMonitor::default()
+        };
         match reconciliar_a_cada_s {
             Some(0) => cfg.reconciliar_a_cada = None,
             Some(s) => cfg.reconciliar_a_cada = Some(std::time::Duration::from_secs(s)),
@@ -822,6 +905,77 @@ impl Agente {
                 watches: r.watches,
                 duracao_ms: u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX),
             },
+        })
+    }
+
+    /// Estado final gravado da execução (`concluida*`); `padrao` se ainda não terminou.
+    fn estado_gravado(&self, execucao: i64, padrao: &'static str) -> &'static str {
+        let estado: Option<String> = self
+            .catalogo
+            .armazem()
+            .conexao()
+            .query_row(
+                "SELECT status FROM scan_runs WHERE id = ?1",
+                [execucao],
+                |l| l.get(0),
+            )
+            .ok();
+        match estado.as_deref() {
+            Some("concluida") => "concluida",
+            Some("concluida_com_avisos") => "concluida_com_avisos",
+            Some("concluida_com_erros") => "concluida_com_erros",
+            _ => padrao,
+        }
+    }
+
+    /// Erros da execução (padrão: a última terminada): por desfecho, código, pasta e amostras.
+    fn erros_da_varredura(
+        &self,
+        execucao: Option<ExecucaoId>,
+        agrupar: dag_core::erros::AgruparErros,
+        codigo: Option<&str>,
+        pasta: Option<&str>,
+        amostras: Option<u32>,
+    ) -> Result<Resposta, ErroAgente> {
+        let conn = self.catalogo.armazem().conexao();
+        let id = match execucao {
+            Some(e) => e.0,
+            None => erros_db::ultima_execucao_terminada(conn)?
+                .ok_or_else(|| ErroAgente::Invalido("nenhuma varredura terminada".into()))?,
+        };
+        let existe: bool = conn
+            .query_row("SELECT COUNT(*) FROM scan_runs WHERE id = ?1", [id], |l| {
+                l.get::<_, i64>(0)
+            })
+            .map(|n| n > 0)?;
+        if !existe {
+            return Err(ErroAgente::Invalido(format!("não há execução {id}")));
+        }
+        let mut resumo = erros_db::resumir(
+            conn,
+            id,
+            &erros_db::OpcoesResumo {
+                codigo,
+                pasta,
+                amostras: amostras.map(|n| n.min(50) as usize),
+                pastas: None,
+            },
+            erros_db::pasta_home().as_deref(),
+        )?;
+        resumo.agrupar = agrupar;
+        Ok(Resposta::ErrosDaVarredura { resumo })
+    }
+
+    /// Regras embutidas, regras aceitas e exclusões do usuário.
+    fn erros_regras(&self) -> Result<Resposta, ErroAgente> {
+        let conn = self.catalogo.armazem().conexao();
+        Ok(Resposta::ErrosRegras {
+            embutidas: dag_core::erros::REGRAS_EMBUTIDAS
+                .iter()
+                .map(dag_core::erros::RegraEmbutida::info)
+                .collect(),
+            aceitas: erros_db::listar_regras(conn)?,
+            exclusoes: erros_db::listar_exclusoes(conn)?,
         })
     }
 
@@ -903,11 +1057,7 @@ impl Agente {
         releitura_total: bool,
         opcoes: OpcoesHash,
     ) -> Result<Resposta, ErroAgente> {
-        let mut desfecho = match r.desfecho {
-            DesfechoScan::Concluida => "concluida",
-            DesfechoScan::ConcluidaComErros => "concluida_com_erros",
-            DesfechoScan::Cancelada => "cancelada",
-        };
+        let mut desfecho = nome_desfecho(r.desfecho);
         let mut erros = r.contadores.erros;
         let mut duracao = r.duracao;
         let (mut hash, mut dup) = (None, None);
@@ -951,9 +1101,9 @@ impl Agente {
                 if cancelada || conteineres_cancelada {
                     desfecho = "cancelada";
                 } else {
-                    if h.erros > 0 {
-                        desfecho = "concluida_com_erros";
-                    }
+                    // O estado final (`concluida`, `_com_avisos` ou `_com_erros`) já foi gravado
+                    // pela etapa de hash, depois do reteste e da classificação.
+                    desfecho = self.estado_gravado(r.execucao_id, desfecho);
                     // Passada de verificação sem mudança e sem hash novo: os grupos continuam
                     // valendo (evita reconstruí-los a cada abertura). Mas hashes que mudaram
                     // desde a última reconstrução completa (ou grupos nunca construídos) sempre
@@ -1487,7 +1637,9 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
             EstadoScan::EmAndamento => EstadoExecucao::EmAndamento,
             // Interrompida (processo morto) é retomável, como a pausada.
             EstadoScan::Pausada | EstadoScan::Interrompida => EstadoExecucao::Pausada,
-            EstadoScan::Concluida | EstadoScan::ConcluidaComErros => EstadoExecucao::Concluida,
+            EstadoScan::Concluida
+            | EstadoScan::ConcluidaComAvisos
+            | EstadoScan::ConcluidaComErros => EstadoExecucao::Concluida,
             EstadoScan::Cancelada => EstadoExecucao::Cancelada,
             EstadoScan::Falhou => EstadoExecucao::Falhou,
         },
@@ -1514,11 +1666,7 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
 }
 
 fn nome_desfecho(d: DesfechoScan) -> &'static str {
-    match d {
-        DesfechoScan::Concluida => "concluida",
-        DesfechoScan::ConcluidaComErros => "concluida_com_erros",
-        DesfechoScan::Cancelada => "cancelada",
-    }
+    d.nome()
 }
 
 // ---------------------------------------------------------------------- progresso

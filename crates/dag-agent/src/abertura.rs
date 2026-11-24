@@ -350,9 +350,9 @@ impl Agente {
                         mudancas,
                         hasheados: hash.as_ref().map_or(0, |h| h.hasheados),
                     });
-                    let limpa = desfecho == "concluida"
-                        && reconciliacao.as_ref().is_some_and(|x| x.sem_mudancas())
-                        && hash.as_ref().is_none_or(|h| h.erros == 0);
+                    // Avisos, esperados e aceitos não impedem a convergência; só erro real.
+                    let limpa = matches!(desfecho.as_str(), "concluida" | "concluida_com_avisos")
+                        && reconciliacao.as_ref().is_some_and(|x| x.sem_mudancas());
                     if limpa {
                         convergiu = true;
                         break;

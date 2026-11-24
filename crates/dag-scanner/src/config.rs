@@ -11,6 +11,8 @@ pub enum Casamento {
     Nome(Vec<u8>),
     /// Caminho absoluto exato (a entrada e, por consequência, tudo abaixo dela).
     Caminho(Vec<u8>),
+    /// Glob de caminho (`*`, `**`, `?`; `~` já expandido): casa a entrada e tudo abaixo dela.
+    Glob(String),
 }
 
 /// Exclusão explícita, com a justificativa que fica registrada (A-19).
@@ -37,10 +39,24 @@ impl Exclusao {
         }
     }
 
-    pub(crate) fn casa(&self, caminho: &[u8], nome: &[u8]) -> bool {
+    /// Exclusão por glob de caminho. `home` expande o `~` do padrão.
+    #[must_use]
+    pub fn glob(padrao: &str, motivo: impl Into<String>, home: Option<&str>) -> Self {
+        Self {
+            casamento: Casamento::Glob(dag_core::erros::expandir_til(padrao, home)),
+            motivo: motivo.into(),
+        }
+    }
+
+    /// A entrada (`caminho` inteiro, `nome` = último componente) está excluída.
+    #[must_use]
+    pub fn casa(&self, caminho: &[u8], nome: &[u8]) -> bool {
         match &self.casamento {
             Casamento::Nome(n) => n == nome,
             Casamento::Caminho(c) => c == caminho,
+            Casamento::Glob(g) => {
+                dag_core::erros::casa_caminho(g, &String::from_utf8_lossy(caminho), None)
+            }
         }
     }
 }

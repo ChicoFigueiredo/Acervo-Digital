@@ -24,6 +24,7 @@ use dag_scanner::{ControleScan, EstadoControle};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::net::sockopt::socket_peercred;
 
+use crate::abertura::PoliticaAbertura;
 use crate::agente::{Agente, somente_leitura};
 use crate::erro::ErroAgente;
 use crate::exibir::progresso_stderr;
@@ -47,6 +48,9 @@ pub struct ConfigServidor {
     pub volumes_fixos: Option<Vec<VolumeDescoberto>>,
     /// Uid aceito no socket; `None` = o uid do próprio processo. Existe para testar a recusa.
     pub uid_aceito: Option<u32>,
+    /// O que fazer ao abrir: retomar execuções interrompidas e verificar as Raízes (ADR 0003).
+    /// `monitor_ativo` é ajustado de `monitor` ao iniciar.
+    pub abertura: PoliticaAbertura,
 }
 
 impl ConfigServidor {
@@ -58,6 +62,7 @@ impl ConfigServidor {
             monitor: true,
             volumes_fixos: None,
             uid_aceito: None,
+            abertura: PoliticaAbertura::default(),
         }
     }
 }
@@ -97,6 +102,7 @@ struct Trabalho {
 struct Compartilhado {
     catalogo: PathBuf,
     monitor: bool,
+    abertura: PoliticaAbertura,
     uid: u32,
     parar: AtomicBool,
     controle: ControleScan,
@@ -145,6 +151,10 @@ impl Servidor {
         let comp = Arc::new(Compartilhado {
             catalogo,
             monitor: cfg.monitor,
+            abertura: PoliticaAbertura {
+                monitor_ativo: cfg.monitor,
+                ..cfg.abertura.clone()
+            },
             uid: cfg.uid_aceito.unwrap_or(uid_proprio),
             parar: AtomicBool::new(false),
             controle: agente.controle(),
@@ -214,7 +224,9 @@ impl Servidor {
         {
             let _e = travar(&self.comp.estado);
             travar(&self.comp.fila).take();
-            self.comp.controle.cancelar();
+            // Encerramento, não decisão do usuário: o que estava rodando fica `interrompida` e
+            // continua sozinho na próxima abertura.
+            self.comp.controle.encerrar();
         }
         if let Some(t) = self.aceitador.take() {
             let _ = t.join();
@@ -572,6 +584,7 @@ fn trabalhar(mut agente: Agente, rx: &Receiver<Trabalho>, comp: &Arc<Compartilha
     let mut tentar_monitor = comp.monitor;
     let mut pendente: Option<Trabalho> = None;
     let mut ultimo_erro_monitor: Option<String> = None;
+    recuperar_ao_abrir(&mut agente, comp);
     loop {
         let passo = {
             let mut e = travar(&comp.estado);
@@ -623,6 +636,42 @@ fn trabalhar(mut agente: Agente, rx: &Receiver<Trabalho>, comp: &Arc<Compartilha
         let _ = t.saida.send(Saida::Resposta(Box::new(encerrando())));
     }
     agente.checkpoint();
+}
+
+/// Execuções interrompidas, retomada e verificação das Raízes antes de atender pedidos e
+/// monitorar. Pedidos que chegam esperam na fila; `Cancelar` e o encerramento a interrompem.
+fn recuperar_ao_abrir(agente: &mut Agente, comp: &Arc<Compartilhado>) {
+    if comp.parar.load(Ordering::SeqCst) {
+        return;
+    }
+    {
+        let mut e = travar(&comp.estado);
+        e.ocupacao = Ocupacao::Trabalho;
+        e.execucao = None;
+        comp.controle.reiniciar();
+    }
+    let c = Arc::clone(comp);
+    let base = progresso_stderr();
+    agente.definir_progresso(Some(Arc::new(move |p: &Progresso| {
+        if let Progresso::Inventario(i) | Progresso::Reconciliacao(i) = p {
+            travar(&c.estado).execucao = Some(i.execucao.0);
+        }
+        base(p);
+    })));
+    match agente.recuperar_ao_abrir(&comp.abertura) {
+        Ok(r) if r.relevante() => {
+            eprintln!("agente: {r}");
+            for a in &r.avisos {
+                eprintln!("agente: aviso: {a}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("agente: recuperação ao abrir falhou: {e}"),
+    }
+    agente.definir_progresso(None);
+    let mut e = travar(&comp.estado);
+    e.ocupacao = Ocupacao::Ocioso;
+    e.execucao = None;
 }
 
 fn rodar(agente: &mut Agente, comp: &Arc<Compartilhado>, t: Trabalho) {

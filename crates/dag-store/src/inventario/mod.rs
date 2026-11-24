@@ -286,6 +286,9 @@ pub struct Execucao {
     pub fase: FaseScan,
     pub contadores: String,
     pub checkpoint: Option<String>,
+    /// Flag "continuar de onde parou": a execução foi detectada como interrompida e a retomada
+    /// automática está ligada (zera ao terminar ou ao ser parada de propósito).
+    pub retomada_automatica: bool,
 }
 
 /// Cria uma execução `em_andamento` na fase `inventario`.
@@ -313,7 +316,8 @@ pub fn criar_execucao(
 pub fn obter_execucao(conn: &Connection, id: i64) -> Resultado<Option<Execucao>> {
     Ok(conn
         .query_row(
-            "SELECT id, mode, roots, started_at, ended_at, status, phase, counters, checkpoint
+            "SELECT id, mode, roots, started_at, ended_at, status, phase, counters, checkpoint,
+                    retomada_automatica
              FROM scan_runs WHERE id = ?1",
             [id],
             |l| {
@@ -329,6 +333,7 @@ pub fn obter_execucao(conn: &Connection, id: i64) -> Resultado<Option<Execucao>>
                     fase: FaseScan::de_str(&fase).unwrap_or(FaseScan::Inventario),
                     contadores: l.get(7)?,
                     checkpoint: l.get(8)?,
+                    retomada_automatica: l.get::<_, i64>(9)? != 0,
                 })
             },
         )
@@ -377,6 +382,121 @@ pub fn marcar_interrompidas(conn: &Connection, agora: i64) -> Resultado<usize> {
          WHERE status IN ('em_andamento','pausada')",
         [agora],
     )?)
+}
+
+/// Execução deixada por um processo morto, detectada na abertura.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecucaoInterrompida {
+    pub id: i64,
+    pub modo: String,
+    pub raizes: Vec<String>,
+    pub fase: FaseScan,
+    /// Estava no meio do inventário (`em_andamento`/`pausada`) e passou a `interrompida`.
+    pub no_inventario: bool,
+}
+
+/// Detecta as Execuções Interrompidas. Quem chama já tem a trava de escritor, então nenhum outro
+/// processo está rodando: tudo que parece em andamento foi deixado por um processo morto.
+///
+/// * `em_andamento`/`pausada` viram `interrompida` (qualquer modo; só `full` e `fast` são
+///   devolvidas para retomar);
+/// * a etapa de hash que parou (execução `concluida` na fase `hash` com fila pendente, sem
+///   `parada_deliberada`) é devolvida sem mudar o estado, porque o inventário já terminou.
+///
+/// Com `retomar_automaticamente` grava a flag `retomada_automatica` nas devolvidas. Idempotente.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn detectar_interrompidas(
+    conn: &Connection,
+    retomar_automaticamente: bool,
+    agora: i64,
+) -> Resultado<Vec<ExecucaoInterrompida>> {
+    let ler = |sql: &str| -> Resultado<Vec<(i64, String, String, String)>> {
+        let mut st = conn.prepare(sql)?;
+        let v = st
+            .query_map([], |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(v)
+    };
+    let mut saida = Vec::new();
+    // Já interrompidas antes e ainda não retomadas (a queda aconteceu de novo durante a retomada).
+    let mut candidatas: Vec<(i64, String, String, String, bool)> =
+        ler("SELECT id, mode, roots, phase FROM scan_runs
+         WHERE status IN ('em_andamento','pausada') ORDER BY id")?
+        .into_iter()
+        .map(|(i, m, r, f)| (i, m, r, f, true))
+        .collect();
+    candidatas.extend(
+        ler("SELECT id, mode, roots, phase FROM scan_runs
+             WHERE status = 'interrompida' AND retomada_automatica = 1 ORDER BY id")?
+        .into_iter()
+        .map(|(i, m, r, f)| (i, m, r, f, true)),
+    );
+    let tem_fila: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM fila_hash WHERE tipo = 'hash'
+                        AND state IN ('pendente','em_andamento','pausado'))",
+        [],
+        |l| l.get(0),
+    )?;
+    let hash_parado: Option<(i64, String, String, String)> = if tem_fila {
+        conn.query_row(
+            "SELECT id, mode, roots, phase FROM scan_runs
+             WHERE phase = 'hash' AND status IN ('concluida','concluida_com_erros')
+               AND mode IN ('full','fast') AND parada_deliberada = 0
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?)),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    for (id, modo, raizes, fase, no_inventario) in candidatas {
+        conn.execute(
+            "UPDATE scan_runs SET status = 'interrompida', ended_at = COALESCE(ended_at, ?2)
+             WHERE id = ?1",
+            params![id, agora],
+        )?;
+        if modo != "full" && modo != "fast" {
+            continue;
+        }
+        saida.push(ExecucaoInterrompida {
+            id,
+            modo,
+            raizes: serde_json::from_str(&raizes).unwrap_or_default(),
+            fase: FaseScan::de_str(&fase).unwrap_or(FaseScan::Inventario),
+            no_inventario,
+        });
+    }
+    if let Some((id, modo, raizes, fase)) = hash_parado {
+        saida.push(ExecucaoInterrompida {
+            id,
+            modo,
+            raizes: serde_json::from_str(&raizes).unwrap_or_default(),
+            fase: FaseScan::de_str(&fase).unwrap_or(FaseScan::Hash),
+            no_inventario: false,
+        });
+    }
+    for e in &saida {
+        conn.execute(
+            "UPDATE scan_runs SET retomada_automatica = ?2 WHERE id = ?1",
+            params![e.id, i64::from(retomar_automaticamente)],
+        )?;
+    }
+    Ok(saida)
+}
+
+/// Zera a flag "continuar de onde parou" (a execução terminou ou foi parada de propósito).
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn limpar_retomada_automatica(conn: &Connection, id: i64) -> Resultado<()> {
+    conn.execute(
+        "UPDATE scan_runs SET retomada_automatica = 0 WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
 }
 
 /// Contadores exatos recalculados a partir das tabelas (não dependem de passes repetidos).

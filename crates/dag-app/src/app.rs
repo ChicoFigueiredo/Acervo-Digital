@@ -60,6 +60,9 @@ impl ConfigApp {
     }
 }
 
+/// Prefixo das mensagens da recuperação ao abrir (a faixa mantém só a mais recente).
+const PREFIXO_ABERTURA: &str = "Abertura:";
+
 /// Mensagem na faixa no topo da página.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aviso {
@@ -177,6 +180,7 @@ impl AppDag {
                 caminho: cfg.caminho.clone(),
                 volumes_fixos: cfg.volumes_fixos,
                 socket: None,
+                abertura: dag_agent::PoliticaAbertura::default(),
             },
             acordador.clone(),
         );
@@ -284,6 +288,7 @@ impl AppDag {
                 raizes,
                 sem_hash,
                 elevar: false,
+                releitura_total: false,
             },
             Proposito::Scan { sem_hash },
         );
@@ -367,6 +372,16 @@ impl AppDag {
                     self.invalidar();
                 }
                 Evento::Iniciado { .. } => {}
+                Evento::Abertura { texto, fim } => {
+                    // Em andamento: faixa de aviso; o relatório final a substitui.
+                    self.avisos
+                        .retain(|a| !a.texto.starts_with(PREFIXO_ABERTURA));
+                    if !texto.is_empty() {
+                        let tom = if fim { Tom::Info } else { Tom::Aviso };
+                        self.aviso(tom, format!("{PREFIXO_ABERTURA} {texto}"));
+                    }
+                    self.invalidar();
+                }
                 Evento::Progresso(p) => {
                     if let Some(s) = self.scan.as_mut() {
                         s.progresso = Some(p);

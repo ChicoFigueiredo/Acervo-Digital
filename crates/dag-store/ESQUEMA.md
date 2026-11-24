@@ -1,12 +1,13 @@
 # Esquema do Catálogo (`dag-store`)
 
-Versão do esquema (`PRAGMA user_version`): **3**. Migração publicada nunca é editada; mudanças entram como novo degrau em `MIGRACOES` (`src/lib.rs`). SQLite em WAL, chaves estrangeiras ligadas, tabelas `STRICT`. O worker é o único escritor. Um Catálogo com versão diferente da build é recusado (`CatalogoDesatualizado`) em leitura; em escrita é migrado para a frente.
+Versão do esquema (`PRAGMA user_version`): **4**. Migração publicada nunca é editada; mudanças entram como novo degrau em `MIGRACOES` (`src/lib.rs`). SQLite em WAL, chaves estrangeiras ligadas, tabelas `STRICT`. O worker é o único escritor. Um Catálogo com versão diferente da build é recusado (`CatalogoDesatualizado`) em leitura; em escrita é migrado para a frente.
 
 | Versão | Arquivo | O que traz |
 | --- | --- | --- |
 | 1 | `0001_inicial.sql` | Esquema da Fase A rev. 2: inventário, varredura, hash, grupos, prioridades, marcações e histórico. |
 | 2 | `0002_inventario.sql` | `files.kind` (symlinks e especiais ficam em `files`, nunca em `folders`) e alvo bruto do symlink; `folder_stats.recursive_special_count`; `scan_errors.folder_id` + índice único de idempotência; tabela `volume_stats`; índices de paginação (`idx_files_folder_size`), de hard link (`idx_files_hardlink`) e de alias de diretório (`idx_folders_physical`). |
 | 3 | `0003_reconciliacao.sql` | Fast Scan, monitor e volumes offline: `first_run_id` em `files`/`folders` (itens novos e renomeação); `scan_events` ganha `old_path_raw`, `run_id`, `detail` e índices; tabela `monitor_saude` (linha única); visões `v_arquivos` e `v_pastas` com `estado_efetivo` (`indisponivel` = linha ativa de Volume desconectado, sem reescrever a linha). |
+| 4 | `0004_retomada_e_confianca.sql` | Retomada automática e Ponto de Confiança (ADR 0003): `scan_runs.parada_deliberada` e `scan_runs.retomada_automatica` (flag "continuar de onde parou"); tabela `ponto_confianca` (por Raiz: `confiavel_em`, `perdido_em`, `motivo_perda`). |
 
 Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_display` (TEXT seguro para exibir). Datas de eventos em segundos Unix; `mtime/ctime/birthtime` em nanossegundos Unix. **NULL = indisponível**, nunca zero inventado (`allocated_bytes`, `birthtime_ns`, `physical_unique_bytes`; hash ausente = sem linha em `hashes`). Enums são `CHECK`.
 

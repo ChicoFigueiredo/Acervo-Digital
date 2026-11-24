@@ -76,6 +76,7 @@ fn scan_cmd(raiz: &Path) -> Comando {
         raizes: vec![raiz.to_str().unwrap().to_string()],
         sem_hash: false,
         elevar: false,
+        releitura_total: false,
     }
 }
 

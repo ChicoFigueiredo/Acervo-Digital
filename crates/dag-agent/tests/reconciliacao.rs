@@ -70,6 +70,7 @@ fn full(t: &T) -> Comando {
         raizes: vec![t.raiz.to_str().unwrap().into()],
         sem_hash: false,
         elevar: false,
+        releitura_total: false,
     }
 }
 
@@ -79,6 +80,7 @@ fn fast(raizes: Vec<String>) -> Comando {
         raizes,
         sem_hash: false,
         elevar: false,
+        releitura_total: false,
     }
 }
 

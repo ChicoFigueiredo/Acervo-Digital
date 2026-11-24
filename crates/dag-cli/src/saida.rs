@@ -138,11 +138,17 @@ fn tabela_volumes(v: &[&VolumeInfo], com_classe: bool) -> String {
 }
 
 fn estado(e: &StatusExecucao) -> String {
-    match e.estado_detalhe.as_str() {
-        "hash_em_andamento" => return "hash em andamento".into(),
-        "hash_parado" => return "hash parado (retomável)".into(),
-        "hash_finalizando" => return "hash finalizando".into(),
+    match (e.estado_detalhe.as_str(), e.retomando) {
+        ("hash_em_andamento", true) => return "hash em andamento (retomada)".into(),
+        ("hash_parado", true) => return "interrompida no hash, retomando".into(),
+        ("hash_em_andamento", _) => return "hash em andamento".into(),
+        ("hash_parado", _) => return "hash parado (retomável)".into(),
+        ("hash_finalizando", _) => return "hash finalizando".into(),
+        ("interrompida", true) => return "interrompida, retomando".into(),
         _ => {}
+    }
+    if e.retomando && e.estado == EstadoExecucao::EmAndamento {
+        return "em andamento (retomada)".into();
     }
     match e.estado {
         EstadoExecucao::Concluida if e.estado_detalhe == "concluida_com_erros" => {
@@ -207,6 +213,33 @@ pub fn status(execs: &[StatusExecucao], cat: &dag_core::ResumoCatalogo) -> Strin
             s.push_str(&status_hash(e.id.0, h));
         }
     }
+    s
+}
+
+/// Ponto de Confiança por Raiz.
+pub fn status_confianca(c: &[dag_core::StatusConfianca]) -> String {
+    let mut s = String::from("Ponto de Confiança (só o monitoramento mantém a raiz em dia):\n");
+    let linhas: Vec<Vec<String>> = c
+        .iter()
+        .map(|r| {
+            vec![
+                r.raiz.clone(),
+                match r.confiavel_em {
+                    Some(t) => format!("confiável desde {}", data_hora_utc(t)),
+                    None => "não confiável".into(),
+                },
+                match (r.perdida_em, &r.motivo_perda) {
+                    (Some(t), Some(m)) => format!("perdido em {}: {m}", data_hora_utc(t)),
+                    _ => "-".into(),
+                },
+            ]
+        })
+        .collect();
+    s.push_str(&tabela(
+        &["RAIZ", "SITUAÇÃO", "ÚLTIMA PERDA"],
+        &[false, false, false],
+        &linhas,
+    ));
     s
 }
 
@@ -1034,8 +1067,12 @@ pub fn imprimir(r: &Resposta, todos: bool) {
             execucoes,
             catalogo,
             monitor,
+            confianca,
         } => {
             print!("{}", status(execucoes, catalogo));
+            if !confianca.is_empty() {
+                print!("\n{}", status_confianca(confianca));
+            }
             if let Some(m) = monitor {
                 print!("\n{}", saude_monitor(m));
             }

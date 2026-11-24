@@ -574,6 +574,34 @@ pub fn definir_fase(conn: &Connection, run_id: i64, fase: &str) -> Resultado<()>
     Ok(())
 }
 
+/// Full Scan pedido de propósito: faz o hash guardado dos arquivos vistos na execução deixar de
+/// valer (a evidência de inode deixa de bater), de modo que a fila de hash os leia todos de
+/// novo. O valor do hash antigo fica até o novo ser gravado, e uma queda no meio retoma só o que
+/// ainda não foi relido. Devolve quantos hashes foram invalidados.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn invalidar_evidencia(conn: &Connection, run_id: i64) -> Resultado<usize> {
+    Ok(conn.execute(
+        "UPDATE hashes SET native_file_id = -1
+         WHERE file_id IN (SELECT id FROM files WHERE seen_run_id = ?1 AND kind = 'arquivo')",
+        [run_id],
+    )?)
+}
+
+/// Registra que a etapa de hash foi parada de propósito (`true`: não retoma sozinha) ou que
+/// voltou a rodar (`false`; também o caso do encerramento do programa, que continua sozinho).
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn definir_parada_deliberada(conn: &Connection, run_id: i64, parada: bool) -> Resultado<()> {
+    conn.execute(
+        "UPDATE scan_runs SET parada_deliberada = ?2 WHERE id = ?1",
+        params![run_id, i64::from(parada)],
+    )?;
+    Ok(())
+}
+
 /// Grava um bloco de contadores em `scan_runs.counters` sob a chave dada (JSON mesclado).
 ///
 /// # Errors

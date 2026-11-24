@@ -40,10 +40,28 @@ pub fn resumir(r: &Resposta) -> String {
         Resposta::Status {
             execucoes,
             catalogo,
+            confianca,
             ..
         } => format!(
-            "{} execução(ões){}; Catálogo: {} volume(s), {} pasta(s), {} arquivo(s), {}.",
+            "{} execução(ões){}{}{}; Catálogo: {} volume(s), {} pasta(s), {} arquivo(s), {}.",
             execucoes.len(),
+            execucoes
+                .iter()
+                .filter(|e| e.retomando)
+                .map(|e| format!(" [execução {}: interrompida, retomando]", e.id.0))
+                .collect::<String>(),
+            if confianca.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " [Ponto de Confiança: {} de {} raiz(es)]",
+                    confianca
+                        .iter()
+                        .filter(|c| c.confiavel_em.is_some())
+                        .count(),
+                    confianca.len()
+                )
+            },
             execucoes
                 .iter()
                 .filter_map(|e| e.hash.as_ref().map(|h| (e.id.0, h)))

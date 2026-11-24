@@ -26,6 +26,27 @@ pub struct ResumoReconciliacao {
     pub eventos_omitidos: u64,
 }
 
+impl ResumoReconciliacao {
+    /// Entradas que mudaram desde o Catálogo: novas, alteradas, renomeadas e ausentes.
+    #[must_use]
+    pub fn mudancas(&self) -> u64 {
+        self.arquivos_novos
+            + self.arquivos_alterados
+            + self.pastas_novas
+            + self.arquivos_renomeados
+            + self.pastas_renomeadas
+            + self.arquivos_ausentes
+            + self.pastas_ausentes
+    }
+
+    /// Passada sem mudança nenhuma e sem caminho que a varredura não conseguiu visitar: o
+    /// critério do Ponto de Confiança.
+    #[must_use]
+    pub fn sem_mudancas(&self) -> bool {
+        self.mudancas() == 0 && self.bloqueios == 0
+    }
+}
+
 /// Evento persistido em `scan_events`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventoInfo {

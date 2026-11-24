@@ -56,6 +56,7 @@ fn scan(raizes: &[&Path], sem_hash: bool) -> Comando {
             .collect(),
         sem_hash,
         elevar: false,
+        releitura_total: false,
     }
 }
 

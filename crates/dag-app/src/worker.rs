@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dag_agent::{Agente, Cliente, ErroAgente, caminho_socket_padrao};
+use dag_agent::{Agente, Cliente, ErroAgente, PoliticaAbertura, caminho_socket_padrao};
 use dag_core::{Autor, Comando, FaseInventario, Pedido, Progresso, Resposta, VolumeDescoberto};
 use dag_scanner::{ControleScan, EstadoControle};
 
@@ -70,6 +70,9 @@ pub struct ConfigWorker {
     pub volumes_fixos: Option<Vec<VolumeDescoberto>>,
     /// Socket do agente em segundo plano; `None` = o padrão (`$DAG_SOCKET`, `$XDG_RUNTIME_DIR`).
     pub socket: Option<PathBuf>,
+    /// Retomada de execuções interrompidas e verificação das Raízes ao abrir como escritor
+    /// (ADR 0003). A GUI não monitora: nunca marca Ponto de Confiança.
+    pub abertura: PoliticaAbertura,
 }
 
 /// Eventos do worker para a GUI.
@@ -86,6 +89,9 @@ pub enum Evento {
     Hash(dag_core::ProgressoHash),
     /// Resposta ao pedido `id`.
     Resposta { id: u64, resposta: Box<Resposta> },
+    /// Recuperação ao abrir (execução interrompida retomada, verificação das Raízes). `fim`
+    /// `false` = em andamento (faixa de aviso); `true` = relatório final.
+    Abertura { texto: String, fim: bool },
 }
 
 enum Mensagem {
@@ -463,6 +469,22 @@ fn laco(
         g.clone_from(&alca);
     }
     enviar(Evento::Modo(modo.clone()));
+    if modo == ModoWorker::Escritor
+        && let Destino::Sessao(a) = &mut destino
+    {
+        // A GUI é a escritora: o que o processo anterior deixou pela metade continua daqui.
+        enviar(Evento::Abertura {
+            texto: "Conferindo o Catálogo: execuções interrompidas e mudanças no disco…".into(),
+            fim: false,
+        });
+        let r = a.recuperar_ao_abrir(&cfg.abertura);
+        let (texto, fim) = match r {
+            Ok(r) if r.relevante() => (format!("{r}"), true),
+            Ok(_) => (String::new(), true),
+            Err(e) => (format!("Recuperação ao abrir falhou: {e}"), true),
+        };
+        enviar(Evento::Abertura { texto, fim });
+    }
     while let Ok(m) = rx.recv() {
         match m {
             Mensagem::Sair => break,
@@ -573,6 +595,7 @@ mod testes {
                 caminho: catalogo.clone(),
                 volumes_fixos: Some(vec![volume_de(&raiz)]),
                 socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -586,6 +609,7 @@ mod testes {
             raizes: vec![raiz.to_str().unwrap().into()],
             sem_hash: false,
             elevar: false,
+            releitura_total: false,
         });
         let (fim, antes) = esperar_ate(
             &mut w,
@@ -642,6 +666,7 @@ mod testes {
                 caminho: catalogo,
                 volumes_fixos: Some(vec![volume_de(&raiz)]),
                 socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -663,6 +688,7 @@ mod testes {
             raizes: vec![],
             sem_hash: true,
             elevar: false,
+            releitura_total: false,
         });
         let (e, _) = esperar_ate(
             &mut w,
@@ -686,6 +712,7 @@ mod testes {
                 caminho: catalogo.clone(),
                 volumes_fixos: Some(vec![volume_de(&raiz)]),
                 socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -730,6 +757,7 @@ mod testes {
                 caminho: catalogo,
                 volumes_fixos: None,
                 socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -764,6 +792,7 @@ mod testes {
                 caminho: catalogo,
                 volumes_fixos: Some(vec![volume_de(&raiz)]),
                 socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -776,6 +805,7 @@ mod testes {
             raizes: vec![raiz.to_str().unwrap().into()],
             sem_hash: true,
             elevar: false,
+            releitura_total: false,
         });
         let (e, _) = esperar_ate(
             &mut w,
@@ -809,6 +839,7 @@ mod testes {
                 caminho: catalogo.clone(),
                 volumes_fixos: None,
                 socket: Some(socket.clone()),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -827,6 +858,7 @@ mod testes {
             raizes: vec![raiz.to_str().unwrap().into()],
             sem_hash: false,
             elevar: false,
+            releitura_total: false,
         });
         let (fim, antes) = esperar_ate(
             &mut w,
@@ -868,6 +900,7 @@ mod testes {
                 caminho: catalogo,
                 volumes_fixos: None,
                 socket: Some(socket),
+                abertura: PoliticaAbertura::desligada(),
             },
             Acordador::default(),
         );
@@ -877,6 +910,7 @@ mod testes {
             raizes: vec![raiz.to_str().unwrap().into()],
             sem_hash: false,
             elevar: false,
+            releitura_total: false,
         });
         // Pausa assim que o scan começa a reportar.
         esperar_ate(&mut w, |e| matches!(e, Evento::Progresso(_)));
@@ -900,5 +934,63 @@ mod testes {
         );
         w.encerrar();
         srv.encerrar();
+    }
+
+    #[test]
+    fn gui_escritora_retoma_a_execucao_interrompida_ao_abrir_e_avisa() {
+        let (_tmp, raiz, catalogo) = cenario();
+        {
+            let mut a = Agente::abrir(&catalogo)
+                .unwrap()
+                .silencioso()
+                .com_volumes_fixos(vec![volume_de(&raiz)]);
+            let r = a.executar(Comando::IniciarScan {
+                modo: dag_core::ModoVarredura::FullScan,
+                raizes: vec![raiz.to_str().unwrap().into()],
+                sem_hash: false,
+                elevar: false,
+                releitura_total: false,
+            });
+            assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+        }
+        // Processo morto no meio do hash.
+        {
+            let cat = dag_store::Catalogo::abrir(&catalogo).unwrap();
+            cat.armazem()
+                .conexao()
+                .execute_batch(
+                    "UPDATE scan_runs SET phase = 'hash';
+                     DELETE FROM hashes WHERE file_id IN
+                        (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2);
+                     UPDATE fila_hash SET state = 'pendente'
+                        WHERE file_id IN (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2);",
+                )
+                .unwrap();
+        }
+        let mut w = Worker::iniciar(
+            ConfigWorker {
+                caminho: catalogo.clone(),
+                volumes_fixos: Some(vec![volume_de(&raiz)]),
+                socket: Some(sem_socket()),
+                abertura: PoliticaAbertura::default(),
+            },
+            Acordador::default(),
+        );
+        let (fim, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Abertura { fim: true, .. }));
+        let Evento::Abertura { texto, .. } = fim else {
+            unreachable!()
+        };
+        assert!(
+            texto.contains("1 interrompida(s), 1 retomada(s)"),
+            "{texto}"
+        );
+        w.encerrar();
+        let cat = dag_store::Catalogo::abrir(&catalogo).unwrap();
+        let n: i64 = cat
+            .armazem()
+            .conexao()
+            .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
+            .unwrap();
+        assert_eq!(n, 4);
     }
 }

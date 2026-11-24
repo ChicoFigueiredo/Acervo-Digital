@@ -79,6 +79,10 @@ pub enum Comando {
         /// Lê pastas que negam acesso por um helper privilegiado (Polkit; opt-in, `--elevar`).
         #[serde(default)]
         elevar: bool,
+        /// Só no Full Scan com hash, e só quando pedido: lê o conteúdo de **todos** os arquivos
+        /// de novo, em vez de reaproveitar o hash dos que não mudaram (`--reler-tudo`).
+        #[serde(default)]
+        releitura_total: bool,
     },
     /// Pausa a execução indicada (ou a única em andamento).
     Pausar { execucao: Option<ExecucaoId> },
@@ -202,6 +206,21 @@ pub struct StatusExecucao {
     /// Andamento do Hash Completo, quando a execução está (ou parou) nessa etapa.
     #[serde(default)]
     pub hash: Option<StatusHash>,
+    /// Flag "continuar de onde parou": execução interrompida (queda, falta de energia ou
+    /// encerramento do agente) que a retomada automática vai continuar ou já está continuando.
+    #[serde(default)]
+    pub retomando: bool,
+}
+
+/// Situação do Ponto de Confiança de uma Raiz.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusConfianca {
+    pub raiz: String,
+    pub volume: VolumeId,
+    /// Segundos Unix; `Some` = só o monitoramento a mantém em dia.
+    pub confiavel_em: Option<i64>,
+    pub perdida_em: Option<i64>,
+    pub motivo_perda: Option<String>,
 }
 
 /// Andamento da etapa de Hash Completo lido da fila persistente: contagens de leituras físicas
@@ -302,6 +321,9 @@ pub enum Resposta {
         /// Saúde do monitor e reconciliação pendente.
         #[serde(default)]
         monitor: Option<SaudeMonitorInfo>,
+        /// Ponto de Confiança por Raiz.
+        #[serde(default)]
+        confianca: Vec<StatusConfianca>,
     },
     /// Últimos eventos persistidos.
     Eventos {
@@ -399,6 +421,7 @@ mod tests {
                 raizes: vec!["/tmp".into()],
                 sem_hash: true,
                 elevar: false,
+                releitura_total: false,
             },
             Comando::ListarDuplicados {
                 volume: Some("SSD".into()),
@@ -469,6 +492,7 @@ mod tests {
             raizes: vec!["/x".into()],
             sem_hash: false,
             elevar: false,
+            releitura_total: false,
         };
         let v: serde_json::Value = serde_json::to_value(&c).unwrap();
         assert_eq!(v["comando"], "iniciar_scan");

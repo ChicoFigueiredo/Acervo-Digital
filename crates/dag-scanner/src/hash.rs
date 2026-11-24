@@ -234,12 +234,14 @@ impl EtapaHash {
                 let fase = hashes::fase_da_execucao(tx, run_id)?
                     .ok_or(ErroScan::ExecucaoInexistente(run_id))?;
                 hashes::definir_fase(tx, run_id, "hash")?;
+                hashes::definir_parada_deliberada(tx, run_id, false)?;
                 hashes::liberar_reservas(tx, TipoFila::Hash, t)?;
                 let resumo = hashes::preparar_fila_hash(tx, run_id, t)?;
                 Ok((fase, resumo))
             },
         )?;
         let sem_hash_linhas = resumo.candidatos - resumo.reaproveitados;
+        let controle = self.controle.clone();
         let motor = Motor {
             tipo: TipoFila::Hash,
             fase: "hash",
@@ -274,8 +276,21 @@ impl EtapaHash {
         cat.armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
                 hashes::salvar_contadores_etapa(tx, run_id, "hash", &json)?;
-                if !r.cancelado {
+                if r.cancelado {
+                    // Encerramento do programa continua sozinho na próxima abertura; cancelamento
+                    // do usuário não.
+                    hashes::definir_parada_deliberada(tx, run_id, !controle.encerrando())?;
+                    if controle.encerrando() {
+                        tx.execute(
+                            "UPDATE scan_runs SET retomada_automatica = 1 WHERE id = ?1",
+                            [run_id],
+                        )?;
+                    } else {
+                        inventario::limpar_retomada_automatica(tx, run_id)?;
+                    }
+                } else {
                     hashes::definir_fase(tx, run_id, &fase_final)?;
+                    inventario::limpar_retomada_automatica(tx, run_id)?;
                 }
                 Ok(())
             })?;

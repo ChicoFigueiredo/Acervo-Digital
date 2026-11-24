@@ -36,10 +36,10 @@ Com o serviço (daemon) ativo, o MCP conversa com ele pelo socket local. Sem dae
 | Ferramenta | O que faz | Argumentos |
 |---|---|---|
 | `listar_volumes` | Volumes conhecidos | — |
-| `scan_full` | Full Scan (inventário, hash, duplicados, reavaliação) | `raizes` (obrigatório), `sem_hash` |
+| `scan_full` | Full Scan (inventário, hash, duplicados, reavaliação) | `raizes` (obrigatório), `sem_hash`, `releitura_total` (lê tudo de novo) |
 | `scan_fast` | Fast Scan (reconcilia) | `raizes`, `sem_hash` |
 | `retomar` / `pausar` / `cancelar` | Controle de execução | `execucao` |
-| `status` | Progresso, totais e saúde do monitor | `execucao` |
+| `status` | Progresso (com "interrompida, retomando"), totais, saúde do monitor e Ponto de Confiança por Raiz | `execucao` |
 | `explorar` | Filhos de uma pasta, do maior para o menor | `pasta`, `limite`, `cursor` |
 | `listar_duplicados` | Grupos de duplicados paginados | `volume`, `tamanho_minimo`, `ordem`, `limite`, `cursor` |
 | `detalhar_grupo` | Cópias, Marcações e Cobertura de um grupo | `grupo` |

@@ -34,6 +34,14 @@ _Avoid_: quick scan, varredura incremental
 Releitura agendada do conteúdo de arquivos cujo hash foi reaproveitado, para detectar corrupção silenciosa que metadados inalterados não revelam.
 _Avoid_: rehash, auditoria
 
+**Execução Interrompida**:
+Varredura ou etapa de hash que um processo morto deixou pela metade (queda de energia, travamento, encerramento do programa). Continua de onde parou, sem refazer o que já está gravado.
+_Avoid_: varredura travada, scan órfão, execução cancelada (cancelar é decisão do usuário)
+
+**Ponto de Confiança**:
+Situação de uma Raiz em que o Catálogo foi conferido contra o disco sem achar nenhuma mudança e, a partir daí, só o monitoramento a mantém em dia. Qualquer falha do monitoramento ou queda do programa tira a Raiz dele.
+_Avoid_: sincronizado, atualizado, sincronia
+
 ### Conteúdo
 
 **Hash Completo**:
@@ -85,6 +93,8 @@ _Avoid_: marcação inválida, expirada
 - Uma cópia pode ter **Marcação de Backup** ou **Marcação para Deleção**, nunca as duas.
 - **Cobertura** só existe quando a cópia marcada está em outro **Dispositivo Físico**; outra partição do mesmo disco não conta.
 - Um **Dispositivo Físico** hospeda um ou mais **Volumes**.
+- Uma **Execução Interrompida** continua sozinha ao abrir o programa; depois dela, o **Fast Scan** é repetido na **Raiz** até uma passada sem mudanças, e só então a **Raiz** entra no **Ponto de Confiança**.
+- Ao abrir, toda **Raiz** passa por um **Fast Scan** (a menos que o usuário escolha o contrário); só arquivos novos ou alterados recebem **Hash Completo**. Um **Full Scan** com hash de tudo só acontece por pedido explícito.
 
 ## Flagged ambiguities
 

@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const EXECUTANDO: u8 = 0;
 const PAUSADO: u8 = 1;
 const CANCELADO: u8 = 2;
+/// Cancelado porque o programa vai encerrar (não foi decisão do usuário): o trabalho fica
+/// `interrompida` e a retomada automática o continua na próxima abertura.
+const ENCERRANDO: u8 = 3;
 
 /// Estado pedido ao scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +46,20 @@ impl ControleScan {
 
     /// Cancela: o scan para depois de gravar o que já leu; a fila persiste e pode ser retomada.
     pub fn cancelar(&self) {
-        self.0.store(CANCELADO, Ordering::SeqCst);
+        // Nunca rebaixa um encerramento para cancelamento do usuário.
+        self.0.fetch_max(CANCELADO, Ordering::SeqCst);
+    }
+
+    /// Cancela porque o programa vai encerrar: igual a [`cancelar`](Self::cancelar), mas a
+    /// execução fica `interrompida` (retomável sozinha), não `cancelada`.
+    pub fn encerrar(&self) {
+        self.0.store(ENCERRANDO, Ordering::SeqCst);
+    }
+
+    /// O cancelamento pedido é o de encerramento do programa?
+    #[must_use]
+    pub fn encerrando(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == ENCERRANDO
     }
 
     /// Volta para `Executando`, inclusive depois de cancelar.

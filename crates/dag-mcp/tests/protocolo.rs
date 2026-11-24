@@ -141,7 +141,8 @@ fn chamadas_montam_comando_com_autor_mcp() {
             modo: ModoVarredura::FullScan,
             raizes: vec!["/x".into()],
             sem_hash: true,
-            elevar: false
+            elevar: false,
+            releitura_total: false
         }
     );
     let (c, _) = comando_de("scan_fast", json!({}));
@@ -151,7 +152,8 @@ fn chamadas_montam_comando_com_autor_mcp() {
             modo: ModoVarredura::FastScan,
             raizes: vec![],
             sem_hash: false,
-            elevar: false
+            elevar: false,
+            releitura_total: false
         }
     );
     let (c, _) = comando_de("marcar_delecao", json!({"alvo":{"tipo":"grupo","valor":3}}));

@@ -26,7 +26,8 @@ pub use classificacao::{
 };
 pub use comando::{
     AcaoServico, Alvo, Comando, EntradaExploracao, Pedido, Resposta, ResumoCatalogo,
-    StatusDiscoHash, StatusExecucao, StatusHash, TipoEntradaExploracao, VolumeInfo,
+    StatusConfianca, StatusDiscoHash, StatusExecucao, StatusHash, TipoEntradaExploracao,
+    VolumeInfo,
 };
 pub use descoberta::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use duplicados::{

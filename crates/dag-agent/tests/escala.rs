@@ -421,6 +421,7 @@ fn escala_full() {
         raizes: vec![raiz().to_str().unwrap().into()],
         sem_hash: false,
         elevar: false,
+        releitura_total: false,
     });
     relatar_scan(
         "Full Scan + hash + duplicados",
@@ -507,6 +508,7 @@ fn escala_fast() {
         raizes: vec![raiz.to_str().unwrap().into()],
         sem_hash: false,
         elevar: false,
+        releitura_total: false,
     });
     relatar_scan(
         "Fast Scan (~0,1% de mudanças)",

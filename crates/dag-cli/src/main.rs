@@ -157,6 +157,10 @@ enum Sub {
         /// Pula Hash, duplicados e reavaliação (inventário rápido, sem leitura do conteúdo)
         #[arg(long, conflicts_with_all = ["fast", "retomar"])]
         sem_hash: bool,
+        /// Com --full: lê o conteúdo de todos os arquivos de novo, em vez de reaproveitar o hash
+        /// dos que não mudaram (a abertura do agente nunca faz isso sozinha)
+        #[arg(long, requires = "full", conflicts_with = "sem_hash")]
+        reler_tudo: bool,
         /// Fast Scan: reconcilia reaproveitando o que não mudou
         #[arg(long, required_unless_present_any = ["full", "retomar"])]
         fast: bool,
@@ -289,6 +293,17 @@ enum Sub {
         /// Não monitora as raízes catalogadas
         #[arg(long)]
         sem_monitor: bool,
+        /// Não retoma sozinho as execuções interrompidas (queda, falta de energia); elas ficam
+        /// `interrompida` até `dag scan --retomar <id>`
+        #[arg(long)]
+        sem_retomar_automatico: bool,
+        /// Quando verificar as raízes ao abrir (Fast Scan, hash só do que é novo ou mudou):
+        /// `sempre` (padrão), `nao-confiaveis` (só as fora do Ponto de Confiança) ou `nunca`
+        #[arg(long, value_name = "QUANDO", default_value = "sempre")]
+        verificar_ao_abrir: dag_agent::VerificarAoAbrir,
+        /// Teto de passadas de verificação por abertura até uma passada sem mudanças
+        #[arg(long, value_name = "N", default_value_t = 3)]
+        max_passadas: u32,
     },
 }
 
@@ -369,6 +384,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             raizes,
             sem_hash,
             elevar,
+            reler_tudo,
             ..
         } => Comando::IniciarScan {
             modo: if full {
@@ -379,6 +395,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             raizes,
             sem_hash,
             elevar,
+            releitura_total: reler_tudo,
         },
         Sub::Monitorar {
             raizes,
@@ -572,6 +589,7 @@ fn rodar_agente(
     catalogo: Option<&std::path::Path>,
     socket: Option<PathBuf>,
     sem_monitor: bool,
+    abertura: dag_agent::PoliticaAbertura,
 ) -> ExitCode {
     let falha = |e: &dyn std::fmt::Display| {
         eprintln!("erro: {e}");
@@ -584,6 +602,7 @@ fn rodar_agente(
     let socket = socket.unwrap_or_else(caminho_socket_padrao);
     let mut cfg = ConfigServidor::novo(caminho, socket);
     cfg.monitor = !sem_monitor;
+    cfg.abertura = abertura;
     let servidor = match Servidor::iniciar(cfg) {
         Ok(s) => s,
         Err(e) => return falha(&e),
@@ -657,8 +676,20 @@ fn main() -> ExitCode {
     if matches!(cli.comando, Sub::Mcp) {
         return servir_mcp(cli.catalogo.as_deref(), cli.socket);
     }
-    if let Sub::Agente { sem_monitor } = cli.comando {
-        return rodar_agente(cli.catalogo.as_deref(), cli.socket, sem_monitor);
+    if let Sub::Agente {
+        sem_monitor,
+        sem_retomar_automatico,
+        verificar_ao_abrir,
+        max_passadas,
+    } = cli.comando
+    {
+        let abertura = dag_agent::PoliticaAbertura {
+            retomar_automaticamente: !sem_retomar_automatico,
+            verificar: verificar_ao_abrir,
+            max_passadas,
+            monitor_ativo: false,
+        };
+        return rodar_agente(cli.catalogo.as_deref(), cli.socket, sem_monitor, abertura);
     }
     let json = cli.json;
     let todos = matches!(cli.comando, Sub::Volumes { todos: true });

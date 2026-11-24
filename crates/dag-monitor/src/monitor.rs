@@ -17,6 +17,7 @@ use dag_scanner::{
     reconciliar_diretorios,
 };
 use dag_store::Catalogo;
+use dag_store::confianca;
 use dag_store::inventario::{self, EstadoScan, FaseScan};
 use dag_store::reconciliacao::{self, NovoEvento, Saude, TipoEvento};
 
@@ -262,6 +263,16 @@ impl Monitor {
         let estado = if resultado.is_ok() {
             EstadoScan::Concluida
         } else {
+            // Monitor que morreu por erro deixou de vigiar: ninguém garante mais as Raízes.
+            for r in &laco.raizes {
+                let _ = confianca::perder(
+                    cat.armazem().conexao(),
+                    r.volume_id,
+                    &r.caminho,
+                    "o monitor terminou com erro",
+                    t,
+                );
+            }
             EstadoScan::Falhou
         };
         cat.armazem_mut()
@@ -502,6 +513,17 @@ impl Laco<'_> {
             self.resumo.lacunas += 1;
             if l.tipo == TipoLacuna::Overflow {
                 self.resumo.overflows += 1;
+            }
+            // Lacuna = o monitoramento deixou de garantir que viu tudo: sai do Ponto de Confiança.
+            let motivo = format!("lacuna do monitor ({})", l.tipo.como_str());
+            for r in &alvo {
+                confianca::perder(
+                    cat.armazem().conexao(),
+                    self.raizes[*r].volume_id,
+                    &self.raizes[*r].caminho,
+                    &motivo,
+                    l.observado_em,
+                )?;
             }
             self.gaps.push(GapAberta {
                 evento_id: id,

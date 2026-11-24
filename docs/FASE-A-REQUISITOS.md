@@ -39,6 +39,7 @@ A-01 a A-22 continuam obrigatórios como escritos na v1.0, com dois ajustes:
 | A-34 | CLI `dag` com todas as operações: volumes, raízes, Full/Fast Scan, pausar/retomar/cancelar, status, consultas, duplicados, marcações, prioridade de volumes, relatórios, verificação, serviço e backup do Catálogo. Saída legível e `--json`. |
 | A-35 | Servidor MCP por stdio (`dag mcp`) expondo todas as operações da CLI, inclusive instalar/remover serviço e pedidos Polkit; repassa tudo ao worker, que segue como único escritor. Senha sempre no diálogo do sistema, nunca pelo MCP. |
 | A-36 | GUI ganha a página **Duplicados** (grupos, Cópia Principal, marcações, Cobertura, espaço recuperável) e indicadores de hash/marcação no Explorador. |
+| A-37 | Execução Interrompida e Ponto de Confiança (ADR [0003](adr/0003-retomada-automatica-e-ponto-de-confianca.md)). Ao abrir como escritor (agente em segundo plano ou GUI), o DAG detecta execuções que um processo morto deixou em andamento (inventário ou hash), marca-as `interrompida` com a flag "continuar de onde parou" e as retoma sozinho, sem reler o que já foi gravado; a retomada automática é configurável (padrão ligada). Depois da retomada, repete o Fast Scan nas mesmas Raízes até uma passada sem mudanças (teto de 3). Com o monitor ativo, a Raiz que estabilizou entra no Ponto de Confiança; lacuna do monitor ou encerramento não limpo a tira. Ao abrir, toda Raiz disponível passa por Fast Scan e só o conteúdo novo ou alterado é hasheado (padrão configurável: sempre; só as fora do Ponto de Confiança; nunca). Hash de tudo só por pedido explícito (Full Scan). `dag status`, GUI e MCP mostram "interrompida, retomando" e o Ponto de Confiança por Raiz. |
 
 ## 4. Critérios de aceite
 
@@ -67,6 +68,8 @@ CA-A01 a CA-A17 da v1.0 continuam valendo. CA-A15 passa a incluir: "marcações 
 **CA-A28 — CLI e MCP:** toda operação da GUI tem equivalente na CLI e no MCP; um teste de integração percorre scan → duplicados → marcação → relatório pela CLI e pelo MCP; com GUI e MCP abertos ao mesmo tempo existe um único escritor.
 
 **CA-A29 — Escala com hash:** o ensaio de 1 milhão de entradas (CA-A07) inclui a etapa de hash e o agrupamento, com memória limitada e consultas de duplicados paginadas.
+
+**CA-A30 — Retomada e Ponto de Confiança:** matar o processo no meio do inventário e no meio do hash e reabrir marca a execução `interrompida`, retoma de onde parou sem reler arquivo já hasheado e termina com o mesmo Catálogo de uma execução sem queda; arquivos criados enquanto o programa estava fora aparecem na passada de alcance; uma passada sem mudanças marca a Raiz como confiável e uma lacuna do monitor (ou encerramento não limpo) a desmarca; a verificação ao abrir hasheia só arquivos novos ou alterados; Full Scan com hash relê todos.
 
 ## 5. Incrementos (um PR cada)
 

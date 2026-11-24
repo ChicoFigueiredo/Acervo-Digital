@@ -83,7 +83,8 @@ pub fn todas() -> Vec<Ferramenta> {
         ),
         objeto(
             json!({"raizes": raizes("Pastas a varrer (caminhos absolutos)"),
-                "sem_hash": {"type": "boolean", "description": "Pula hash, duplicados e reavaliação (inventário rápido)"}}),
+                "sem_hash": {"type": "boolean", "description": "Pula hash, duplicados e reavaliação (inventário rápido)"},
+                "releitura_total": {"type": "boolean", "description": "Lê o conteúdo de todos os arquivos de novo (Full Scan com hash de tudo), em vez de reaproveitar o hash dos que não mudaram"}}),
             &["raizes"],
         ),
     ));

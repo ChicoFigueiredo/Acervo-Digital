@@ -58,6 +58,8 @@ O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em
 
 O Hash Completo lê **um disco físico por thread, todos os discos ao mesmo tempo** (volumes do mesmo disco ficam em sequência). Se o processo morrer ou a execução for cancelada no meio do hash, `dag scan --retomar <id>` continua só o que falta: a fila é refeita a partir dos hashes já gravados, sem reler nada e sem mudar o Catálogo.
 
+**Queda no meio da varredura (falta de energia, travamento):** ao abrir, o agente (`dag agente`) e a GUI detectam a execução deixada pela metade, marcam-na `interrompida` (`dag status` mostra "interrompida, retomando") e a retomam de onde parou, sem reler o que já foi hasheado. Depois repetem o Fast Scan nas mesmas raízes (até 3 passadas) para pegar arquivos que chegaram enquanto o programa estava fora; com o monitor ativo, a raiz que estabiliza entra no **Ponto de Confiança** (`dag status` lista), a partir do qual só o monitoramento a mantém em dia (lacuna do monitor ou queda do processo a tira). Ao abrir, toda raiz também é conferida por Fast Scan e só o que é novo ou mudou recebe hash; o Full Scan que relê tudo é `dag scan --full`. Opções do agente: `--sem-retomar-automatico`, `--verificar-ao-abrir sempre|nao-confiaveis|nunca`, `--max-passadas N`. Decisão: [ADR 0003](docs/adr/0003-retomada-automatica-e-ponto-de-confianca.md).
+
 ### Limitações conhecidas
 
 Assinatura de conteúdo (magic bytes) existe em `dag-core` mas ainda não é usada pelo scan (tipo só por extensão); pastas clones (A-32) pendentes de decisão; Windows/macOS só como contrato; janela real da GUI, systemd real, diálogo Polkit real e NFS real não são exercitados pelos testes automáticos (ver o documento de aceite).

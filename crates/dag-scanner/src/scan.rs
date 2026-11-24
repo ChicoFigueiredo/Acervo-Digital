@@ -539,7 +539,28 @@ impl FullScan {
                         fast::acrescentar_contagem(&mut json, &ctx.vivo.fast);
                     }
                     inventario::salvar_contadores(tx, run_id, &json.to_string())?;
-                    inventario::definir_estado(tx, run_id, EstadoScan::Cancelada, None, agora())?;
+                    if self.controle.encerrando() {
+                        // Encerramento do programa, não decisão do usuário: continua sozinha.
+                        inventario::definir_estado(
+                            tx,
+                            run_id,
+                            EstadoScan::Interrompida,
+                            None,
+                            agora(),
+                        )?;
+                        tx.execute(
+                            "UPDATE scan_runs SET retomada_automatica = 1 WHERE id = ?1",
+                            [run_id],
+                        )?;
+                    } else {
+                        inventario::definir_estado(
+                            tx,
+                            run_id,
+                            EstadoScan::Cancelada,
+                            None,
+                            agora(),
+                        )?;
+                    }
                     Ok(c)
                 },
             )?;

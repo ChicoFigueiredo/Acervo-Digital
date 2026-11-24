@@ -496,3 +496,41 @@ fn raiz_invalida_e_recusada() {
     let e = m.executar(&mut cat, &ControleScan::novo()).unwrap_err();
     assert!(matches!(e, ErroMonitor::SemRaizes), "{e:?}");
 }
+
+#[test]
+fn lacuna_do_monitor_tira_a_raiz_do_ponto_de_confianca() {
+    let s = iniciar(arvore, cfg());
+    // A Raiz entra no Ponto de Confiança (como a abertura faz depois de uma passada limpa).
+    let canon = fs::canonicalize(&s.raiz).unwrap();
+    {
+        let cat = Catalogo::abrir(&s.db).unwrap();
+        let vol: i64 = cat
+            .armazem()
+            .conexao()
+            .query_row("SELECT id FROM volumes LIMIT 1", [], |l| l.get(0))
+            .unwrap();
+        dag_store::confianca::marcar_confiavel(
+            cat.armazem().conexao(),
+            vol,
+            canon.as_os_str().as_bytes(),
+            1_000,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        s.n("SELECT COUNT(*) FROM ponto_confianca WHERE confiavel_em IS NOT NULL"),
+        1
+    );
+    // Ficar quieto não tira a confiança.
+    assert!(s.sem_mudar(Duration::from_millis(800), |s| {
+        s.n("SELECT COUNT(*) FROM ponto_confianca WHERE confiavel_em IS NOT NULL") == 1
+    }));
+    // Overflow (lacuna) tira, com motivo.
+    s.injetor.injetar_overflow();
+    s.esperar("raiz fora do Ponto de Confiança", |s| {
+        s.n("SELECT COUNT(*) FROM ponto_confianca
+             WHERE confiavel_em IS NULL AND motivo_perda LIKE 'lacuna do monitor (overflow)%'")
+            == 1
+    });
+    s.encerrar();
+}

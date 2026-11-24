@@ -100,6 +100,7 @@ fn full(c: &Cenario, sem_hash: bool) -> Comando {
         raizes: vec![c.raiz.to_str().unwrap().into()],
         sem_hash,
         elevar: false,
+        releitura_total: false,
     }
 }
 
@@ -429,12 +430,15 @@ fn encerramento_cancela_a_varredura_com_checkpoint_e_solta_tudo() {
     }
     assert!(!c.socket.exists());
     assert!(Cliente::conectar(&c.socket).is_err());
-    // Trava solta e execução gravada como cancelada (retomável).
+    // Trava solta e execução gravada como interrompida (encerramento não é cancelamento do
+    // usuário): a flag "continuar de onde parou" a leva adiante na próxima abertura.
     let mut ag = Agente::abrir(&c.catalogo).unwrap().silencioso();
     let Resposta::Status { execucoes, .. } = ag.executar(Comando::Status { execucao: None }) else {
         panic!()
     };
-    assert_eq!(execucoes[0].estado, EstadoExecucao::Cancelada);
+    assert_eq!(execucoes[0].estado, EstadoExecucao::Pausada);
+    assert_eq!(execucoes[0].estado_detalhe, "interrompida");
+    assert!(execucoes[0].retomando);
 }
 
 #[test]
@@ -520,4 +524,51 @@ fn caminho_padrao_respeita_dag_socket_so_quando_definido() {
     assert!(p.is_absolute(), "{}", p.display());
     assert!(p.file_name().is_some());
     let _ = std::io::stderr().flush();
+}
+
+#[test]
+fn agente_retoma_sozinho_a_execucao_deixada_por_um_processo_morto() {
+    let c = cenario();
+    {
+        let mut a = Agente::abrir(&c.catalogo)
+            .unwrap()
+            .silencioso()
+            .com_volumes_fixos(vec![volume_de(&c.raiz)]);
+        let r = a.executar(full(&c, false));
+        assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    }
+    // Como um processo morto no meio do hash: fase `hash`, dois arquivos sem hash, fila pendente.
+    {
+        let cat = dag_store::Catalogo::abrir(&c.catalogo).unwrap();
+        cat.armazem()
+            .conexao()
+            .execute_batch(
+                "UPDATE scan_runs SET phase = 'hash';
+                 DELETE FROM hashes WHERE file_id IN
+                    (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2);
+                 UPDATE fila_hash SET state = 'pendente'
+                    WHERE file_id IN (SELECT id FROM files WHERE kind = 'arquivo' ORDER BY id LIMIT 2);",
+            )
+            .unwrap();
+    }
+    let srv = Servidor::iniciar(config(&c, false)).unwrap();
+    let mut cli = Cliente::conectar(&c.socket).unwrap();
+    // A abertura marca, retoma e conclui sem ninguém pedir.
+    esperar("execução retomada e concluída", || {
+        let Resposta::Status { execucoes, .. } =
+            enviar(&mut cli, Comando::Status { execucao: None })
+        else {
+            panic!()
+        };
+        let e = &execucoes[0];
+        e.estado == EstadoExecucao::Concluida && e.hash.is_none() && !e.retomando
+    });
+    srv.encerrar();
+    let cat = dag_store::Catalogo::abrir(&c.catalogo).unwrap();
+    let n: i64 = cat
+        .armazem()
+        .conexao()
+        .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
+        .unwrap();
+    assert_eq!(n, 4);
 }

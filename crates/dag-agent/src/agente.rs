@@ -13,8 +13,9 @@ use dag_core::{
     Alvo, Autor, ClasseVolume, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId,
     FaseInventario, ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario,
     Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
-    ResumoVerificacao, SaudeMonitorInfo, StatusDiscoHash, StatusExecucao, StatusHash,
-    TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
+    ResumoVerificacao, SaudeMonitorInfo, StatusConfianca, StatusDiscoHash, StatusExecucao,
+    StatusHash, TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId,
+    VolumeInfo,
 };
 use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::PlataformaLinux;
@@ -24,6 +25,7 @@ use dag_scanner::{
     VerificacaoIntegridade,
 };
 use dag_store::Catalogo;
+use dag_store::confianca;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
 use dag_store::hashes;
 use dag_store::inventario::{self, EstadoScan, FaseScan};
@@ -47,7 +49,7 @@ const PAGINA_MAXIMA: u32 = 1000;
 /// Heartbeat mais antigo que isto (s) = monitor morto (a trava é solta com o processo).
 const HEARTBEAT_VALIDO_S: i64 = 15;
 
-fn agora() -> i64 {
+pub(crate) fn agora() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -77,12 +79,20 @@ pub fn incremento_pendente(c: &Comando) -> Option<u8> {
     None
 }
 
+/// Raiz catalogada, conectada e acessível.
+#[derive(Debug, Clone)]
+pub(crate) struct RaizDisponivel {
+    pub caminho: PathBuf,
+    pub volume_id: i64,
+    pub path_raw: Vec<u8>,
+}
+
 /// O Catálogo aberto, com (ou sem) a trava de escritor.
 pub struct Agente {
-    catalogo: Catalogo,
+    pub(crate) catalogo: Catalogo,
     caminho: PathBuf,
     guarda: Option<GuardaEscritor>,
-    controle: ControleScan,
+    pub(crate) controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     volumes_fixos: Option<Vec<VolumeDescoberto>>,
     autor: Autor,
@@ -170,7 +180,7 @@ impl Agente {
     }
 
     /// Emite uma mudança de etapa sem contadores.
-    fn mensagem(&self, texto: impl Into<String>) {
+    pub(crate) fn mensagem(&self, texto: impl Into<String>) {
         if let Some(p) = &self.progresso {
             p(&Progresso::Mensagem {
                 texto: texto.into(),
@@ -259,13 +269,15 @@ impl Agente {
                 raizes,
                 sem_hash,
                 elevar,
+                ..
             } => self.fast_scan(&raizes, sem_hash, elevar),
             Comando::IniciarScan {
                 raizes,
                 sem_hash,
                 elevar,
+                releitura_total,
                 ..
-            } => self.full_scan(&raizes, sem_hash, elevar),
+            } => self.full_scan(&raizes, sem_hash, elevar, releitura_total),
             Comando::Monitorar {
                 raizes,
                 reconciliar_a_cada_s,
@@ -494,18 +506,19 @@ impl Agente {
         raizes: &[String],
         sem_hash: bool,
         elevar: bool,
+        releitura_total: bool,
     ) -> Result<Resposta, ErroAgente> {
         if raizes.is_empty() {
             return Err(ErroAgente::Invalido("informe ao menos uma raiz".into()));
         }
         let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect(), elevar)?;
         let r = scan.executar(&mut self.catalogo)?;
-        self.concluir_scan(r, sem_hash)
+        self.concluir_scan(r, sem_hash, releitura_total)
     }
 
     /// Fast Scan (A-12): reconcilia o Catálogo com o disco reaproveitando metadados e hash do
     /// que não mudou. Sem raízes, usa as raízes catalogadas cujo Volume está conectado.
-    fn fast_scan(
+    pub(crate) fn fast_scan(
         &mut self,
         raizes: &[String],
         sem_hash: bool,
@@ -528,12 +541,29 @@ impl Agente {
             scan = scan.com_progresso(move |x| p(&Progresso::Reconciliacao(inventario_de(x))));
         }
         let r = scan.executar(&mut self.catalogo)?;
-        self.concluir_scan(r, sem_hash)
+        self.concluir_scan(r, sem_hash, false)
     }
 
     /// Raízes já catalogadas cujo Volume está conectado e cujo caminho ainda pertence a ele
     /// (um ponto de montagem vazio, com o volume desconectado, não conta).
     fn raizes_padrao(&mut self) -> Result<Vec<PathBuf>, ErroAgente> {
+        let out: Vec<PathBuf> = self
+            .raizes_disponiveis()?
+            .into_iter()
+            .map(|r| r.caminho)
+            .collect();
+        if out.is_empty() {
+            return Err(ErroAgente::Invalido(
+                "nenhuma raiz catalogada disponível; informe as raízes (ex.: `dag scan --fast /dados`)"
+                    .into(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Como [`raizes_padrao`](Self::raizes_padrao), com a identidade da Raiz no Catálogo; lista
+    /// vazia não é erro.
+    pub(crate) fn raizes_disponiveis(&mut self) -> Result<Vec<RaizDisponivel>, ErroAgente> {
         let volumes = self.volumes_do_sistema()?;
         let t = agora();
         self.catalogo
@@ -554,19 +584,17 @@ impl Agente {
                 .find(|v| v.platform_id == r.platform_id)
                 .map(|v| v.st_dev);
             if r.conectado && dev.is_some() && dev == esperado {
-                out.push(caminho);
+                out.push(RaizDisponivel {
+                    caminho,
+                    volume_id: r.volume_id,
+                    path_raw: r.path_raw,
+                });
             } else {
                 self.mensagem(format!(
                     "raiz ignorada (volume desconectado ou indisponível): {}",
                     caminho.display()
                 ));
             }
-        }
-        if out.is_empty() {
-            return Err(ErroAgente::Invalido(
-                "nenhuma raiz catalogada disponível; informe as raízes (ex.: `dag scan --fast /dados`)"
-                    .into(),
-            ));
         }
         Ok(out)
     }
@@ -674,15 +702,24 @@ impl Agente {
         })
     }
 
-    fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
+    pub(crate) fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
         let scan = self.novo_scan(Vec::new(), false)?;
         let r = scan.retomar(&mut self.catalogo, id.0)?;
-        self.concluir_scan(r, false)
+        self.concluir_scan(r, false, false)
     }
 
     /// Pós-inventário: classificação por caminho, Hash Completo, reconstrução dos Grupos de
     /// Duplicados e reavaliação das Marcações (estas três só sem `sem_hash`).
-    fn concluir_scan(&mut self, r: ResultadoScan, sem_hash: bool) -> Result<Resposta, ErroAgente> {
+    ///
+    /// `releitura_total`: Full Scan pedido de propósito, que lê o conteúdo de todos os arquivos
+    /// de novo (os hashes guardados deixam de valer); os demais caminhos só leem o que é novo ou
+    /// mudou.
+    fn concluir_scan(
+        &mut self,
+        r: ResultadoScan,
+        sem_hash: bool,
+        releitura_total: bool,
+    ) -> Result<Resposta, ErroAgente> {
         let mut desfecho = match r.desfecho {
             DesfechoScan::Concluida => "concluida",
             DesfechoScan::ConcluidaComErros => "concluida_com_erros",
@@ -695,6 +732,9 @@ impl Agente {
             self.mensagem("classificando finalidade (por caminho)...");
             classificar_execucao(&mut self.catalogo, r.execucao_id, agora())?;
             if !sem_hash {
+                if releitura_total {
+                    hashes::invalidar_evidencia(self.catalogo.armazem().conexao(), r.execucao_id)?;
+                }
                 let mut etapa =
                     EtapaHash::nova(ExecucaoId(r.execucao_id)).com_controle(self.controle.clone());
                 if let Some(p) = &self.progresso {
@@ -718,7 +758,16 @@ impl Agente {
                     if h.erros > 0 {
                         desfecho = "concluida_com_erros";
                     }
-                    dup = Some(self.atualizar_duplicados()?);
+                    // Passada de verificação sem mudança e sem hash novo: os grupos continuam
+                    // valendo (evita reconstruí-los a cada abertura).
+                    let nada_mudou = h.hasheados == 0
+                        && r.reconciliacao
+                            .as_ref()
+                            .map(resumo_reconciliacao)
+                            .is_some_and(|x| x.sem_mudancas());
+                    if !nada_mudou {
+                        dup = Some(self.atualizar_duplicados()?);
+                    }
                 }
             }
         }
@@ -907,7 +956,22 @@ impl Agente {
                 bytes_logicos: n(bytes),
             },
             monitor: Some(self.saude_monitor()?),
+            confianca: self.status_confianca()?,
         })
+    }
+
+    /// Ponto de Confiança por Raiz.
+    fn status_confianca(&self) -> Result<Vec<StatusConfianca>, ErroAgente> {
+        Ok(confianca::listar(self.catalogo.armazem().conexao())?
+            .into_iter()
+            .map(|r| StatusConfianca {
+                raiz: r.path_display,
+                volume: VolumeId(r.volume_id),
+                confiavel_em: r.confiavel_em,
+                perdida_em: r.perdido_em,
+                motivo_perda: r.motivo_perda,
+            })
+            .collect())
     }
 
     // ------------------------------------------------------------------ backup
@@ -1122,6 +1186,7 @@ fn status_de(e: &inventario::Execucao) -> StatusExecucao {
         bytes_logicos: n("bytes_logicos"),
         ignorados: n("ignorados"),
         hash: None,
+        retomando: e.retomada_automatica,
     }
 }
 

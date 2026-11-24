@@ -211,7 +211,11 @@ fn dois_agentes_subindo_juntos_a_trava_de_escritor_deixa_um_so() {
     );
     assert!(!sx.or(sy).unwrap().success());
     let vivo = if sx.is_none() { &mut x } else { &mut y };
-    assert_eq!(pid_do_agente(&a.socket, &a.catalogo), Some(vivo.id()));
+    // O vencedor ainda pode estar publicando o pid: espera o estado, não o relógio.
+    let id = vivo.id();
+    esperar("o agente vivo publicar o pid", || {
+        pid_do_agente(&a.socket, &a.catalogo) == Some(id)
+    });
     let _ = vivo.kill();
     let _ = vivo.wait();
 }

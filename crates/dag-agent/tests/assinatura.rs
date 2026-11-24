@@ -252,6 +252,11 @@ fn fila_de_jobs_e_cancelamento_de_quem_ainda_nao_comecou() {
     let srv = Servidor::iniciar(config(&c)).unwrap();
     sem_abertura(&c.socket);
     let mut escuta = Escuta::nova(&c.socket);
+    // `assinar` volta antes de o agente cadastrar o assinante: sem esperar o instantâneo, o
+    // job poderia começar antes do cadastro e o JobIniciado nunca chegaria (iria só no instantâneo).
+    escuta.ate("instantâneo", |e, _| {
+        matches!(e, EventoAgente::Instantaneo { .. })
+    });
 
     let (s1, c1) = (c.socket.clone(), scan(&c, false));
     let primeiro = std::thread::spawn(move || enviar(&s1, Autor::Cli, c1));

@@ -140,6 +140,34 @@ pub enum EtapaPainel {
     Verificacao,
     /// Lendo o conteúdo dos compactados (Membros e hashes), depois do Hash Completo.
     Conteineres,
+    /// Reconstruindo os Grupos de Duplicados e reavaliando as Marcações (depois do hash). O
+    /// resumo do hash que fica no painel já é o final.
+    Duplicados,
+}
+
+/// Mensagens do agente que marcam a etapa de agrupamento (depois do Hash Completo).
+const PREFIXOS_DUPLICADOS: [&str; 4] = [
+    "[duplicados]",
+    "[marcações]",
+    "abertura: Grupos de Duplicados",
+    "Agrupando duplicados",
+];
+
+/// A mensagem de etapa `texto` é a do agrupamento de duplicados? Devolve o nome da etapa.
+#[must_use]
+pub fn etapa_de_duplicados(texto: &str) -> Option<&'static str> {
+    let t = texto.trim_start();
+    if !PREFIXOS_DUPLICADOS.iter().any(|p| t.starts_with(p)) {
+        return None;
+    }
+    // "[marcações] N Marcação(ões) ficaram pendentes" já é o fim da etapa, não um passo dela.
+    if t.starts_with("[marcações] reavaliando") {
+        Some("Reavaliando Marcações")
+    } else if t.starts_with("[marcações]") {
+        None
+    } else {
+        Some("Agrupando duplicados")
+    }
 }
 
 /// Estado de um disco na etapa de hash.
@@ -465,7 +493,9 @@ impl PainelJob {
     /// hash só começa depois do inventário), e nunca se mostra texto de inventário durante o hash.
     #[must_use]
     pub fn montar(e: &EntradaPainel<'_>) -> Self {
+        let duplicados = e.etapa_texto.and_then(etapa_de_duplicados);
         let etapa = match (e.hash, e.inventario, e.estado) {
+            _ if duplicados.is_some() => EtapaPainel::Duplicados,
             _ if e.conteineres.is_some() => EtapaPainel::Conteineres,
             (Some(_), _, _) if e.verificacao => EtapaPainel::Verificacao,
             (Some(h), _, _) if h.preparando => EtapaPainel::PreparandoHash,
@@ -484,7 +514,15 @@ impl PainelJob {
             copiados: c.copiados,
         });
         Self {
-            titulo: titulo(e, etapa),
+            titulo: match duplicados {
+                // Na rotina de abertura o passo continua sendo o contexto ("Retomada do hash da
+                // execução #3 — agrupando duplicados").
+                Some(nome) if e.passo.is_some() => {
+                    format!("{} — {}", titulo(e, etapa), nome.to_lowercase())
+                }
+                Some(nome) => nome.to_string(),
+                None => titulo(e, etapa),
+            },
             etapa,
             onde: e.onde,
             quem: e.origem.map(origem_texto),
@@ -501,6 +539,14 @@ impl PainelJob {
             catalogo: e.catalogo,
             etapa_texto: e.etapa_texto.map(str::to_string),
         }
+    }
+
+    /// Nome curto da etapa de agrupamento em curso (só faz sentido com `EtapaPainel::Duplicados`).
+    fn nome_do_agrupamento(&self) -> &'static str {
+        self.etapa_texto
+            .as_deref()
+            .and_then(etapa_de_duplicados)
+            .unwrap_or("Agrupando duplicados")
     }
 
     /// Percentual global quando existe denominador (hash); inventário não tem.
@@ -534,6 +580,15 @@ impl PainelJob {
             return t;
         }
         match (&self.hash, &self.inventario) {
+            (Some(h), _) if self.etapa == EtapaPainel::Duplicados => {
+                t.push_str(&format!(
+                    "… — hash concluído: {} de {}, {} erro(s)",
+                    inteiro_pt_br(h.com_hash),
+                    inteiro_pt_br(h.arquivos_total),
+                    inteiro_pt_br(h.erros)
+                ));
+            }
+            (None, _) if self.etapa == EtapaPainel::Duplicados => t.push('…'),
             (Some(_), _) if self.etapa == EtapaPainel::PreparandoHash => {
                 t.push_str(" — montando a fila…");
             }
@@ -573,6 +628,16 @@ impl PainelJob {
             );
         }
         match (&self.hash, &self.inventario) {
+            (Some(h), _) if self.etapa == EtapaPainel::Duplicados => format!(
+                "{}… (hash concluído: {} de {} arquivos, {} erro(s))",
+                self.nome_do_agrupamento(),
+                inteiro_pt_br(h.com_hash),
+                inteiro_pt_br(h.arquivos_total),
+                inteiro_pt_br(h.erros)
+            ),
+            (None, _) if self.etapa == EtapaPainel::Duplicados => {
+                format!("{}…", self.nome_do_agrupamento())
+            }
             (Some(_), _) if self.etapa == EtapaPainel::PreparandoHash => {
                 "montando a fila de hash…".into()
             }
@@ -623,6 +688,10 @@ impl PainelJob {
             EtapaPainel::PreparandoHash => v.push(
                 "  Montando a fila de hash (pode levar minutos em Catálogos grandes)…".into(),
             ),
+            EtapaPainel::Duplicados => v.push(format!(
+                "  Etapa atual: {}… (pode levar minutos em Catálogos grandes). O hash abaixo já terminou.",
+                self.nome_do_agrupamento().to_lowercase()
+            )),
             _ => {}
         }
         if let Some(i) = &self.inventario {

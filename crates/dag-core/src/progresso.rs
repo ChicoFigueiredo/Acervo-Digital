@@ -107,6 +107,10 @@ pub struct ProgressoHash {
     /// A fila de hash ainda está sendo montada: os totais ainda não são os definitivos.
     #[serde(default)]
     pub preparando: bool,
+    /// Último quadro da etapa: o hash terminou (ou foi interrompido) e os totais são os finais.
+    /// Quem limita a cadência do progresso nunca descarta este quadro.
+    #[serde(default)]
+    pub finalizado: bool,
     /// Um item por disco físico (a etapa lê um disco por thread, vários discos ao mesmo tempo).
     #[serde(default)]
     pub discos: Vec<ProgressoDiscoHash>,

@@ -495,3 +495,56 @@ fn andamento_da_fila_agrupa_por_dispositivo() {
             .all(|d| d.arquivos_feitos == 0 && d.bytes_pendentes > 0)
     );
 }
+
+/// Fim da etapa com erros (arquivos sumidos e hard links cujo irmão também some): o último
+/// quadro é `finalizado`, não deixa nada pendente (nem no total, nem em disco algum) e conta os
+/// erros. Antes, o painel ficava com o último quadro parcial ("aguardando", pendentes > 0).
+#[test]
+fn fim_da_etapa_com_erros_deixa_o_quadro_final_sem_pendentes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vols = [("va", Some("A")), ("vb", Some("B"))];
+    let raiz = tmp.path().join("acervo");
+    // Dois caminhos para o mesmo arquivo físico em vb: uma leitura só, duas linhas no Catálogo.
+    fs::create_dir_all(raiz.join("vb")).unwrap();
+    fs::write(raiz.join("vb/f0.bin"), b"conteudo do hard link").unwrap();
+    fs::hard_link(raiz.join("vb/f0.bin"), raiz.join("vb/ligado.bin")).unwrap();
+    let (mut cat, run) = montar(&raiz, &vols);
+    // Tira do disco: o hard link inteiro (os dois caminhos) e um arquivo de va.
+    fs::remove_file(raiz.join("vb/f0.bin")).unwrap();
+    fs::remove_file(raiz.join("vb/ligado.bin")).unwrap();
+    fs::remove_file(raiz.join("va/f1.bin")).unwrap();
+    let quadros: Arc<Mutex<Vec<dag_scanner::ProgressoHash>>> = Arc::default();
+    let q2 = Arc::clone(&quadros);
+    let r = EtapaHash::nova(ExecucaoId(run))
+        .com_config(cfg())
+        .com_progresso(move |p| q2.lock().unwrap().push(p.clone()))
+        .executar(&mut cat)
+        .unwrap();
+    assert!(r.erros >= 2, "erros: {}", r.erros);
+    let q = quadros.lock().unwrap();
+    let ultimo = q.last().unwrap();
+    assert!(ultimo.finalizado, "o último quadro tem de ser o final");
+    assert_eq!(
+        q.iter().filter(|p| p.finalizado).count(),
+        1,
+        "só o último quadro é final"
+    );
+    assert_eq!(
+        ultimo.arquivos_feitos, ultimo.arquivos_total,
+        "nada pendente"
+    );
+    assert_eq!(ultimo.erros, r.erros);
+    assert!(
+        ultimo.discos.iter().all(|d| d.concluido && !d.ativo),
+        "{:?}",
+        ultimo.discos
+    );
+    assert!(
+        ultimo
+            .discos
+            .iter()
+            .all(|d| d.arquivos_feitos == d.arquivos_total),
+        "{:?}",
+        ultimo.discos
+    );
+}

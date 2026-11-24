@@ -39,6 +39,9 @@ use crate::versao::{
     PoliticaAtualizacao, Troca, decidir, reexecutar_no_lugar, validar_executavel,
 };
 
+/// Prazo para escrever um quadro a um cliente que não lê; passado, ele deixa de receber.
+const PRAZO_ESCRITA: Duration = Duration::from_secs(30);
+
 /// Intervalo entre novas tentativas de iniciar o monitor com a fila vazia.
 const REPETIR_MONITOR: Duration = Duration::from_secs(60);
 /// Cadência mínima dos eventos de progresso repassados a cada cliente.
@@ -501,6 +504,9 @@ fn recusar(mut stream: UnixStream) {
 
 fn atender(stream: UnixStream, comp: &Arc<Compartilhado>) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    // Cliente vivo que não lê (janela fechada, terminal parado): sem prazo de escrita, o
+    // trabalho continuaria enfileirando o progresso dele na memória sem limite.
+    let _ = stream.set_write_timeout(Some(PRAZO_ESCRITA));
     let Ok(clone) = stream.try_clone() else {
         return;
     };
@@ -1319,12 +1325,14 @@ impl Limitador {
             Progresso::Hash(h) => (
                 2,
                 h.preparando
+                    || h.finalizado
                     || h.janela_ms == 0
                     || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total),
             ),
             Progresso::Conteineres(c) => (
                 4,
                 c.andamento.preparando
+                    || c.andamento.finalizado
                     || c.andamento.janela_ms == 0
                     || (c.andamento.arquivos_total > 0
                         && c.andamento.arquivos_feitos >= c.andamento.arquivos_total),
@@ -1332,6 +1340,7 @@ impl Limitador {
             Progresso::Verificacao(h) => (
                 3,
                 h.preparando
+                    || h.finalizado
                     || h.janela_ms == 0
                     || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total),
             ),
@@ -1351,6 +1360,27 @@ impl Limitador {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn limitador_nunca_descarta_o_quadro_final_do_hash() {
+        use dag_core::ProgressoHash;
+        let hash = |feitos, finalizado| {
+            Progresso::Hash(ProgressoHash {
+                arquivos_total: 100,
+                arquivos_feitos: feitos,
+                janela_ms: 5_000,
+                finalizado,
+                ..ProgressoHash::default()
+            })
+        };
+        let mut l = Limitador::default();
+        assert!(l.permitir(&hash(10, false)), "o primeiro passa");
+        assert!(!l.permitir(&hash(20, false)), "dentro do intervalo, cai");
+        // Fim da etapa com erros: feitos < total (o total do hash conta linhas, os erros de
+        // hard link contam uma); sem a marca de final o quadro era descartado e o painel ficava
+        // com o parcial.
+        assert!(l.permitir(&hash(99, true)), "o quadro final sempre passa");
+    }
 
     #[test]
     fn so_o_proprio_uid_e_aceito() {

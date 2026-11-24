@@ -1468,3 +1468,30 @@ fn membro_conta_como_copia_mas_nunca_como_espaco_recuperavel() {
             .coberto
     );
 }
+
+/// A escolha da Cópia Principal lê os grupos por páginas (nunca todos de uma vez na memória):
+/// com mais grupos que uma página, nenhum pode ficar sem Cópia Principal.
+#[test]
+fn copia_principal_de_todos_os_grupos_alem_da_primeira_pagina() {
+    let mut f = Fx::novo();
+    let v = f.volume("v", None, true);
+    let p = f.pasta(v, None, "/v");
+    let grupos = 5_200_i64; // > página de 5.000
+    f.conn().execute_batch("BEGIN").unwrap();
+    for g in 0..grupos {
+        for c in 0..2 {
+            let n = g * 2 + c;
+            let mut hs = [0u8; 32];
+            hs[..8].copy_from_slice(&(g as u64 + 1).to_le_bytes());
+            f.arq(v, p, &format!("/v/g{g}c{c}"), 10, n + 1, Some(hs));
+        }
+    }
+    f.conn().execute_batch("COMMIT").unwrap();
+    let r = f.reconstruir();
+    assert_eq!(r.grupos_criados, grupos as u64);
+    assert_eq!(
+        f.contar("SELECT COUNT(*) FROM grupos_duplicados WHERE copia_principal_file_id IS NULL"),
+        0,
+        "todos os grupos, também os de depois da primeira página, têm Cópia Principal"
+    );
+}

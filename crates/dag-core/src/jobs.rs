@@ -147,13 +147,28 @@ impl JobInfo {
             Progresso::Passo(x) => {
                 self.passo = Some(x.clone());
                 self.progresso.clear();
+                self.encerrar_agrupamento();
                 return;
             }
             _ => {}
         }
+        // Chegou andamento de inventário, hash ou contêineres: a etapa de agrupamento (da passada
+        // anterior) acabou.
+        self.encerrar_agrupamento();
         let mesma = |q: &Progresso| std::mem::discriminant(q) == std::mem::discriminant(p);
         self.progresso.retain(|q| !mesma(q));
         self.progresso.push(p.clone());
+    }
+
+    /// Esquece a mensagem de etapa de agrupamento de duplicados (nova etapa começou).
+    fn encerrar_agrupamento(&mut self) {
+        if self
+            .etapa
+            .as_deref()
+            .is_some_and(|t| crate::painel::etapa_de_duplicados(t).is_some())
+        {
+            self.etapa = None;
+        }
     }
 
     /// Último progresso de hash (ou de verificação) e se é a verificação.
@@ -456,6 +471,74 @@ mod tests {
             "Hash Completo (Full Scan)"
         );
         assert!(k.resumo_progresso().starts_with("hash 0 de 4"));
+    }
+
+    /// O hash acabou (com erros) e o agente passa a agrupar duplicados: o painel mostra a etapa
+    /// atual, o resumo do hash fica final (nada pendente, erros contados) e a etapa some quando
+    /// um novo andamento (próxima passada) chega.
+    #[test]
+    fn painel_mostra_o_agrupamento_depois_do_hash_com_resumo_final() {
+        use crate::painel::EtapaPainel;
+        use crate::{ProgressoDiscoHash, ProgressoHash};
+        let mut j = job(1, EstadoJob::Executando);
+        j.tipo = TipoJob::FastScan;
+        j.registrar_progresso(&Progresso::Hash(ProgressoHash {
+            arquivos_total: 100,
+            arquivos_feitos: 100,
+            erros: 7,
+            finalizado: true,
+            discos: vec![ProgressoDiscoHash {
+                disco: "d".into(),
+                arquivos_total: 10,
+                arquivos_feitos: 10,
+                concluido: true,
+                ..ProgressoDiscoHash::default()
+            }],
+            ..ProgressoHash::default()
+        }));
+        let antes = j.painel(Onde::Janela, None, None);
+        assert_eq!(antes.etapa, EtapaPainel::Hash);
+        j.registrar_progresso(&Progresso::Mensagem {
+            texto: "[duplicados] Agrupando duplicados (pode levar minutos em Catálogos grandes)..."
+                .into(),
+        });
+        let p = j.painel(Onde::Janela, None, None);
+        assert_eq!(p.etapa, EtapaPainel::Duplicados);
+        assert_eq!(p.titulo, "Agrupando duplicados");
+        let h = p.hash.as_ref().unwrap();
+        assert_eq!((h.pendentes, h.erros), (0, 7));
+        assert!(
+            p.resumo().starts_with("Agrupando duplicados…"),
+            "{}",
+            p.resumo()
+        );
+        assert!(p.resumo().contains("7 erro(s)"), "{}", p.resumo());
+        assert!(p.linha_status().contains("Agrupando duplicados…"));
+        let texto = p.linhas().join("\n");
+        assert!(
+            texto.contains("Etapa atual: agrupando duplicados"),
+            "{texto}"
+        );
+        assert!(texto.contains("pendentes 0"), "{texto}");
+        // Marcações: segundo passo da mesma etapa.
+        j.registrar_progresso(&Progresso::Mensagem {
+            texto: "[marcações] reavaliando Marcações contra o hash atual...".into(),
+        });
+        assert_eq!(
+            j.painel(Onde::Janela, None, None).titulo,
+            "Reavaliando Marcações"
+        );
+        // A próxima passada começa: a etapa de agrupamento da anterior sai do painel.
+        j.registrar_progresso(&Progresso::Hash(ProgressoHash {
+            arquivos_total: 100,
+            preparando: true,
+            ..ProgressoHash::default()
+        }));
+        assert_ne!(
+            j.painel(Onde::Janela, None, None).etapa,
+            EtapaPainel::Duplicados
+        );
+        assert!(j.etapa.is_none());
     }
 
     #[test]

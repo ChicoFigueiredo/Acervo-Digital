@@ -241,6 +241,18 @@ impl Agente {
         }
     }
 
+    /// Diagnóstico de memória: uma linha em stderr (journal do serviço) com o RSS e o pico do
+    /// processo ao fim de cada etapa longa. Em campo, é o que mostra qual etapa consome memória.
+    pub(crate) fn marcar_memoria(&self, etapa: &str) {
+        if let Some((rss, pico)) = memoria_do_processo() {
+            eprintln!(
+                "agente: memória após {etapa}: RSS {} MiB (pico {} MiB)",
+                rss / 1024,
+                pico / 1024
+            );
+        }
+    }
+
     /// Emite o passo estruturado da rotina de abertura (retomada, passada de verificação).
     pub(crate) fn passo(&self, passo: dag_core::PassoAbertura) {
         if let Some(p) = &self.progresso {
@@ -902,6 +914,7 @@ impl Agente {
         if r.desfecho != DesfechoScan::Cancelada {
             self.mensagem("classificando finalidade (por caminho)...");
             classificar_execucao(&mut self.catalogo, r.execucao_id, agora())?;
+            self.marcar_memoria("inventário e classificação");
             // A varredura visitou a DAG-Lixeira: reconhece o que o usuário pôs, tirou ou esvaziou.
             let lixeira = self.reconciliar_lixeira()?;
             if !sem_hash {
@@ -916,6 +929,7 @@ impl Agente {
                     etapa = etapa.com_progresso(sink_hash(Arc::clone(p), false));
                 }
                 let h = etapa.executar(&mut self.catalogo)?;
+                self.marcar_memoria("hash");
                 duracao += h.duracao;
                 erros += h.erros;
                 let cancelada = h.desfecho == DesfechoScan::Cancelada;
@@ -983,6 +997,7 @@ impl Agente {
         // Hashes novos podem liberar Marcações de quem está Na Lixeira; a cópia lá não conta.
         self.reconciliar_lixeira()?;
         duplicados::reconstruir_grupos(&mut self.catalogo, Escopo::Tudo, self.autor, t)?;
+        self.marcar_memoria("grupos de duplicados");
         self.mensagem("[marcações] reavaliando Marcações contra o hash atual...");
         let pendentes = duplicados::reavaliar_marcacoes(&mut self.catalogo, self.autor, t)?;
         let mut r = duplicados::resumo_duplicados(self.catalogo.armazem().conexao())?;
@@ -1529,6 +1544,20 @@ fn inventario_de(p: &ProgressoScanner) -> ProgressoInventario {
     }
 }
 
+/// `(VmRSS, VmHWM)` em KiB do próprio processo (Linux); `None` se `/proc` não responde.
+pub(crate) fn memoria_do_processo() -> Option<(u64, u64)> {
+    let t = std::fs::read_to_string("/proc/self/status").ok()?;
+    let campo = |nome: &str| -> Option<u64> {
+        t.lines()
+            .find(|l| l.starts_with(nome))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    };
+    Some((campo("VmRSS:")?, campo("VmHWM:")?))
+}
+
 /// Adapta o progresso da etapa de hash (ou da verificação) ao [`Progresso`] do contrato.
 fn sink_hash(
     p: Arc<dyn Fn(&Progresso) + Send + Sync>,
@@ -1550,6 +1579,7 @@ fn sink_hash(
             janela_ms: h.janela_ms,
             decorrido_ms: h.decorrido_ms,
             preparando: h.preparando,
+            finalizado: h.finalizado,
             discos: h
                 .discos
                 .iter()

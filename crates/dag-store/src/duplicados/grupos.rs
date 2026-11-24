@@ -196,6 +196,9 @@ pub fn reconstruir_grupos(
         })
 }
 
+/// Grupos lidos por página em [`recalcular_principais`].
+const PAGINA_GRUPOS: i64 = 5_000;
+
 struct EntradaPrioridade {
     id: i64,
     volume: i64,
@@ -237,14 +240,12 @@ pub(crate) fn recalcular_principais(
         }
     }
     let prioridade: Vec<VolumeId> = entradas.iter().map(|e| VolumeId(e.id)).collect();
-    let ids: Vec<(i64, Option<i64>, String)> = {
-        let mut st = conn.prepare(
-            "SELECT id, copia_principal_file_id, copia_principal_modo FROM grupos_duplicados
-             WHERE (?1 IS NULL OR id = ?1) ORDER BY id",
-        )?;
-        st.query_map([so_grupo], |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)))?
-            .collect::<Result<_, _>>()?
-    };
+    // Lê os grupos em páginas por cursor (`id > ?`): milhões de grupos nunca ficam de uma vez
+    // na memória, e o `UPDATE` da página não mexe na chave de leitura.
+    let mut pagina = conn.prepare(
+        "SELECT id, copia_principal_file_id, copia_principal_modo FROM grupos_duplicados
+         WHERE (?1 IS NULL OR id = ?1) AND id > ?2 ORDER BY id LIMIT ?3",
+    )?;
     let mut membros = conn.prepare(
         "SELECT f.id, f.volume_id, v.device_id, f.path_raw FROM grupo_membros gm
          JOIN files f ON f.id = gm.file_id JOIN volumes v ON v.id = f.volume_id
@@ -255,51 +256,63 @@ pub(crate) fn recalcular_principais(
                 atualizado_em = ?3 WHERE id = ?1",
     )?;
     let mut mudou = 0;
-    for (grupo, atual, modo) in ids {
-        let copias: Vec<(Copia, Vec<u8>)> = membros
-            .query_map([grupo], |l| {
-                Ok((
-                    Copia {
-                        arquivo: ArquivoId(l.get(0)?),
-                        volume: VolumeId(l.get(1)?),
-                        dispositivo: DispositivoId(l.get::<_, Option<i64>>(2)?.unwrap_or(0)),
-                    },
-                    l.get::<_, Vec<u8>>(3)?,
-                ))
+    let mut depois_de = i64::MIN;
+    loop {
+        let ids: Vec<(i64, Option<i64>, String)> = pagina
+            .query_map(params![so_grupo, depois_de, PAGINA_GRUPOS], |l| {
+                Ok((l.get(0)?, l.get(1)?, l.get(2)?))
             })?
             .collect::<Result<_, _>>()?;
-        let eh_membro =
-            |f: Option<i64>| f.is_some_and(|f| copias.iter().any(|c| c.0.arquivo.0 == f));
-        if modo == "manual" && eh_membro(atual) {
-            continue;
-        }
-        let com_slot: Vec<Copia> = copias
-            .iter()
-            .map(|(c, caminho)| {
-                // Entrada mais específica: pasta mais profunda que cobre o caminho; senão o Volume.
-                let pasta = entradas
-                    .iter()
-                    .filter(|e| e.volume == c.volume.0)
-                    .filter_map(|e| e.pasta.as_deref().map(|p| (e.id, p)))
-                    .filter(|(_, p)| sob(caminho, p))
-                    .max_by_key(|(_, p)| p.len())
-                    .map(|(id, _)| id);
-                let slot = pasta.or_else(|| {
-                    entradas
+        let Some(&(ultimo, _, _)) = ids.last() else {
+            break;
+        };
+        depois_de = ultimo;
+        for (grupo, atual, modo) in ids {
+            let copias: Vec<(Copia, Vec<u8>)> = membros
+                .query_map([grupo], |l| {
+                    Ok((
+                        Copia {
+                            arquivo: ArquivoId(l.get(0)?),
+                            volume: VolumeId(l.get(1)?),
+                            dispositivo: DispositivoId(l.get::<_, Option<i64>>(2)?.unwrap_or(0)),
+                        },
+                        l.get::<_, Vec<u8>>(3)?,
+                    ))
+                })?
+                .collect::<Result<_, _>>()?;
+            let eh_membro =
+                |f: Option<i64>| f.is_some_and(|f| copias.iter().any(|c| c.0.arquivo.0 == f));
+            if modo == "manual" && eh_membro(atual) {
+                continue;
+            }
+            let com_slot: Vec<Copia> = copias
+                .iter()
+                .map(|(c, caminho)| {
+                    // Entrada mais específica: pasta mais profunda que cobre o caminho; senão o Volume.
+                    let pasta = entradas
                         .iter()
-                        .find(|e| e.volume == c.volume.0 && e.pasta.is_none())
-                        .map(|e| e.id)
-                });
-                Copia {
-                    volume: VolumeId(slot.unwrap_or(-1)),
-                    ..*c
-                }
-            })
-            .collect();
-        let novo = escolher_copia_principal(&com_slot, &prioridade, None).map(|a| a.0);
-        if novo != atual || modo != "auto" {
-            atualiza.execute(params![grupo, novo, agora])?;
-            mudou += 1;
+                        .filter(|e| e.volume == c.volume.0)
+                        .filter_map(|e| e.pasta.as_deref().map(|p| (e.id, p)))
+                        .filter(|(_, p)| sob(caminho, p))
+                        .max_by_key(|(_, p)| p.len())
+                        .map(|(id, _)| id);
+                    let slot = pasta.or_else(|| {
+                        entradas
+                            .iter()
+                            .find(|e| e.volume == c.volume.0 && e.pasta.is_none())
+                            .map(|e| e.id)
+                    });
+                    Copia {
+                        volume: VolumeId(slot.unwrap_or(-1)),
+                        ..*c
+                    }
+                })
+                .collect();
+            let novo = escolher_copia_principal(&com_slot, &prioridade, None).map(|a| a.0);
+            if novo != atual || modo != "auto" {
+                atualiza.execute(params![grupo, novo, agora])?;
+                mudou += 1;
+            }
         }
     }
     Ok(mudou)

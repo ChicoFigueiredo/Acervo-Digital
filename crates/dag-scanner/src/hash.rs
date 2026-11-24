@@ -149,6 +149,8 @@ pub struct ProgressoHash {
     pub decorrido_ms: u64,
     /// A fila ainda está sendo montada (totais provisórios).
     pub preparando: bool,
+    /// Último quadro da etapa: totais finais (nada pendente se não foi cancelada).
+    pub finalizado: bool,
 }
 
 /// Resultado da etapa de hash.
@@ -322,6 +324,7 @@ impl EtapaHash {
             reaproveitados: resumo.reaproveitados,
             erros: 0,
             amostras: VecDeque::new(),
+            finalizado: false,
         };
         let r = match motor.rodar(cat, inicio) {
             Ok(r) => r,
@@ -531,6 +534,7 @@ impl VerificacaoIntegridade {
             reaproveitados: 0,
             erros: 0,
             amostras: VecDeque::new(),
+            finalizado: false,
         };
         let r = motor.rodar(cat, inicio)?;
         let desfecho = if r.cancelado {
@@ -837,6 +841,8 @@ struct Motor {
     erros: u64,
     /// Amostras recentes para as vazões de janela móvel.
     amostras: VecDeque<Amostra>,
+    /// O quadro que `emitir` monta é o último da etapa.
+    finalizado: bool,
 }
 
 /// Controle do batimento: quando foi o último e o que ele gravou (por item da fila).
@@ -1245,6 +1251,19 @@ impl Motor {
                     Ok(hashes::totais_pendentes(tx, self.tipo)?)
                 })?;
         conta.cancelado = self.controle.cancelado() && restantes.0 > 0;
+        // Quadro final: a etapa acabou, então nada fica "pendente" (um hard link com vários
+        // caminhos, por exemplo, é uma leitura só e não conta cada caminho como feito) e o
+        // disco que encerrou aparece concluído. Marcado `finalizado` para o limitador de
+        // cadência do agente nunca descartá-lo (o painel ficaria com o último quadro parcial).
+        self.finalizado = true;
+        if !conta.cancelado {
+            feitos_linhas = feitos_linhas.max(self.arquivos_total);
+            for d in &mut discos {
+                if d.encerrado {
+                    d.feitos = d.feitos.max(d.arquivos_total);
+                }
+            }
+        }
         self.emitir(
             &discos,
             &bytes_disco,
@@ -1368,6 +1387,7 @@ impl Motor {
             janela_ms: v.janela_ms,
             decorrido_ms: u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX),
             preparando: false,
+            finalizado: self.finalizado,
         });
     }
 

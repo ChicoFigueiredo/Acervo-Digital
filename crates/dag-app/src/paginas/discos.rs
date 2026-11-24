@@ -1,6 +1,6 @@
 //! Página Discos: volumes conhecidos, capacidade, uso, dispositivo físico e estado.
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga, estado_vazio};
 use crate::app::AppDag;
 use crate::formato::{bytes_humanos, data_s, percentual};
@@ -108,7 +108,7 @@ impl Estado {
 }
 
 const COLUNAS: [Coluna; 11] = [
-    Coluna::esq("Varrer", 55.0),
+    Coluna::esq("Varrer", 55.0).sem_ordem(),
     Coluna::esq("Classe", 105.0),
     Coluna::esq("Montagem", 200.0),
     Coluna::esq("Rótulo", 120.0),
@@ -204,70 +204,100 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
         Some(_) if !linhas.is_empty() => {
             let mut sel = est.selecionado;
             let mut marcados = est.marcados.clone();
-            tabela(ui, "discos", &COLUNAS, linhas.len(), altura, |l, i| {
+            let chave = |c: usize, i: usize| {
                 let d: &LinhaDisco = &linhas[i];
                 let v = &d.volume;
-                l.ui(|ui| {
-                    let mut m = marcados.contains(&v.id);
-                    if ui.checkbox(&mut m, "").changed() {
-                        if m {
-                            marcados.insert(v.id);
-                        } else {
-                            marcados.remove(&v.id);
-                        }
-                    }
-                });
-                l.ui(|ui| {
-                    ui.label(d.classe.rotulo());
-                    if d.sistema {
-                        ui.small("sistema")
-                            .on_hover_text("Partição de sistema (inicialização) de um disco real");
-                    }
-                });
-                let nome = v
-                    .montagem
-                    .clone()
-                    .unwrap_or_else(|| "(sem montagem)".into());
-                let extra = if v.montagens > 1 {
-                    format!("{nome}  (+{})", v.montagens - 1)
-                } else {
-                    nome
-                };
-                if l.selecionavel(sel == Some(v.id), extra).clicked() {
-                    sel = Some(v.id);
+                match c {
+                    1 => Chave::texto(d.classe.rotulo()),
+                    2 => Chave::opt_texto(v.montagem.as_deref()),
+                    3 => Chave::opt_texto(v.rotulo.as_deref()),
+                    4 => Chave::opt_texto(v.fs_type.as_deref()),
+                    5 => Chave::opt_num(v.capacidade),
+                    6 => Chave::opt_num(v.livre),
+                    7 => Chave::opt_real(v.uso_percentual()),
+                    8 => Chave::texto(&match (&v.dispositivo, &v.tipo_dispositivo) {
+                        (Some(d), Some(t)) => format!("{d} ({t})"),
+                        (Some(d), None) => d.clone(),
+                        (None, Some(t)) => t.clone(),
+                        (None, None) => String::new(),
+                    }),
+                    9 => Chave::num(i128::from(!v.conectado)),
+                    _ => Chave::opt_num(v.bytes_catalogados),
                 }
-                l.texto(v.rotulo.clone().unwrap_or_default());
-                l.texto(v.fs_type.clone().unwrap_or_default());
-                l.texto(v.capacidade.map_or_else(|| "—".into(), bytes_humanos));
-                l.texto(v.livre.map_or_else(|| "—".into(), bytes_humanos));
-                l.ui(|ui| match v.uso_percentual() {
-                    Some(p) => {
-                        ui.add(
-                            egui::ProgressBar::new((p / 100.0) as f32)
-                                .desired_width(130.0)
-                                .text(percentual(Some(p))),
-                        );
+            };
+            tabela(
+                ui,
+                "discos",
+                &COLUNAS,
+                linhas.len(),
+                altura,
+                chave,
+                |l, i| {
+                    let d: &LinhaDisco = &linhas[i];
+                    let v = &d.volume;
+                    l.ui(|ui| {
+                        let mut m = marcados.contains(&v.id);
+                        if ui.checkbox(&mut m, "").changed() {
+                            if m {
+                                marcados.insert(v.id);
+                            } else {
+                                marcados.remove(&v.id);
+                            }
+                        }
+                    });
+                    l.ui(|ui| {
+                        ui.label(d.classe.rotulo());
+                        if d.sistema {
+                            ui.small("sistema").on_hover_text(
+                                "Partição de sistema (inicialização) de um disco real",
+                            );
+                        }
+                    });
+                    let nome = v
+                        .montagem
+                        .clone()
+                        .unwrap_or_else(|| "(sem montagem)".into());
+                    let extra = if v.montagens > 1 {
+                        format!("{nome}  (+{})", v.montagens - 1)
+                    } else {
+                        nome
+                    };
+                    if l.selecionavel(sel == Some(v.id), extra).clicked() {
+                        sel = Some(v.id);
                     }
-                    None => {
-                        ui.weak("—");
-                    }
-                });
-                l.texto(match (&v.dispositivo, &v.tipo_dispositivo) {
-                    (Some(d), Some(t)) => format!("{d} ({t})"),
-                    (Some(d), None) => d.clone(),
-                    (None, Some(t)) => t.clone(),
-                    (None, None) => "não informado".into(),
-                });
-                l.texto(if v.conectado {
-                    "Conectado".to_string()
-                } else {
-                    format!("Offline (visto {})", data_s(v.visto_em))
-                });
-                l.texto(
-                    v.bytes_catalogados
-                        .map_or_else(|| "—".into(), bytes_humanos),
-                );
-            });
+                    l.texto(v.rotulo.clone().unwrap_or_default());
+                    l.texto(v.fs_type.clone().unwrap_or_default());
+                    l.texto(v.capacidade.map_or_else(|| "—".into(), bytes_humanos));
+                    l.texto(v.livre.map_or_else(|| "—".into(), bytes_humanos));
+                    l.ui(|ui| match v.uso_percentual() {
+                        Some(p) => {
+                            ui.add(
+                                egui::ProgressBar::new((p / 100.0) as f32)
+                                    .desired_width(130.0)
+                                    .text(percentual(Some(p))),
+                            );
+                        }
+                        None => {
+                            ui.weak("—");
+                        }
+                    });
+                    l.texto(match (&v.dispositivo, &v.tipo_dispositivo) {
+                        (Some(d), Some(t)) => format!("{d} ({t})"),
+                        (Some(d), None) => d.clone(),
+                        (None, Some(t)) => t.clone(),
+                        (None, None) => "não informado".into(),
+                    });
+                    l.texto(if v.conectado {
+                        "Conectado".to_string()
+                    } else {
+                        format!("Offline (visto {})", data_s(v.visto_em))
+                    });
+                    l.texto(
+                        v.bytes_catalogados
+                            .map_or_else(|| "—".into(), bytes_humanos),
+                    );
+                },
+            );
             est.selecionado = sel;
             est.marcados = marcados;
             if est.detalhes {

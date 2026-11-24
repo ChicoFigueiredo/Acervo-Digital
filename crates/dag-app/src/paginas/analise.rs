@@ -4,7 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, nota_ordem_local, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga, estado_vazio};
 use crate::app::AppDag;
 use crate::bases::{BasePercentual, Bases};
@@ -407,6 +407,19 @@ fn tree_view(
         &colunas,
         a.filhos.len() + extra,
         altura,
+        |c, i| {
+            // "Outros" fica sempre por último (chave nula).
+            let Some(n) = a.filhos.get(i) else {
+                return Chave::Nulo;
+            };
+            match c {
+                0 => Chave::texto(&n.nome),
+                1 | 2 => Chave::num(n.bytes),
+                3 => Chave::opt_num(n.alocado),
+                4 => Chave::opt_num(n.arquivos),
+                _ => Chave::opt_num(n.mtime_ns),
+            }
+        },
         |l, i| {
             if let Some(n) = a.filhos.get(i) {
                 let rotulo = if n.navegavel() {
@@ -444,13 +457,14 @@ fn tree_view(
             }
         },
     );
+    nota_ordem_local(ui, "analise-tree");
     destino
 }
 
 /// Barra proporcional com o percentual escrito dentro.
 fn barra(l: &mut super::tabela::Linha<'_>, pct: Option<f64>, cor: Rgb) {
     l.ui(|ui| {
-        let largura = 240.0;
+        let largura = ui.available_width().clamp(40.0, 240.0);
         let (rect, resp) = ui.allocate_exact_size(vec2(largura, 16.0), Sense::hover());
         let fundo = ui.visuals().extreme_bg_color;
         ui.painter().rect_filled(rect, CornerRadius::same(3), fundo);

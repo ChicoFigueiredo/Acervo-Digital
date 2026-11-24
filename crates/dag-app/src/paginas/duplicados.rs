@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, nota_ordem_local, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga, estado_vazio};
 use crate::app::{AppDag, Proposito};
 use crate::confirmacao::{AcaoMarcacao, Gravidade, Plano, comando};
@@ -357,6 +357,18 @@ fn corpo(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
                     &COLUNAS_GRUPOS,
                     p.grupos.len(),
                     altura - 70.0,
+                    |c, i| {
+                        let g = &p.grupos[i];
+                        match c {
+                            0 => Chave::num(g.tamanho),
+                            1 => Chave::num(g.copias),
+                            2 => Chave::num(g.copias_offline),
+                            3 => Chave::num(g.espaco_recuperavel_bytes),
+                            4 => Chave::num(g.bytes_marcados_delecao),
+                            5 => Chave::num(i128::from(g.modo_principal == ModoPrincipal::Manual)),
+                            _ => Chave::texto(&g.hash.to_string()),
+                        }
+                    },
                     |l, i| {
                         let g = &p.grupos[i];
                         if l.selecionavel(sel == Some(g.id), bytes_humanos(g.tamanho))
@@ -375,6 +387,7 @@ fn corpo(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
                         l.texto(hash_curto(&g.hash.to_string()));
                     },
                 );
+                nota_ordem_local(ui, "dup-grupos");
                 ui.horizontal(|ui| {
                     ui.weak(format!(
                         "{} de {} grupo(s)",
@@ -451,6 +464,26 @@ fn detalhe(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
         &COLUNAS_COPIAS,
         d.copias.len(),
         (altura - 170.0).max(100.0),
+        |col, i| {
+            let c = &d.copias[i];
+            match col {
+                0 => Chave::num(i128::from(!c.principal)),
+                1 => Chave::texto(
+                    &c.volume_rotulo
+                        .clone()
+                        .unwrap_or_else(|| format!("volume {}", c.volume)),
+                ),
+                2 => Chave::texto(
+                    &c.dispositivo
+                        .map_or_else(String::new, |x| format!("disco {x:>10}")),
+                ),
+                3 => Chave::texto(&c.caminho),
+                4 => Chave::num(i128::from(!c.conectado)),
+                5 => Chave::texto(&texto_marcacao(c)),
+                6 => Chave::texto(&texto_cobertura(c)),
+                _ => Chave::texto(texto_espaco(c.recuperavel)),
+            }
+        },
         |l, i| {
             let c = &d.copias[i];
             let r = l.selecionavel(sel == Some(c.arquivo), if c.principal { "★" } else { " " });

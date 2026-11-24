@@ -1,5 +1,6 @@
 //! Página Monitoramento.
 
+use super::tabela::{Chave, Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho};
 use crate::app::AppDag;
 use crate::formato::inteiro_pt_br;
@@ -46,6 +47,8 @@ pub static PAGINA: DefPagina = DefPagina {
     resumo: "Taxa de eventos, backlog, latência, raízes cobertas, logs e falhas.",
     desenhar,
 };
+
+const COLUNAS_CONFIANCA: [Coluna; 2] = [Coluna::esq("Raiz", 360.0), Coluna::esq("Estado", 420.0)];
 
 fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     cabecalho(ui, &PAGINA);
@@ -95,13 +98,28 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     if app.worker.confianca().is_empty() {
         ui.weak("Nenhuma Raiz catalogada ainda.");
     }
-    for c in app.worker.confianca() {
-        let texto = match (c.confiavel_em, &c.motivo_perda) {
+    let confianca = app.worker.confianca();
+    if !confianca.is_empty() {
+        let texto_de = |c: &dag_core::StatusConfianca| match (c.confiavel_em, &c.motivo_perda) {
             (Some(_), _) => "confiável: só o monitoramento a mantém em dia".to_string(),
             (None, Some(m)) => format!("perdido ({m})"),
             (None, None) => "ainda não confiável".to_string(),
         };
-        ui.label(format!("{} — {texto}", c.raiz));
+        tabela(
+            ui,
+            "monitor-confianca",
+            &COLUNAS_CONFIANCA,
+            confianca.len(),
+            (confianca.len() as f32 * 26.0 + 40.0).min(240.0),
+            |c, i| match c {
+                0 => Chave::texto(&confianca[i].raiz),
+                _ => Chave::texto(&texto_de(&confianca[i])),
+            },
+            |l, i| {
+                l.texto(confianca[i].raiz.clone());
+                l.texto(texto_de(&confianca[i]));
+            },
+        );
     }
     ui.add_space(8.0);
     ui.weak(

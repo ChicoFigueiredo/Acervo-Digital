@@ -5,7 +5,7 @@ use std::time::Duration;
 
 mod erros;
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga};
 use crate::app::AppDag;
 use crate::formato::{bytes_humanos, data_s, duracao, inteiro_pt_br, taxa_itens};
@@ -110,6 +110,26 @@ impl Estado {
     }
 }
 
+const COLUNAS_DISCOS: [Coluna; 8] = [
+    Coluna::esq("Disco", 170.0),
+    Coluna::esq("Volumes", 80.0),
+    Coluna::esq("Threads", 70.0),
+    Coluna::dir("Arquivos", 150.0),
+    Coluna::dir("%", 60.0),
+    Coluna::dir("MB/s", 70.0),
+    Coluna::esq("Estado", 110.0),
+    Coluna::esq("Restante", 110.0),
+];
+
+const COLUNAS_JOBS: [Coluna; 6] = [
+    Coluna::dir("#", 50.0),
+    Coluna::esq("Tipo", 120.0),
+    Coluna::esq("Origem", 100.0),
+    Coluna::esq("Estado", 110.0),
+    Coluna::esq("Progresso", 320.0),
+    Coluna::esq("", 90.0).sem_ordem(),
+];
+
 const COLUNAS_EXECUCOES: [Coluna; 11] = [
     Coluna::dir("#", 45.0),
     Coluna::esq("Modo", 55.0),
@@ -121,7 +141,7 @@ const COLUNAS_EXECUCOES: [Coluna; 11] = [
     Coluna::dir("Bytes", 90.0),
     Coluna::dir("Erros", 55.0),
     Coluna::esq("Raízes", 260.0),
-    Coluna::esq("", 150.0),
+    Coluna::esq("", 150.0).sem_ordem(),
 ];
 
 fn retomavel(estado: &str) -> bool {
@@ -168,6 +188,21 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                 &COLUNAS_EXECUCOES,
                 execs.len(),
                 altura,
+                |c, i| {
+                    let e = &execs[i];
+                    match c {
+                        0 => Chave::num(e.id),
+                        1 => Chave::texto(&e.modo),
+                        2 => Chave::texto(&format!("{} / {}", e.estado, e.fase)),
+                        3 => Chave::num(e.iniciada_em),
+                        4 => Chave::opt_num(e.encerrada_em),
+                        5 => Chave::num(e.pastas),
+                        6 => Chave::num(e.arquivos),
+                        7 => Chave::num(e.bytes_logicos),
+                        8 => Chave::num(e.erros),
+                        _ => Chave::texto(&e.raizes.join(", ")),
+                    }
+                },
                 |l, i| {
                     let e = &execs[i];
                     l.texto(e.id.to_string());
@@ -538,43 +573,53 @@ fn painel_hash(ui: &mut egui::Ui, h: &PainelHash) {
     }
     ui.add_space(4.0);
     ui.strong("Por disco físico");
-    egui::Grid::new("progresso-discos")
-        .num_columns(8)
-        .striped(true)
-        .show(ui, |ui| {
-            for c in [
-                "Disco", "Volumes", "Threads", "Arquivos", "%", "MB/s", "Estado", "Restante",
-            ] {
-                ui.strong(c);
+    let altura = (h.discos.len() as f32 * 26.0 + 40.0).min(260.0);
+    tabela(
+        ui,
+        "progresso-discos",
+        &COLUNAS_DISCOS,
+        h.discos.len(),
+        altura,
+        |c, i| {
+            let d = &h.discos[i];
+            match c {
+                0 => Chave::texto(&d.nome),
+                1 => Chave::opt_num(d.volumes.iter().min().copied()),
+                2 => Chave::num(d.leitores_ativos),
+                3 => Chave::num(d.feitos),
+                4 => Chave::opt_real(d.pct),
+                5 => Chave::real(d.bytes_por_seg),
+                6 => Chave::texto(d.estado.rotulo()),
+                _ => Chave::opt_real(d.eta_s.map(|s| s as f64)),
             }
-            ui.end_row();
-            for d in &h.discos {
-                ui.label(&d.nome);
-                ui.label(
-                    d.volumes
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                ui.label(format!("{}/{}", d.leitores_ativos, d.threads));
-                ui.label(format!(
-                    "{} / {}",
-                    inteiro_pt_br(d.feitos),
-                    inteiro_pt_br(d.total)
-                ));
-                ui.label(painel::pct_texto(d.pct));
-                ui.label(format!("{:.1}", d.bytes_por_seg / (1024.0 * 1024.0)).replace('.', ","));
-                ui.label(d.estado.rotulo());
-                ui.label(match d.estado {
-                    EstadoDisco::Concluido => "—".to_string(),
-                    _ => d
-                        .eta_s
-                        .map_or_else(|| "estimando…".to_string(), painel::duracao_curta),
-                });
-                ui.end_row();
-            }
-        });
+        },
+        |l, i| {
+            let d = &h.discos[i];
+            l.texto(d.nome.clone());
+            l.texto(
+                d.volumes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            l.texto(format!("{}/{}", d.leitores_ativos, d.threads));
+            l.texto(format!(
+                "{} / {}",
+                inteiro_pt_br(d.feitos),
+                inteiro_pt_br(d.total)
+            ));
+            l.texto(painel::pct_texto(d.pct));
+            l.texto(format!("{:.1}", d.bytes_por_seg / (1024.0 * 1024.0)).replace('.', ","));
+            l.texto(d.estado.rotulo());
+            l.texto(match d.estado {
+                EstadoDisco::Concluido => "—".to_string(),
+                _ => d
+                    .eta_s
+                    .map_or_else(|| "estimando…".to_string(), painel::duracao_curta),
+            });
+        },
+    );
     // Arquivos grandes em leitura: o contador de arquivos só anda quando um termina.
     for d in &h.discos {
         for l in &d.lendo {
@@ -597,16 +642,30 @@ fn trabalhos_do_agente(ui: &mut egui::Ui, app: &AppDag) {
     }
     ui.add_space(4.0);
     ui.strong("Trabalhos do agente");
-    egui::Grid::new("trabalhos-do-agente")
-        .num_columns(6)
-        .striped(true)
-        .show(ui, |ui| {
-            for j in jobs {
-                ui.label(format!("#{}", j.id));
-                ui.label(j.tipo.rotulo());
-                ui.label(j.origem.rotulo());
-                ui.label(j.estado.rotulo());
-                ui.weak(j.resumo_progresso());
+    tabela(
+        ui,
+        "trabalhos-do-agente",
+        &COLUNAS_JOBS,
+        jobs.len(),
+        (jobs.len() as f32 * 26.0 + 40.0).min(220.0),
+        |c, i| {
+            let j = jobs[i];
+            match c {
+                0 => Chave::num(j.id),
+                1 => Chave::texto(j.tipo.rotulo()),
+                2 => Chave::texto(j.origem.rotulo()),
+                3 => Chave::texto(j.estado.rotulo()),
+                _ => Chave::texto(&j.resumo_progresso()),
+            }
+        },
+        |l, i| {
+            let j = jobs[i];
+            l.texto(format!("#{}", j.id));
+            l.texto(j.tipo.rotulo());
+            l.texto(j.origem.rotulo());
+            l.texto(j.estado.rotulo());
+            l.texto(j.resumo_progresso());
+            l.ui(|ui| {
                 if j.estado == dag_core::EstadoJob::Enfileirado
                     && ui
                         .small_button("Cancelar")
@@ -615,7 +674,7 @@ fn trabalhos_do_agente(ui: &mut egui::Ui, app: &AppDag) {
                 {
                     app.worker.cancelar_job(j.id);
                 }
-                ui.end_row();
-            }
-        });
+            });
+        },
+    );
 }

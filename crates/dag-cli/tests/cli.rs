@@ -53,6 +53,8 @@ fn help_lista_todos_os_subcomandos() {
         "duplicados",
         "monitorar",
         "eventos",
+        "erros",
+        "excluir",
         "marcar",
         "desmarcar",
         "prioridade",
@@ -595,4 +597,76 @@ fn desktop_instalar_e_remover_com_home_falso() {
     assert!(rodar("remover").status.success());
     assert!(!menu.exists());
     assert!(!home.join("Desktop/dag-app.desktop").exists());
+}
+
+#[test]
+fn erros_regras_aceitar_remover_e_excluir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = arvore(tmp.path());
+    let cat = tmp.path().join("c.sqlite");
+    let cat = cat.to_str().unwrap();
+    let r = raiz.to_str().unwrap();
+
+    assert!(
+        dag(&["--catalogo", cat, "scan", "--full", r])
+            .status
+            .success()
+    );
+
+    // Regras embutidas visíveis, sem nada do usuário.
+    let o = dag(&["--catalogo", cat, "erros", "regras"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(out.contains("volateis") && out.contains("reteste") && out.contains("symlink_ntfs"));
+    assert!(out.contains("nenhuma"), "{out}");
+
+    // Aceitar, listar em JSON e remover.
+    let o = dag(&[
+        "--catalogo",
+        cat,
+        "--json",
+        "erros",
+        "aceitar",
+        "/mnt/p2/Dev",
+        "--codigo",
+        "hash_permissao",
+        "--motivo",
+        "SQL Server",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = json(&o);
+    assert_eq!(v["resposta"], "erros_regras");
+    assert_eq!(v["aceitas"][0]["padrao"], "/mnt/p2/Dev");
+    assert_eq!(v["aceitas"][0]["codigo"], "hash_permissao");
+    let id = v["aceitas"][0]["id"].as_i64().unwrap().to_string();
+    let o = dag(&["--catalogo", cat, "--json", "erros", "remover", &id]);
+    assert_eq!(json(&o)["aceitas"].as_array().unwrap().len(), 0);
+    let o = dag(&["--catalogo", cat, "erros", "remover", "999"]);
+    assert_eq!(o.status.code(), Some(1));
+
+    // Exclusão: a pasta `sub` não é varrida.
+    let sub = raiz.join("sub");
+    let o = dag(&[
+        "--catalogo",
+        cat,
+        "--json",
+        "excluir",
+        sub.to_str().unwrap(),
+        "--motivo",
+        "teste",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(json(&o)["exclusoes"][0]["motivo"], "teste");
+    let o = dag(&["--catalogo", cat, "--json", "scan", "--full", r]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = json(&o);
+    assert_eq!(v["desfecho"], "concluida");
+    assert_eq!(v["arquivos"], 2, "a.txt e b.bin ficaram de fora");
+
+    // Sem erros: a saída humana diz isso; a exclusão aparece como informativo.
+    let o = dag(&["--catalogo", cat, "erros", "--agrupar", "pasta"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(out.contains("0 erro(s) real(is)"), "{out}");
+    assert!(out.contains("excluido"), "{out}");
 }

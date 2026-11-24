@@ -400,6 +400,64 @@ pub fn todas() -> Vec<Ferramenta> {
         objeto(opcoes_hash(), &[]),
     ));
     v.push(f(
+        "erros_da_varredura",
+        "erros_da_varredura",
+        &format!("Erros de uma varredura (padrão: a última terminada), classificados em esperado (benigno conhecido: arquivo vivo que mudou ou sumiu, symlink de NTFS, limites), aceito (casa uma regra sua), aviso (p. ex. permissão negada) e erro real. Devolve totais, grupos por código (com dica), pastas com mais problemas e amostras. {SEGURO}"),
+        objeto(
+            json!({
+                "execucao": {"type": "integer", "description": "Id da execução (padrão: a última terminada)"},
+                "agrupar": {"type": "string", "enum": ["codigo", "pasta"], "description": "Visão principal (as duas vêm na resposta)"},
+                "codigo": {"type": "string", "description": "Só este código de erro"},
+                "pasta": {"type": "string", "description": "Só este prefixo de pasta"},
+                "amostras": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Amostras por grupo (padrão 3)"}
+            }),
+            &[],
+        ),
+    ));
+    v.push(f(
+        "erros_regras",
+        "erros_regras",
+        "Regras de classificação: embutidas (esperado), regras de erros aceitos do usuário e exclusões. Somente leitura.",
+        objeto(json!({}), &[]),
+    ));
+    v.push(f(
+        "erros_aceitar",
+        "erros_aceitar",
+        "Aceita um tipo de erro numa pasta: o que casar `padrao` (glob de caminho; `~`, `*`, `**`, `?`; uma pasta vale para tudo dentro dela) e `codigo` (ou qualquer, `*`) passa a contar como aceito. Só muda o Catálogo; devolve as regras.",
+        objeto(
+            json!({
+                "padrao": {"type": "string", "description": "Glob de caminho, p. ex. `/mnt/p2/Dev` ou `~/.cache/**`"},
+                "codigo": {"type": "string", "description": "Código de erro (p. ex. `hash_permissao`); omitido = qualquer"},
+                "motivo": {"type": "string", "description": "Por que é aceitável"}
+            }),
+            &["padrao"],
+        ),
+    ));
+    v.push(f(
+        "erros_remover",
+        "erros_remover",
+        "Remove uma regra de erros aceitos (id em `erros_regras`). Só muda o Catálogo.",
+        objeto(json!({"id": {"type": "integer"}}), &["id"]),
+    ));
+    v.push(f(
+        "excluir",
+        "excluir",
+        "Exclui do escopo das próximas varreduras o que casar o glob (p. ex. `~/.cache`): não é varrido nem hasheado. Só muda o Catálogo; devolve as regras e exclusões.",
+        objeto(
+            json!({
+                "padrao": {"type": "string", "description": "Glob de caminho"},
+                "motivo": {"type": "string", "description": "Justificativa registrada"}
+            }),
+            &["padrao"],
+        ),
+    ));
+    v.push(f(
+        "exclusao_remover",
+        "exclusao_remover",
+        "Remove uma exclusão (id em `erros_regras`). Só muda o Catálogo.",
+        objeto(json!({"id": {"type": "integer"}}), &["id"]),
+    ));
+    v.push(f(
         "eventos",
         "eventos",
         "Últimos eventos persistidos (criado, alterado, removido, renomeado, lacunas...).",

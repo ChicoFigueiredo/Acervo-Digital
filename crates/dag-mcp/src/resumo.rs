@@ -108,6 +108,27 @@ pub fn resumir(r: &Resposta) -> String {
             }
         }
         Resposta::Eventos { eventos } => format!("{} evento(s).", eventos.len()),
+        Resposta::ErrosDaVarredura { resumo: r } => format!(
+            "Varredura {} ({}): {} problema(s): {} erro(s) real(is), {} aviso(s), {} esperado(s), {} aceito(s), {} informativo(s).",
+            r.execucao,
+            r.estado,
+            r.total,
+            r.reais,
+            r.avisos,
+            r.esperados,
+            r.aceitos,
+            r.informativos
+        ),
+        Resposta::ErrosRegras {
+            embutidas,
+            aceitas,
+            exclusoes,
+        } => format!(
+            "{} regra(s) embutida(s), {} regra(s) de erros aceitos, {} exclusão(ões).",
+            embutidas.len(),
+            aceitas.len(),
+            exclusoes.len()
+        ),
         Resposta::SaudeMonitor { .. } => "Saúde do monitor consultada.".into(),
         Resposta::MonitorEncerrado { .. } => "Monitoramento encerrado.".into(),
         Resposta::ScanConcluido {

@@ -154,6 +154,9 @@ fn estado(e: &StatusExecucao) -> String {
         EstadoExecucao::Concluida if e.estado_detalhe == "concluida_com_erros" => {
             "concluída c/ erros".into()
         }
+        EstadoExecucao::Concluida if e.estado_detalhe == "concluida_com_avisos" => {
+            "concluída c/ avisos".into()
+        }
         EstadoExecucao::Concluida => "concluída".into(),
         EstadoExecucao::EmAndamento => "em andamento".into(),
         EstadoExecucao::Pausada if e.estado_detalhe == "interrompida" => "interrompida".into(),
@@ -162,6 +165,173 @@ fn estado(e: &StatusExecucao) -> String {
         EstadoExecucao::Falhou => "falhou".into(),
         EstadoExecucao::Pendente => "pendente".into(),
     }
+}
+
+/// Nome legível do estado gravado de uma execução.
+#[must_use]
+pub fn rotulo_estado(detalhe: &str) -> &'static str {
+    match detalhe {
+        "concluida" => "concluída",
+        "concluida_com_avisos" => "concluída com avisos",
+        "concluida_com_erros" => "concluída com erros",
+        "cancelada" => "cancelada",
+        "falhou" => "falhou",
+        "interrompida" => "interrompida",
+        "pausada" => "pausada",
+        "em_andamento" => "em andamento",
+        _ => "?",
+    }
+}
+
+/// `dag erros`: totais por desfecho, grupos por código, pastas e amostras.
+pub fn erros_da_varredura(r: &dag_core::erros::ResumoErros) -> String {
+    use dag_core::erros::AgruparErros;
+    let mut s = format!(
+        "Varredura {} ({}): {} problema(s): {} erro(s) real(is), {} aviso(s), {} esperado(s), {} aceito(s), {} informativo(s).\n",
+        r.execucao,
+        rotulo_estado(&r.estado),
+        inteiro_pt_br(r.total),
+        inteiro_pt_br(r.reais),
+        inteiro_pt_br(r.avisos),
+        inteiro_pt_br(r.esperados),
+        inteiro_pt_br(r.aceitos),
+        inteiro_pt_br(r.informativos),
+    );
+    if r.total == 0 {
+        s.push_str("Nenhum problema registrado nesta varredura.\n");
+        return s;
+    }
+    let por_codigo = |s: &mut String| {
+        let linhas: Vec<Vec<String>> = r
+            .por_codigo
+            .iter()
+            .map(|g| {
+                vec![
+                    g.rotulo.clone(),
+                    g.fase.clone(),
+                    g.codigo.clone(),
+                    inteiro_pt_br(g.total),
+                ]
+            })
+            .collect();
+        s.push_str("\nPor código:\n");
+        s.push_str(&tabela(
+            &["DESFECHO", "FASE", "CÓDIGO", "QTD"],
+            &[false, false, false, true],
+            &linhas,
+        ));
+        for g in r.por_codigo.iter().filter(|g| g.dica.is_some()) {
+            s.push_str(&format!(
+                "  dica ({}): {}\n",
+                g.codigo,
+                g.dica.as_deref().unwrap_or_default()
+            ));
+        }
+    };
+    let por_pasta = |s: &mut String| {
+        let linhas: Vec<Vec<String>> = r
+            .por_pasta
+            .iter()
+            .map(|p| {
+                vec![
+                    inteiro_pt_br(p.total),
+                    p.pasta.clone(),
+                    p.codigos
+                        .iter()
+                        .map(|(c, n)| format!("{c}: {}", inteiro_pt_br(*n)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ]
+            })
+            .collect();
+        s.push_str("\nPastas com mais problemas:\n");
+        s.push_str(&tabela(
+            &["QTD", "PASTA", "CÓDIGOS"],
+            &[true, false, false],
+            &linhas,
+        ));
+    };
+    match r.agrupar {
+        AgruparErros::Codigo => {
+            por_codigo(&mut s);
+            por_pasta(&mut s);
+        }
+        AgruparErros::Pasta => {
+            por_pasta(&mut s);
+            por_codigo(&mut s);
+        }
+    }
+    s.push_str("\nAmostras:\n");
+    for a in &r.amostras {
+        s.push_str(&format!(
+            "  [{}] {} {}{}\n",
+            a.rotulo,
+            a.codigo,
+            a.caminho.as_deref().unwrap_or("(sem caminho)"),
+            a.motivo
+                .as_deref()
+                .map_or(String::new(), |m| format!(" — {m}")),
+        ));
+    }
+    s.push_str(
+        "\nAceitar um tipo nesta pasta: `dag erros aceitar '<pasta>/**' --codigo <código>`; \
+         não varrer: `dag excluir '<glob>'`; regras: `dag erros regras`.\n",
+    );
+    s
+}
+
+/// `dag erros regras`: embutidas, aceitas e exclusões.
+pub fn regras_de_erros(
+    embutidas: &[dag_core::erros::RegraEmbutidaInfo],
+    aceitas: &[dag_core::erros::RegraAceita],
+    exclusoes: &[dag_core::erros::ExclusaoUsuario],
+) -> String {
+    let mut s = String::from("Regras embutidas (esperado):\n");
+    for r in embutidas {
+        s.push_str(&format!("  {} — {}\n", r.id, r.descricao));
+        if !r.codigos.is_empty() {
+            s.push_str(&format!("    códigos: {}\n", r.codigos.join(", ")));
+        }
+        if !r.padroes.is_empty() {
+            s.push_str(&format!("    caminhos: {}\n", r.padroes.join("  ")));
+        }
+    }
+    s.push_str("\nErros aceitos (suas regras):\n");
+    if aceitas.is_empty() {
+        s.push_str("  nenhuma (`dag erros aceitar <glob> [--codigo X] [--motivo ...]`)\n");
+    } else {
+        let linhas: Vec<Vec<String>> = aceitas
+            .iter()
+            .map(|a| {
+                vec![
+                    a.id.to_string(),
+                    a.padrao.clone(),
+                    a.codigo.clone(),
+                    a.motivo.clone(),
+                ]
+            })
+            .collect();
+        s.push_str(&tabela(
+            &["ID", "PADRÃO", "CÓDIGO", "MOTIVO"],
+            &[true, false, false, false],
+            &linhas,
+        ));
+    }
+    s.push_str("\nExclusões (não varridas):\n");
+    if exclusoes.is_empty() {
+        s.push_str("  nenhuma (`dag excluir <glob>`)\n");
+    } else {
+        let linhas: Vec<Vec<String>> = exclusoes
+            .iter()
+            .map(|e| vec![e.id.to_string(), e.padrao.clone(), e.motivo.clone()])
+            .collect();
+        s.push_str(&tabela(
+            &["ID", "PADRÃO", "MOTIVO"],
+            &[true, false, false],
+            &linhas,
+        ));
+    }
+    s
 }
 
 pub fn status(execs: &[StatusExecucao], cat: &dag_core::ResumoCatalogo) -> String {
@@ -344,6 +514,7 @@ fn scan(
     let seg = ms as f64 / 1000.0;
     let rotulo = match desfecho {
         "concluida" => "concluída",
+        "concluida_com_avisos" => "concluída com avisos",
         "concluida_com_erros" => "concluída com erros",
         _ => "cancelada",
     };
@@ -1080,6 +1251,7 @@ pub fn verificacao(r: &ResumoVerificacao) -> String {
         "Verificação de Integridade {}: {} arquivo(s) conferido(s) ({}), {} divergente(s), {} alterado(s) desde o hash (pulados), {} erro(s).\n",
         match r.desfecho.as_str() {
             "concluida" => "concluída",
+            "concluida_com_avisos" => "concluída com avisos",
             "concluida_com_erros" => "concluída com erros",
             _ => "cancelada",
         },
@@ -1360,6 +1532,12 @@ pub fn imprimir(r: &Resposta, todos: bool) {
         Resposta::SaudeMonitor { saude } => print!("{}", saude_monitor(saude)),
         Resposta::Jobs { jobs: j } => print!("{}", jobs(j)),
         Resposta::Eventos { eventos: e } => print!("{}", eventos(e)),
+        Resposta::ErrosDaVarredura { resumo } => print!("{}", erros_da_varredura(resumo)),
+        Resposta::ErrosRegras {
+            embutidas,
+            aceitas,
+            exclusoes,
+        } => print!("{}", regras_de_erros(embutidas, aceitas, exclusoes)),
         Resposta::MonitorEncerrado { resumo } => print!("{}", monitor_encerrado(resumo)),
         Resposta::ScanConcluido {
             execucao,
@@ -1686,5 +1864,125 @@ mod testes_painel {
         };
         let t = status(&[], &cat);
         assert!(t.contains("200 arquivos (50 com hash, 25,0%)"), "{t}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod testes_erros {
+    use super::*;
+    use dag_core::erros::{
+        AgruparErros, AmostraErro, ExclusaoUsuario, GrupoErros, GrupoPasta, REGRAS_EMBUTIDAS,
+        RegraAceita, ResumoErros,
+    };
+
+    fn resumo(agrupar: AgruparErros) -> ResumoErros {
+        ResumoErros {
+            execucao: 7,
+            agrupar,
+            estado: "concluida_com_avisos".into(),
+            total: 5_391,
+            reais: 0,
+            avisos: 5_390,
+            esperados: 1,
+            aceitos: 0,
+            informativos: 0,
+            por_codigo: vec![
+                GrupoErros {
+                    fase: "hash".into(),
+                    codigo: "hash_permissao".into(),
+                    severidade: "aviso".into(),
+                    rotulo: "aviso".into(),
+                    total: 5_390,
+                    dica: Some("use `dag scan --elevar` ou aceite esta pasta".into()),
+                },
+                GrupoErros {
+                    fase: "hash".into(),
+                    codigo: "hash_ausente".into(),
+                    severidade: "aviso".into(),
+                    rotulo: "esperado".into(),
+                    total: 1,
+                    dica: None,
+                },
+            ],
+            por_pasta: vec![GrupoPasta {
+                pasta: "/mnt/p2/Dev".into(),
+                total: 5_000,
+                codigos: vec![("hash_permissao".into(), 5_000)],
+            }],
+            amostras: vec![AmostraErro {
+                fase: "hash".into(),
+                codigo: "hash_permissao".into(),
+                rotulo: "aviso".into(),
+                caminho: Some("/etc/shadow".into()),
+                motivo: Some("Permission denied (os error 13)".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn erros_por_codigo_traz_totais_dicas_pastas_e_amostras() {
+        let s = erros_da_varredura(&resumo(AgruparErros::Codigo));
+        assert!(
+            s.contains("Varredura 7 (concluída com avisos): 5.391 problema(s): 0 erro(s) real(is), 5.390 aviso(s), 1 esperado(s)"),
+            "{s}"
+        );
+        assert!(s.contains("hash_permissao"));
+        assert!(s.contains("dica (hash_permissao): use `dag scan --elevar`"));
+        assert!(s.contains("/mnt/p2/Dev"));
+        assert!(s.contains("[aviso] hash_permissao /etc/shadow"));
+        assert!(s.contains("dag erros aceitar"));
+        // Por código vem antes das pastas.
+        assert!(s.find("Por código").unwrap() < s.find("Pastas com mais problemas").unwrap());
+    }
+
+    #[test]
+    fn agrupar_por_pasta_inverte_a_ordem() {
+        let s = erros_da_varredura(&resumo(AgruparErros::Pasta));
+        assert!(s.find("Pastas com mais problemas").unwrap() < s.find("Por código").unwrap());
+    }
+
+    #[test]
+    fn sem_problemas_diz_isso() {
+        let mut r = resumo(AgruparErros::Codigo);
+        r.total = 0;
+        r.por_codigo.clear();
+        r.por_pasta.clear();
+        r.amostras.clear();
+        assert!(erros_da_varredura(&r).contains("Nenhum problema registrado"));
+    }
+
+    #[test]
+    fn regras_mostram_embutidas_aceitas_e_exclusoes() {
+        let embutidas: Vec<_> = REGRAS_EMBUTIDAS.iter().map(|r| r.info()).collect();
+        let aceitas = vec![RegraAceita {
+            id: 3,
+            padrao: "/mnt/p2/Dev".into(),
+            codigo: "hash_permissao".into(),
+            motivo: "SQL Server".into(),
+            criada_em: 1,
+        }];
+        let exclusoes = vec![ExclusaoUsuario {
+            id: 1,
+            padrao: "~/.cache".into(),
+            motivo: "cache".into(),
+        }];
+        let s = regras_de_erros(&embutidas, &aceitas, &exclusoes);
+        assert!(s.contains("volateis"));
+        assert!(s.contains("**/.cache/**"));
+        assert!(s.contains("reteste"));
+        assert!(s.contains("/mnt/p2/Dev"));
+        assert!(s.contains("SQL Server"));
+        assert!(s.contains("~/.cache"));
+    }
+
+    #[test]
+    fn rotulos_dos_estados_novos() {
+        assert_eq!(
+            rotulo_estado("concluida_com_avisos"),
+            "concluída com avisos"
+        );
+        assert_eq!(rotulo_estado("concluida_com_erros"), "concluída com erros");
+        assert_eq!(rotulo_estado("concluida"), "concluída");
     }
 }

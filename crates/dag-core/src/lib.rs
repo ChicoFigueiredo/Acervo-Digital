@@ -11,6 +11,7 @@ pub mod config_hash;
 pub mod conteineres;
 pub mod descoberta;
 pub mod duplicados;
+pub mod erros;
 pub mod formato;
 pub mod hash;
 pub mod ids;

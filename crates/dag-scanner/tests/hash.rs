@@ -322,7 +322,9 @@ fn alterado_durante_a_leitura_nao_e_gravado() {
         })
         .executar(&mut cat)
         .unwrap();
-    assert_eq!(r.desfecho, Desfecho::ConcluidaComErros);
+    // Os dois continuam mudando a cada leitura (inclusive no reteste do fim da etapa): esperados,
+    // não erro. Nenhum erro real, e o hash não é gravado.
+    assert_eq!(r.desfecho, Desfecho::ConcluidaComAvisos);
     assert_eq!((r.hasheados, r.erros), (1, 2));
     let hs = hashes_por_caminho(&cat);
     assert_eq!(hs.len(), 1);
@@ -330,20 +332,30 @@ fn alterado_durante_a_leitura_nao_e_gravado() {
     assert_eq!(
         n(
             &cat,
-            "SELECT COUNT(*) FROM scan_errors WHERE phase = 'hash' AND error_code = 'hash_alterado_durante_leitura' AND reason LIKE '%alterado durante leitura%'"
+            "SELECT COUNT(*) FROM scan_errors WHERE phase = 'hash' AND error_code = 'hash_alterado_durante_leitura'
+             AND classe = 'esperado' AND regra = 'embutida:reteste'"
         ),
         2
     );
+    let estado: String = cat
+        .armazem()
+        .conexao()
+        .query_row("SELECT status FROM scan_runs WHERE id = ?1", [run], |l| {
+            l.get(0)
+        })
+        .unwrap();
+    assert_eq!(estado, "concluida_com_avisos");
     // Uma nova varredura + etapa grava os dois arquivos (agora estáveis).
     let run2 = varrer(&raiz, &mut cat);
     let r2 = EtapaHash::nova(ExecucaoId(run2))
         .executar(&mut cat)
         .unwrap();
     assert_eq!((r2.hasheados, r2.erros, r2.reaproveitados), (2, 0, 1));
+    assert_eq!(r2.desfecho, Desfecho::Concluida);
 }
 
 #[test]
-fn arquivo_que_sumiu_vira_erro_e_o_resto_continua() {
+fn arquivo_que_sumiu_fica_esperado_e_o_resto_continua() {
     let tmp = tempfile::tempdir().unwrap();
     let raiz = tmp.path().join("acervo");
     for i in 0..5 {
@@ -354,11 +366,12 @@ fn arquivo_que_sumiu_vira_erro_e_o_resto_continua() {
     fs::remove_file(raiz.join("f2")).unwrap();
     let r = EtapaHash::nova(ExecucaoId(run)).executar(&mut cat).unwrap();
     assert_eq!((r.hasheados, r.erros), (4, 1));
-    assert_eq!(r.desfecho, Desfecho::ConcluidaComErros);
+    // Sumido também no reteste: esperado (arquivo temporário), não erro real.
+    assert_eq!(r.desfecho, Desfecho::ConcluidaComAvisos);
     assert_eq!(
         n(
             &cat,
-            "SELECT COUNT(*) FROM scan_errors WHERE error_code = 'hash_ausente'"
+            "SELECT COUNT(*) FROM scan_errors WHERE error_code = 'hash_ausente' AND classe = 'esperado'"
         ),
         1
     );

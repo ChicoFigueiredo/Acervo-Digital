@@ -307,6 +307,47 @@ pub enum Comando {
         /// Último nome da página anterior.
         cursor: Option<String>,
     },
+    /// Erros da varredura (padrão: a última execução terminada): totais por desfecho
+    /// (esperado, aceito, aviso, erro), grupos por código e por pasta, e amostras.
+    /// `codigo` e `pasta` (prefixo) filtram o que entra no resumo.
+    ErrosDaVarredura {
+        #[serde(default)]
+        execucao: Option<ExecucaoId>,
+        #[serde(default)]
+        agrupar: Option<crate::erros::AgruparErros>,
+        #[serde(default)]
+        codigo: Option<String>,
+        #[serde(default)]
+        pasta: Option<String>,
+        #[serde(default)]
+        amostras: Option<u32>,
+    },
+    /// Regras embutidas, regras "Erros aceitos" do usuário e exclusões.
+    ErrosRegras,
+    /// Cria uma regra "Erros aceitos": `padrao` é um glob de caminho (ou pasta), `codigo` um
+    /// código de erro (`*` ou ausente = qualquer). Vale também para execuções já terminadas
+    /// (na exibição); não altera o estado gravado delas.
+    ErrosAceitar {
+        padrao: String,
+        #[serde(default)]
+        codigo: Option<String>,
+        #[serde(default)]
+        motivo: Option<String>,
+    },
+    /// Remove uma regra "Erros aceitos".
+    ErrosRemover {
+        id: i64,
+    },
+    /// Cria uma exclusão: o que casa o glob não é varrido (só vale nas próximas varreduras).
+    Excluir {
+        padrao: String,
+        #[serde(default)]
+        motivo: Option<String>,
+    },
+    /// Remove uma exclusão.
+    ExclusaoRemover {
+        id: i64,
+    },
     /// Filhos diretos de `pasta` (ou as Raízes catalogadas, se `None`), do maior para o menor.
     /// `cursor` é o `proximo_cursor` opaco da página anterior.
     Explorar {
@@ -501,7 +542,7 @@ pub enum Resposta {
     /// Varredura síncrona terminada (ou cancelada: retomável).
     ScanConcluido {
         execucao: ExecucaoId,
-        /// `concluida`, `concluida_com_erros` ou `cancelada`.
+        /// `concluida`, `concluida_com_avisos`, `concluida_com_erros` ou `cancelada`.
         desfecho: String,
         pastas: u64,
         arquivos: u64,
@@ -603,6 +644,16 @@ pub enum Resposta {
         ultimos_descartados: Vec<crate::ItemDescartado>,
         proximo_cursor: Option<String>,
     },
+    /// Erros de uma varredura (ver `Comando::ErrosDaVarredura`).
+    ErrosDaVarredura {
+        resumo: crate::erros::ResumoErros,
+    },
+    /// Regras de classificação e exclusões.
+    ErrosRegras {
+        embutidas: Vec<crate::erros::RegraEmbutidaInfo>,
+        aceitas: Vec<crate::erros::RegraAceita>,
+        exclusoes: Vec<crate::erros::ExclusaoUsuario>,
+    },
     /// Falha; `codigo` é estável para máquinas, `mensagem` é para humanos.
     Erro {
         codigo: String,
@@ -685,6 +736,18 @@ mod tests {
                 saida: Some("/tmp/r.csv".into()),
             },
             Comando::Pausar { execucao: None },
+            Comando::ErrosDaVarredura {
+                execucao: Some(ExecucaoId(7)),
+                agrupar: Some(crate::erros::AgruparErros::Pasta),
+                codigo: None,
+                pasta: Some("/a".into()),
+                amostras: Some(3),
+            },
+            Comando::ErrosAceitar {
+                padrao: "~/.cache".into(),
+                codigo: Some("hash_ausente".into()),
+                motivo: None,
+            },
             Comando::MarcarBackup {
                 alvo: Alvo::Caminho("/a".into()),
             },

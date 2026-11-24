@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+mod erros;
+
 use super::tabela::{Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga};
 use crate::app::AppDag;
@@ -93,6 +95,8 @@ pub struct Estado {
     pub raizes: Vec<String>,
     pub campo: String,
     pub execucoes: Carga<Vec<LinhaExecucao>>,
+    /// Seção "Erros da varredura" (execução aberta, resumo e regras).
+    pub erros: erros::EstadoErros,
     vista: u64,
 }
 
@@ -117,7 +121,7 @@ const COLUNAS_EXECUCOES: [Coluna; 11] = [
     Coluna::dir("Bytes", 90.0),
     Coluna::dir("Erros", 55.0),
     Coluna::esq("Raízes", 260.0),
-    Coluna::esq("", 90.0),
+    Coluna::esq("", 150.0),
 ];
 
 fn retomavel(estado: &str) -> bool {
@@ -148,7 +152,12 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     ui.strong("Últimas varreduras");
     estado_da_carga(ui, &app.varredura.execucoes);
     let pode = app.motivo_sem_escrita();
-    let altura = super::altura_livre(ui).max(240.0);
+    let erros_abertos = app.varredura.erros.execucao.is_some();
+    let altura = if erros_abertos {
+        170.0
+    } else {
+        super::altura_livre(ui).max(240.0)
+    };
     if let Some(execs) = app.varredura.execucoes.dado.as_deref() {
         if execs.is_empty() {
             ui.weak("Nenhuma varredura registrada ainda.");
@@ -172,6 +181,13 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                     l.texto(inteiro_pt_br(e.erros));
                     l.texto(e.raizes.join(", "));
                     l.ui(|ui| {
+                        if ui
+                            .small_button("Erros")
+                            .on_hover_text("Erros desta varredura, agrupados")
+                            .clicked()
+                        {
+                            agir = Acao::VerErros(e.id);
+                        }
                         if retomavel(&e.estado)
                             && ui
                                 .add_enabled(pode.is_none(), egui::Button::new("Retomar"))
@@ -189,15 +205,18 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
         Acao::Nada => {}
         Acao::Iniciar { sem_hash } => app.iniciar_full_scan(sem_hash),
         Acao::Retomar(id) => app.retomar_execucao(id),
+        Acao::VerErros(id) => app.varredura.erros.execucao = Some(id),
         Acao::AlternarPausa => app.alternar_pausa(),
         Acao::Cancelar => app.worker.cancelar(),
     }
+    erros::secao(ui, app);
 }
 
 enum Acao {
     Nada,
     Iniciar { sem_hash: bool },
     Retomar(i64),
+    VerErros(i64),
     AlternarPausa,
     Cancelar,
 }

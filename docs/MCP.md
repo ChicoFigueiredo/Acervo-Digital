@@ -56,6 +56,9 @@ Ferramenta `jobs`: lista todos os trabalhos do agente (qualquer origem, com prog
 | `verificar_integridade` | Verificação de Integridade | `raizes`, `threads_por_disco`, `max_discos` |
 | `config_hash_obter` | Paralelismo padrão do Hash Completo persistido (padrão 1 thread por disco, 16 discos) | — |
 | `config_hash_definir` | Grava o paralelismo padrão (vale na próxima execução ou retomada) | `threads_por_disco` (1..8), `max_discos` (1..16) |
+| `erros_da_varredura` | Erros da varredura classificados (esperado, aceito, aviso, erro real), por código e por pasta, com amostras | `execucao`, `agrupar`, `codigo`, `pasta`, `amostras` |
+| `erros_regras` / `erros_aceitar` / `erros_remover` | Regras embutidas, regras de erros aceitos do usuário (glob + código) | `padrao`, `codigo`, `motivo`, `id` |
+| `excluir` / `exclusao_remover` | Exclusões do escopo das próximas varreduras (glob) | `padrao`, `motivo`, `id` |
 | `eventos` / `saude_monitor` | Eventos persistidos e saúde do monitor | `limite` |
 | `servico` | `instalar`, `remover`, `iniciar`, `parar`, `autostart` | `acao`, `ativo` |
 | `backup_catalogo` | Backup consistente do Catálogo | `destino` |

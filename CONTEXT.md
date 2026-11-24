@@ -132,6 +132,20 @@ _Avoid_: notificações, alertas, popup
 Um item da Fila de Serviço, com tipo, objeto, motivo e estado (aberto, resolvido, dispensado). Na primeira versão os tipos são Pedido de Senha e Falha de Leitura.
 _Avoid_: tarefa, ticket
 
+### Erros da varredura
+
+**Erro Esperado**:
+Problema registrado numa varredura que o DAG reconhece como benigno por regra embutida: arquivo vivo (log, cache, `-wal`) que mudou ou sumiu durante o hash e continuou assim no reteste, symlink de NTFS de alvo ilegível, limite de Volume. Não torna a execução `concluida_com_erros`.
+_Avoid_: erro ignorado, falso positivo
+
+**Erro Aceito**:
+Problema que casa uma regra criada pelo usuário (glob de caminho, código de erro ou qualquer, motivo). Conta como aviso, nunca como erro real.
+_Avoid_: erro silenciado, exceção
+
+**Reteste**:
+Releitura única, no fim da etapa de Hash Completo, dos arquivos que mudaram ou sumiram durante a leitura. Estável: ganha hash e o problema some. Ainda mudando ou ausente: vira Erro Esperado.
+_Avoid_: segunda tentativa, rehash
+
 ## Relationships
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
@@ -148,6 +162,7 @@ _Avoid_: tarefa, ticket
 - Ao abrir, toda **Raiz** passa por um **Fast Scan** (a menos que o usuário escolha o contrário); só arquivos novos ou alterados recebem **Hash Completo**. Um **Full Scan** com hash de tudo só acontece por pedido explícito.
 - Um **Membro** pertence a um **Contêiner** e conta como cópia: entra em **Grupo de Duplicados**, evita o alerta de **Única Cópia** e dá **Cobertura** quando o **Contêiner** tem **Marcação de Backup** em outro **Dispositivo Físico**. Um **Membro** nunca soma espaço recuperável.
 - Um **Membro** não recebe marcação própria; marcações valem para o **Contêiner** inteiro.
+- Uma execução termina `concluida` (nenhum problema), `concluida_com_avisos` (só avisos, **Erros Esperados** ou **Erros Aceitos**) ou `concluida_com_erros` (algum erro real).
 - Um **Contêiner** cifrado é tentado primeiro com a **Senha do Contêiner** já guardada, depois com o **Cofre de Senhas**; só se tudo falhar vira **Pedido de Serviço** de senha, e os **Membros** ficam não lidos até a resposta.
 
 ## Flagged ambiguities

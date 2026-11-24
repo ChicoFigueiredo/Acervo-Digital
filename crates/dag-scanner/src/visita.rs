@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::mpsc::SyncSender;
 use std::time::UNIX_EPOCH;
 
+use dag_core::erros::{ALVO_ILEGIVEL_NTFS, SYMLINK_ALVO_ILEGIVEL};
 use dag_store::inventario::{Severidade, TipoEntrada};
 
 use crate::classificador::{Classificador, TipoDetectado};
@@ -105,6 +106,9 @@ impl Msg {
         }
     }
 }
+
+/// `EINVAL` do `readlink` em reparse points de NTFS.
+const EINVAL: i32 = 22;
 
 /// Mapeia um erro de E/S para (código estável, severidade).
 pub(crate) fn classificar_io(e: &io::Error) -> (&'static str, Severidade) {
@@ -288,6 +292,18 @@ pub(crate) fn visitar(job: &Job, ctx: &Contexto<'_>, saida: &SyncSender<Msg>) ->
                             match fs::read_link(OsStr::from_bytes(&entrada.caminho)) {
                                 Ok(alvo) => {
                                     entrada.alvo = Some(alvo.as_os_str().as_bytes().to_vec())
+                                }
+                                Err(e) if e.raw_os_error() == Some(EINVAL) => {
+                                    // Symlink/reparse point de NTFS (WSL, node_modules/.bin,
+                                    // venv/bin) que o Linux não decodifica: a entrada é um symlink
+                                    // com alvo ilegível, não um erro.
+                                    entrada.alvo = Some(ALVO_ILEGIVEL_NTFS.as_bytes().to_vec());
+                                    problemas.push(Problema {
+                                        caminho: entrada.caminho.clone(),
+                                        codigo: SYMLINK_ALVO_ILEGIVEL,
+                                        motivo: format!("{ALVO_ILEGIVEL_NTFS}: {e}"),
+                                        severidade: Severidade::Info,
+                                    });
                                 }
                                 Err(e) => {
                                     let (codigo, severidade) = classificar_io(&e);
@@ -477,9 +493,13 @@ pub(crate) fn ler_diretorio(
                 let mut entrada = entrada_de(caminho, off, &m);
                 match entrada.natureza {
                     Natureza::Outra(TipoEntrada::Symlink) => {
-                        entrada.alvo = fs::read_link(OsStr::from_bytes(&entrada.caminho))
-                            .ok()
-                            .map(|a| a.as_os_str().as_bytes().to_vec());
+                        entrada.alvo = match fs::read_link(OsStr::from_bytes(&entrada.caminho)) {
+                            Ok(a) => Some(a.as_os_str().as_bytes().to_vec()),
+                            Err(e) if e.raw_os_error() == Some(EINVAL) => {
+                                Some(ALVO_ILEGIVEL_NTFS.as_bytes().to_vec())
+                            }
+                            Err(_) => None,
+                        };
                     }
                     Natureza::Outra(TipoEntrada::Arquivo) => {
                         entrada.tipo = classificador.tipo_do_arquivo(entrada.nome());

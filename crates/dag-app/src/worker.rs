@@ -142,6 +142,10 @@ pub enum Evento {
     Monitor(SaudeMonitorInfo),
     /// Ponto de Confiança por Raiz.
     Confianca(Vec<StatusConfianca>),
+    /// Identificação do agente ao conectar (versão, commit, binário): a GUI compara com a sua.
+    Versao(Box<dag_agent::InfoServidor>),
+    /// O agente vai se reexecutar no lugar (binário atualizado ou pedido do usuário).
+    AgenteReiniciando { de: String, para: String },
 }
 
 enum Mensagem {
@@ -328,6 +332,14 @@ impl Worker {
 
     fn id_em_foco(&self) -> Option<u64> {
         self.job_em_foco().map(|j| j.id)
+    }
+
+    /// Pede ao agente em segundo plano que se reexecute no lugar (sem efeito no modo em
+    /// processo). A conexão cai e volta sozinha, já na versão nova.
+    pub fn reiniciar_agente(&self) {
+        if let Some(Alca::Remota { socket }) = self.alca() {
+            Alca::agir_remoto(&socket, Comando::ReiniciarAgente);
+        }
     }
 
     pub fn pausar(&self) {
@@ -562,8 +574,9 @@ impl Tradutor {
     fn traduzir(&mut self, ev: EventoObservado) -> Vec<Evento> {
         let mut out = Vec::new();
         match ev {
-            EventoObservado::Conectado(_) => {
+            EventoObservado::Conectado(info) => {
                 self.ja_conectou = true;
+                out.push(Evento::Versao(Box::new(info)));
                 out.push(Evento::Modo(ModoWorker::Servico));
             }
             EventoObservado::Desconectado { motivo } => {
@@ -672,6 +685,12 @@ impl Tradutor {
                 out.push(Evento::Confianca(confianca.clone()));
             }
             EventoAgente::Batida => {}
+            EventoAgente::AgenteReiniciando { de, para } => {
+                out.push(Evento::AgenteReiniciando {
+                    de: de.clone(),
+                    para: para.clone(),
+                });
+            }
         }
     }
 }

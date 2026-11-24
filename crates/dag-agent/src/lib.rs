@@ -28,6 +28,7 @@ mod registro;
 pub mod servico;
 pub mod servidor;
 mod trava;
+pub mod versao;
 
 pub use abertura::{PassadaAbertura, PoliticaAbertura, RelatorioAbertura, VerificarAoAbrir};
 pub use agente::{Agente, executar_comando, incremento_pendente, somente_leitura};
@@ -44,5 +45,6 @@ pub use exibir::ExibidorStderr;
 pub use lancar::{OpcoesLancamento, garantir_agente, localizar_dag, sem_agente_do_ambiente};
 pub use observador::{EventoObservado, Observador, OpcoesObservador};
 pub use protocolo::InfoServidor;
-pub use servidor::{ConfigServidor, Servidor, uid_autorizado};
+pub use servidor::{ConfigServidor, ReinicioPedido, Servidor, uid_autorizado};
 pub use trava::GuardaEscritor;
+pub use versao::{DetectorTroca, IdentidadeBinario, PoliticaAtualizacao, SituacaoVersao, comparar};

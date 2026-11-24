@@ -204,6 +204,11 @@ impl Registro {
         }
     }
 
+    /// Avisa os assinantes que o agente vai se reexecutar.
+    pub(crate) fn reiniciando(&self, de: String, para: String) {
+        travar(&self.interno).emitir(&EventoAgente::AgenteReiniciando { de, para });
+    }
+
     pub(crate) fn batida(&self) {
         travar(&self.interno).emitir(&EventoAgente::Batida);
     }

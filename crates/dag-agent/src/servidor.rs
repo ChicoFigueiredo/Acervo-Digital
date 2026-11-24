@@ -34,6 +34,10 @@ use crate::erro::ErroAgente;
 use crate::exibir::progresso_stderr;
 use crate::protocolo::{InfoServidor, Quadro, Requisicao, ler_quadro, linha};
 use crate::registro::Registro;
+use crate::versao::{
+    Acao, Assinatura, DetectorTroca, ESTABILIDADE_EXE, INTERVALO_VIGIA_EXE, IdentidadeBinario,
+    PoliticaAtualizacao, Troca, decidir, reexecutar_no_lugar, validar_executavel,
+};
 
 /// Intervalo entre novas tentativas de iniciar o monitor com a fila vazia.
 const REPETIR_MONITOR: Duration = Duration::from_secs(60);
@@ -63,6 +67,11 @@ pub struct ConfigServidor {
     /// Paralelismo do hash dado por flag (`dag agente --threads-por-disco/--max-discos`): vence
     /// o persistido e perde para o pedido.
     pub opcoes_hash: dag_core::OpcoesHash,
+    /// O que fazer quando o executável do agente é trocado (`--ao-atualizar`).
+    pub politica_atualizacao: PoliticaAtualizacao,
+    /// Vigia do próprio executável: `(intervalo entre leituras, tempo de estabilidade)`. `None`
+    /// desliga a vigia.
+    pub vigia_exe: Option<(Duration, Duration)>,
 }
 
 impl ConfigServidor {
@@ -76,8 +85,22 @@ impl ConfigServidor {
             uid_aceito: None,
             abertura: PoliticaAbertura::default(),
             opcoes_hash: dag_core::OpcoesHash::default(),
+            politica_atualizacao: PoliticaAtualizacao::default(),
+            vigia_exe: Some((INTERVALO_VIGIA_EXE, ESTABILIDADE_EXE)),
         }
     }
+}
+
+/// Pedido de reexecução do agente no lugar (binário trocado ou pedido do usuário). Quem hospeda
+/// o [`Servidor`] (`dag agente`) o consome com [`Servidor::reexecutar`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReinicioPedido {
+    /// Versão que roda agora.
+    pub de: String,
+    /// Versão do executável novo.
+    pub para: String,
+    /// Executável a iniciar (o caminho do início do processo).
+    pub caminho: PathBuf,
 }
 
 /// O uid do par é o permitido?
@@ -135,6 +158,13 @@ struct Compartilhado {
     /// O que o agente sabe do monitor agora (situação, motivo): a verdade viva que se sobrepõe ao
     /// que o Catálogo guardou do monitor (que não sabe de "aguardando abertura").
     monitor_vivo: Mutex<(&'static str, Option<String>)>,
+    identidade: IdentidadeBinario,
+    politica: PoliticaAtualizacao,
+    iniciado_em: i64,
+    /// Versão do binário novo já visto no disco e ainda não aplicado.
+    atualizacao_pendente: Mutex<Option<String>>,
+    /// Reinício solicitado, à espera de quem hospeda o servidor.
+    reinicio: Mutex<Option<ReinicioPedido>>,
 }
 
 fn travar<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -149,6 +179,7 @@ pub struct Servidor {
     aceitador: Option<JoinHandle<()>>,
     trabalhador: Option<JoinHandle<()>>,
     vigia: Option<JoinHandle<()>>,
+    vigia_exe: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Compartilhado {
@@ -209,6 +240,11 @@ impl Servidor {
                     Some("agente subiu com --sem-monitor".to_string()),
                 )
             }),
+            identidade: IdentidadeBinario::propria(),
+            politica: cfg.politica_atualizacao,
+            iniciado_em: crate::agente::agora(),
+            atualizacao_pendente: Mutex::new(None),
+            reinicio: Mutex::new(None),
         });
         // A rotina de abertura é o primeiro trabalho do agente; já consta no instantâneo de quem
         // assina antes mesmo de a thread de trabalho começar.
@@ -233,6 +269,18 @@ impl Servidor {
                 .spawn(move || vigiar(&comp))
                 .map_err(|e| ErroAgente::es("iniciar thread de vigia", e))?
         };
+        let vigia_exe = match cfg.vigia_exe {
+            Some((intervalo, estabilidade)) => {
+                let comp = Arc::clone(&comp);
+                Some(
+                    std::thread::Builder::new()
+                        .name("dag-agente-binario".into())
+                        .spawn(move || vigiar_binario(&comp, intervalo, estabilidade))
+                        .map_err(|e| ErroAgente::es("iniciar thread de vigia do binário", e))?,
+                )
+            }
+            None => None,
+        };
         let aceitador = {
             let comp = Arc::clone(&comp);
             std::thread::Builder::new()
@@ -252,6 +300,7 @@ impl Servidor {
             aceitador: Some(aceitador),
             trabalhador: Some(trabalhador),
             vigia: Some(vigia),
+            vigia_exe,
         })
     }
 
@@ -265,6 +314,26 @@ impl Servidor {
     pub fn ativo(&self) -> bool {
         self.trabalhador.as_ref().is_some_and(|t| !t.is_finished())
             && self.aceitador.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
+    /// Reinício pedido (binário trocado, ou botão "Reiniciar agente"), se houver.
+    #[must_use]
+    pub fn reinicio_pedido(&self) -> Option<ReinicioPedido> {
+        travar(&self.comp.reinicio).clone()
+    }
+
+    /// Reexecuta o agente no lugar: encerramento limpo (o trabalho em curso fica `interrompida` e
+    /// o agente novo o retoma ao abrir; trava, socket e Catálogo são soltos) e `exec` do
+    /// executável em `pedido.caminho` com os mesmos argumentos, no mesmo PID. Só retorna se o
+    /// `exec` falhar (o agente já está encerrado; quem chama deve sair com erro para o
+    /// supervisor subir outro).
+    #[must_use]
+    pub fn reexecutar(self, pedido: &ReinicioPedido) -> ErroAgente {
+        // Dá tempo de o aviso `AgenteReiniciando` chegar a quem assina antes de a conexão cair.
+        std::thread::sleep(Duration::from_millis(300));
+        self.encerrar();
+        let e = reexecutar_no_lugar(&pedido.caminho, std::env::args_os().skip(1));
+        ErroAgente::es(format!("reexecutar {}", pedido.caminho.display()), e)
     }
 
     /// Encerramento limpo: cancela o trabalho em curso (a fila de retomada é gravada), recusa os
@@ -292,6 +361,9 @@ impl Servidor {
             let _ = t.join();
         }
         if let Some(t) = self.vigia.take() {
+            let _ = t.join();
+        }
+        if let Some(t) = self.vigia_exe.take() {
             let _ = t.join();
         }
         let fim = Instant::now() + ESPERA_CONEXOES;
@@ -474,19 +546,7 @@ fn atender(stream: UnixStream, comp: &Arc<Compartilhado>) {
             return;
         }
         let ok = match req.pedido {
-            None => escrever(
-                &mut saida,
-                &Quadro::de_servidor(
-                    id,
-                    InfoServidor {
-                        catalogo: comp.catalogo.display().to_string(),
-                        pid: std::process::id(),
-                        versao: env!("CARGO_PKG_VERSION").into(),
-                        monitor: comp.monitor,
-                    },
-                ),
-            )
-            .is_ok(),
+            None => escrever(&mut saida, &Quadro::de_servidor(id, comp.info())).is_ok(),
             Some(p) => servir(comp, id, p, &mut saida),
         };
         if !ok {
@@ -604,6 +664,7 @@ impl Compartilhado {
             Comando::PausarJob { job } => Some(self.controlar_job(Controle::Pausar, *job)),
             Comando::RetomarJob { job } => Some(self.controlar_job(Controle::Continuar, *job)),
             Comando::CancelarJob { job } => Some(self.controlar_job(Controle::Cancelar, *job)),
+            Comando::ReiniciarAgente => Some(self.pedir_reinicio()),
             Comando::ListarJobs => Some(Resposta::Jobs {
                 jobs: self.registro.jobs(),
             }),
@@ -641,6 +702,66 @@ impl Compartilhado {
             }
             c if somente_leitura(c) => Some(self.ler(pedido.clone())),
             _ => None,
+        }
+    }
+
+    fn info(&self) -> InfoServidor {
+        InfoServidor {
+            catalogo: self.catalogo.display().to_string(),
+            pid: std::process::id(),
+            versao: env!("CARGO_PKG_VERSION").into(),
+            monitor: self.monitor,
+            binario: Some(self.identidade.clone()),
+            atualizacao_pendente: travar(&self.atualizacao_pendente).clone(),
+            politica_atualizacao: Some(self.politica.to_string()),
+            iniciado_em: self.iniciado_em,
+        }
+    }
+
+    /// Há trabalho (varredura, hash, retomada, abertura) rodando ou na fila; o monitor não conta.
+    fn ocupado(&self) -> bool {
+        self.registro
+            .jobs()
+            .iter()
+            .any(|j| j.tipo != TipoJob::Monitor)
+    }
+
+    /// Registra o pedido de reinício e avisa os assinantes. Idempotente.
+    fn solicitar_reinicio(&self, para: String) {
+        let mut g = travar(&self.reinicio);
+        if g.is_some() {
+            return;
+        }
+        let de = self.identidade.rotulo();
+        eprintln!("agente: reiniciando no lugar ({de} -> {para})");
+        self.registro.reiniciando(de.clone(), para.clone());
+        *g = Some(ReinicioPedido {
+            de,
+            para,
+            caminho: PathBuf::from(&self.identidade.caminho),
+        });
+    }
+
+    /// `ReiniciarAgente`: vale para qualquer política, mas só com um executável válido no disco.
+    fn pedir_reinicio(&self) -> Resposta {
+        let caminho = PathBuf::from(&self.identidade.caminho);
+        if !Assinatura::ler(&caminho).is_some_and(|a| a.valida()) {
+            return ErroAgente::Invalido(format!(
+                "o executável {} não está disponível; reinício cancelado",
+                caminho.display()
+            ))
+            .para_resposta();
+        }
+        let Some(versao) = validar_executavel(&caminho) else {
+            return ErroAgente::Invalido(format!(
+                "o executável {} não respondeu a --version; reinício cancelado",
+                caminho.display()
+            ))
+            .para_resposta();
+        };
+        self.solicitar_reinicio(versao);
+        Resposta::Ok {
+            mensagem: Some("agente reiniciando; a conexão volta em instantes".into()),
         }
     }
 
@@ -874,6 +995,47 @@ fn vigiar(comp: &Arc<Compartilhado>) {
         if ultima_batida.elapsed() >= INTERVALO_BATIDA {
             ultima_batida = Instant::now();
             comp.registro.batida();
+        }
+    }
+}
+
+/// Vigia o executável do agente: ao ser trocado por um arquivo válido e estável, aplica a
+/// política (reinicia, espera não haver trabalho ou só avisa).
+fn vigiar_binario(comp: &Arc<Compartilhado>, intervalo: Duration, estabilidade: Duration) {
+    let caminho = PathBuf::from(&comp.identidade.caminho);
+    let mut detector = DetectorTroca::novo(comp.identidade.assinatura(), estabilidade);
+    let mut pendente: Option<(Assinatura, String)> = None;
+    let mut proxima = Instant::now() + intervalo;
+    while !comp.parar.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
+        if Instant::now() < proxima || travar(&comp.reinicio).is_some() {
+            continue;
+        }
+        let troca = detector.observar(Instant::now(), Assinatura::ler(&caminho));
+        proxima = Instant::now()
+            + match troca {
+                Troca::Aguardando => estabilidade.max(Duration::from_millis(50)),
+                _ => intervalo,
+            };
+        if let Troca::Estavel(a) = troca
+            && pendente.as_ref().is_none_or(|(p, _)| *p != a)
+        {
+            if let Some(v) = validar_executavel(&caminho) {
+                *travar(&comp.atualizacao_pendente) = Some(v.clone());
+                pendente = Some((a, v));
+            } else {
+                eprintln!(
+                    "agente: o executável novo em {} não respondeu a --version; ignorado",
+                    caminho.display()
+                );
+                detector.aceitar(a);
+            }
+        }
+        if let Some((_, v)) = &pendente {
+            match decidir(comp.politica, comp.ocupado(), false) {
+                Acao::Reiniciar => comp.solicitar_reinicio(v.clone()),
+                Acao::Aguardar | Acao::SoAvisar => {}
+            }
         }
     }
 }

@@ -42,6 +42,19 @@ pub struct InfoServidor {
     pub versao: String,
     /// O agente monitora as raízes catalogadas.
     pub monitor: bool,
+    /// Binário de onde o agente veio (versão, commit, caminho, inode, protocolo).
+    #[serde(default)]
+    pub binario: Option<crate::versao::IdentidadeBinario>,
+    /// Versão de um binário novo já no disco que o agente ainda não aplicou (política `avisar`,
+    /// ou `esperar-trabalho` com trabalho em curso).
+    #[serde(default)]
+    pub atualizacao_pendente: Option<String>,
+    /// Política `--ao-atualizar` do agente.
+    #[serde(default)]
+    pub politica_atualizacao: Option<String>,
+    /// Quando este processo subiu (segundos Unix).
+    #[serde(default)]
+    pub iniciado_em: i64,
 }
 
 /// Quadro do agente. Exatamente um dos quatro campos vem preenchido.

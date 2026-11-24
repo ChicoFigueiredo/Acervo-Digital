@@ -373,6 +373,12 @@ enum Sub {
         /// Teto de passadas de verificação por abertura até uma passada sem mudanças
         #[arg(long, value_name = "N", default_value_t = 3)]
         max_passadas: u32,
+        /// O que fazer quando o executável do agente é trocado (`cargo install`): `reiniciar-agora`
+        /// (padrão: o trabalho em curso é interrompido num ponto seguro e retomado sozinho pelo
+        /// agente novo, sem perda), `esperar-trabalho` (reinicia quando não houver trabalho) ou
+        /// `avisar` (só avisa os clientes; o botão da GUI ou `dag servico reiniciar` aplica)
+        #[arg(long, value_name = "POLITICA", default_value_t = dag_agent::PoliticaAtualizacao::default())]
+        ao_atualizar: dag_agent::PoliticaAtualizacao,
         /// Leitores por disco no hash deste agente (vence o persistido; o pedido vence este)
         #[command(flatten)]
         hash: ArgsHash,
@@ -761,6 +767,7 @@ fn rodar_agente(
     sem_monitor: bool,
     abertura: dag_agent::PoliticaAbertura,
     hash: ArgsHash,
+    ao_atualizar: dag_agent::PoliticaAtualizacao,
 ) -> ExitCode {
     let falha = |e: &dyn std::fmt::Display| {
         eprintln!("erro: {e}");
@@ -772,6 +779,20 @@ fn rodar_agente(
     };
     let socket = socket.unwrap_or_else(caminho_socket_padrao);
     let mut cfg = ConfigServidor::novo(caminho, socket);
+    cfg.politica_atualizacao = ao_atualizar;
+    // Ajuste fino da vigia do executável (testes): DAG_VIGIA_EXE_MS e DAG_ESTABILIDADE_EXE_MS.
+    let ms = |var: &str| {
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+    };
+    if let (Some((i, e)), Some(novo_i)) = (cfg.vigia_exe.as_mut(), ms("DAG_VIGIA_EXE_MS")) {
+        *i = novo_i;
+        if let Some(novo_e) = ms("DAG_ESTABILIDADE_EXE_MS") {
+            *e = novo_e;
+        }
+    }
     cfg.monitor = !sem_monitor;
     cfg.abertura = abertura;
     cfg.opcoes_hash = dag_core::OpcoesHash {
@@ -795,7 +816,13 @@ fn rodar_agente(
                 eprintln!("agente: sinal recebido; encerrando com checkpoint...");
                 break;
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if servidor.ativo() => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if servidor.ativo() => {
+                if let Some(pedido) = servidor.reinicio_pedido() {
+                    // `exec` no lugar: mesmo PID, então systemd e `systemd-run` nem notam.
+                    let e = servidor.reexecutar(&pedido);
+                    return falha(&format!("não consegui reiniciar para {}: {e}", pedido.para));
+                }
+            }
             Err(_) => break,
         }
     }
@@ -849,9 +876,19 @@ fn agente_json(info: Option<&dag_agent::InfoServidor>) -> serde_json::Value {
             "catalogo": i.catalogo,
             "monitor": i.monitor,
             "versao": i.versao,
+            "binario": i.binario,
+            "atualizacao_pendente": i.atualizacao_pendente,
+            "politica_atualizacao": i.politica_atualizacao,
+            "iniciado_em": i.iniciado_em,
+            "aviso_versao": aviso_de_versao(i),
         }),
         None => serde_json::json!({ "servindo": false }),
     }
+}
+
+/// Aviso "agente desatualizado" comparando o agente com este programa.
+fn aviso_de_versao(i: &dag_agent::InfoServidor) -> Option<String> {
+    dag_agent::comparar(i, &dag_agent::IdentidadeBinario::propria()).aviso()
 }
 
 fn agente_texto(
@@ -860,14 +897,24 @@ fn agente_texto(
 ) -> String {
     match info {
         // A situação do monitor vem da mesma fonte da linha "Monitor:" (a resposta do agente).
-        Some(i) => format!(
-            "Agente: servindo (pid {}, monitor {})\n",
-            i.pid,
-            monitor.map_or_else(
-                || if i.monitor { "habilitado" } else { "desligado" }.to_string(),
-                saida::situacao_monitor
-            )
-        ),
+        Some(i) => {
+            let versao = i
+                .binario
+                .as_ref()
+                .map_or_else(|| i.versao.clone(), dag_agent::IdentidadeBinario::rotulo);
+            let mut t = format!(
+                "Agente: servindo (pid {}, versão {versao}, monitor {})\n",
+                i.pid,
+                monitor.map_or_else(
+                    || if i.monitor { "habilitado" } else { "desligado" }.to_string(),
+                    saida::situacao_monitor
+                )
+            );
+            if let Some(a) = aviso_de_versao(i) {
+                t.push_str(&format!("AVISO: {a}\n"));
+            }
+            t
+        }
         None => "Agente: nenhum em execução (este comando rodou numa sessão em processo)\n".into(),
     }
 }
@@ -923,6 +970,7 @@ fn main() -> ExitCode {
         sem_retomar_automatico,
         verificar_ao_abrir,
         max_passadas,
+        ao_atualizar,
         hash,
     } = cli.comando
     {
@@ -938,6 +986,7 @@ fn main() -> ExitCode {
             sem_monitor,
             abertura,
             hash,
+            ao_atualizar,
         );
     }
     if let Sub::Desktop(d) = &cli.comando {

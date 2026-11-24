@@ -20,3 +20,26 @@ Decidido em 24/11/2026, a pedido do usuário ("a interação dos serviços em ba
 **Atualização de uma máquina em que a GUI é a escritora com hash rodando.** Feche a GUI antiga (ela segura a trava; enquanto aberta o novo agente não sobe e o erro cita o pid). A execução fica `em_andamento` no Catálogo; o novo agente, ao abrir, a marca `interrompida` e a retoma sem reler o já hasheado (ADR 0003). Nada é perdido.
 
 **Alternativas rejeitadas.** Manter o escritor em processo com um canal entre GUIs (não alcança CLI/MCP); polling do status em vez de eventos (atraso, sem progresso fino); exigir a unidade systemd (nem toda máquina a instala).
+
+## Atualização do binário com o agente rodando
+
+`cargo install` troca o arquivo do `dag` (grava ao lado e renomeia), mas o agente em memória
+continua com o código antigo. Comportamento:
+
+- **Identidade**: o handshake (`ola`) devolve `binario` (versão, commit curto do git se havia git
+  na compilação, caminho, mtime/tamanho/inode, versão do protocolo), `atualizacao_pendente`,
+  `politica_atualizacao` e `iniciado_em`. GUI, CLI (`dag status`) e observadores comparam com a
+  própria identidade (`dag_agent::comparar`) e mostram "agente desatualizado (versão X, você tem
+  Y) — reinicie com `dag servico reiniciar`". A GUI tem o botão "Reiniciar agente"
+  (`Comando::ReiniciarAgente`, vale para qualquer política).
+- **Vigia do executável**: a cada 30 s o agente lê metadados do próprio executável. Arquivo novo
+  só vale se existir, for executável, tiver tamanho > 0, ficar igual por 5 s e responder a
+  `--version`; senão é ignorado.
+- **Política** `dag agente --ao-atualizar`: `reiniciar-agora` (padrão; a retomada é sem perda: o
+  trabalho vira `interrompida` pelo mesmo caminho do SIGTERM e o agente novo o retoma ao abrir),
+  `esperar-trabalho` (reinicia quando não houver trabalho) ou `avisar` (só publica
+  `atualizacao_pendente`).
+- **Reinício**: `exec` no lugar (mesmo PID, então systemd, `systemd-run` e `setsid` não
+  percebem), depois de emitir `AgenteReiniciando {de, para}` e soltar trava, socket e Catálogo. O
+  observador reconecta e a GUI mostra "atualizado para X". Se o `exec` falhar o processo sai com
+  erro (a unidade tem `Restart=on-failure`).

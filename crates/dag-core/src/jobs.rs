@@ -254,6 +254,10 @@ pub enum EventoAgente {
     PontoConfianca { confianca: Vec<StatusConfianca> },
     /// Sinal de vida, para o cliente detectar um agente travado.
     Batida,
+    /// O agente vai se reexecutar no lugar (binário atualizado ou pedido do usuário): a conexão
+    /// cai em instantes e volta sozinha, já na versão nova. Trabalhos em curso ficam
+    /// `interrompida` e a abertura do agente novo os retoma.
+    AgenteReiniciando { de: String, para: String },
 }
 
 /// Mapa de trabalhos mantido por um cliente a partir dos eventos.
@@ -291,7 +295,7 @@ impl VisaoJobs {
             }
             EventoAgente::Monitor { saude } => self.monitor = Some(saude.clone()),
             EventoAgente::PontoConfianca { confianca } => self.confianca.clone_from(confianca),
-            EventoAgente::Batida => {}
+            EventoAgente::Batida | EventoAgente::AgenteReiniciando { .. } => {}
         }
         None
     }

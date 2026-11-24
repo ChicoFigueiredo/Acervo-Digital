@@ -1,6 +1,6 @@
 //! Página Lixeira (ADR 0005) e os dois diálogos de "Mover para a Lixeira".
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga, estado_vazio};
 use crate::app::{AppDag, Proposito};
 use crate::formato::{bytes_humanos, data_ns, inteiro_pt_br};
@@ -45,11 +45,11 @@ pub static PAGINA: DefPagina = DefPagina {
 };
 
 const COLUNAS: [Coluna; 5] = [
-    Coluna::esq("", 30.0),
+    Coluna::esq("", 30.0).sem_ordem(),
     Coluna::esq("Origem", 420.0),
     Coluna::dir("Tamanho", 90.0),
     Coluna::esq("Movido em (UTC)", 150.0),
-    Coluna::esq("", 110.0),
+    Coluna::esq("", 110.0).sem_ordem(),
 ];
 
 fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
@@ -78,6 +78,14 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
         &COLUNAS,
         l.itens.len(),
         altura,
+        |c, i| {
+            let it = &l.itens[i];
+            match c {
+                1 => Chave::texto(&it.origem),
+                2 => Chave::num(it.bytes),
+                _ => Chave::opt_num(it.movido_em),
+            }
+        },
         |linha, i| {
             let it = &l.itens[i];
             let marcado = app.lixeira.marcados.contains(&it.arquivo.0);

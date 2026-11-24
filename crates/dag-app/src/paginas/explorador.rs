@@ -1,7 +1,7 @@
 //! Página Explorador: árvore preguiçosa de pastas (cada expansão lê uma página de filhos),
 //! tabela paginada dos arquivos da pasta selecionada e breadcrumb. Nada é carregado em massa.
 
-use super::tabela::{Coluna, tabela};
+use super::tabela::{Chave, Coluna, nota_ordem_local, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga, estado_vazio};
 use crate::app::AppDag;
 use crate::cores::{rotulo_da_categoria, rotulo_da_finalidade};
@@ -450,6 +450,21 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                         &COLUNAS,
                         pg.itens.len(),
                         restante,
+                        |c, i| {
+                            let a = &pg.itens[i];
+                            match c {
+                                0 => Chave::texto(&a.nome),
+                                1 => Chave::num(a.bytes_logicos),
+                                2 => Chave::opt_num(a.bytes_alocados),
+                                3 => Chave::opt_texto(a.categoria.as_deref()),
+                                4 => Chave::opt_texto(a.mime.as_deref()),
+                                5 => Chave::opt_texto(a.finalidade.as_deref()),
+                                6 => Chave::opt_real(a.confianca),
+                                7 => Chave::opt_num(a.mtime_ns),
+                                8 => Chave::opt_num(a.birthtime_ns),
+                                _ => Chave::texto(&indicadores(a)),
+                            }
+                        },
                         |l, i| {
                             let a = &pg.itens[i];
                             let r = l.texto(a.nome.clone());
@@ -480,6 +495,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                             l.texto(indicadores(a));
                         },
                     );
+                    nota_ordem_local(ui, "explorador-arquivos");
                     ui.horizontal(|ui| {
                         ui.weak(format!(
                             "{} arquivo(s) carregado(s)",

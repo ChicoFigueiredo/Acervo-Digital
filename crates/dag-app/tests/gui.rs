@@ -1088,3 +1088,40 @@ fn menu_marca_pasta_com_confirmacao_de_contagem_e_mostra_o_estado() {
     );
     assert!(alvo.marcado());
 }
+
+#[test]
+fn tabelas_tem_cabecalho_ordenavel_com_seta_e_larguras_guardadas() {
+    use dag_app::paginas::tabela::{definir_ordem, larguras_atuais, ordem_atual};
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.ate("últimas varreduras", |app| {
+        app.varredura
+            .execucoes
+            .dado
+            .as_ref()
+            .is_some_and(|e| !e.is_empty())
+    });
+    // (página, id da tabela, título de coluna ordenável, índice dessa coluna)
+    for (pagina, tabela, titulo, col) in [
+        ("varredura", "execucoes", "Arquivos", 6),
+        ("discos", "discos", "Capacidade", 5),
+    ] {
+        a.abrir(pagina);
+        a.ate("volumes carregados", |app| {
+            app.discos.volumes.dado.is_some()
+        });
+        a.quadro();
+        let texto = a.quadro_texto();
+        assert!(texto.contains(titulo), "{pagina}: cabeçalho {titulo}");
+        assert!(!larguras_atuais(&a.ctx, tabela).is_empty(), "{pagina}");
+        assert_eq!(ordem_atual(&a.ctx, tabela), None);
+        definir_ordem(&a.ctx, tabela, Some((col, true)));
+        a.quadro();
+        let marca = format!("{titulo} ▲");
+        assert!(a.quadro_texto().contains(&marca), "{pagina}: seta ▲");
+        definir_ordem(&a.ctx, tabela, Some((col, false)));
+        a.quadro();
+        let marca = format!("{titulo} ▼");
+        assert!(a.quadro_texto().contains(&marca), "{pagina}: seta ▼");
+    }
+}

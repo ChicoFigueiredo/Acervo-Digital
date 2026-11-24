@@ -2,7 +2,7 @@ mod common;
 
 use common::*;
 use dag_imagens::{Controle, FormatoImagem, SistemaArquivos, TipoMembro, abrir, detectar};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 fn sistema_unico(bytes: Vec<u8>) -> (SistemaArquivos, Vec<Item>) {
     let img = abrir(Cursor::new(bytes.clone())).unwrap();

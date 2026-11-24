@@ -3,12 +3,13 @@
 
 pub mod exfat;
 pub mod fat;
+pub mod fuzz;
 pub mod iso;
 pub mod part;
 
 use dag_imagens::{Controle, Imagem, Resumo, TipoMembro, abrir};
 use std::collections::BTreeMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 /// Nó de uma árvore de arquivos de teste.
 #[derive(Clone)]

@@ -98,6 +98,40 @@ _Avoid_: original, exclusivo
 Marcação de Backup ou para Deleção cujo arquivo mudou de conteúdo depois de marcado. Sai de todas as contas até o usuário confirmá-la de novo.
 _Avoid_: marcação inválida, expirada
 
+### Contêineres
+
+**Contêiner**:
+Arquivo do Catálogo cujo conteúdo o DAG lê por dentro, em fluxo e na memória, sem nunca extrair nada em disco: um Compactado ou uma Imagem de Disco.
+_Avoid_: pacote, arquivo-mãe
+
+**Compactado**:
+Contêiner de formato de arquivamento ou compressão: zip, 7z, rar, tar e tar comprimido (gz, bz2, xz, zst).
+_Avoid_: zipado, arquivo zip (para qualquer formato)
+
+**Imagem de Disco**:
+Contêiner que guarda um disco ou partição inteiros (VHDX, qcow2, img bruto, ISO). O DAG lê a tabela de partições e o sistema de arquivos com leitor próprio, sem montar.
+_Avoid_: disco virtual, VM
+
+**Membro**:
+Entrada dentro de um Contêiner, identificada pelo Contêiner e pelo caminho interno. Recebe metadados e Hash Completo; um Membro que também é Contêiner é lido por dentro (aninhado).
+_Avoid_: item, entrada interna, arquivo extraído
+
+**Senha do Contêiner**:
+Senha que abre um Contêiner cifrado, guardada cifrada no Catálogo e ligada ao Hash Completo do Contêiner, de modo que cópias idênticas abrem com ela.
+_Avoid_: senha do arquivo, credencial
+
+**Cofre de Senhas**:
+Lista de senhas que o usuário mais usa, guardada cifrada, que o DAG tenta sozinho em todo Contêiner cifrado antes de pedir ajuda.
+_Avoid_: dicionário, chaveiro (o chaveiro é o do sistema)
+
+**Fila de Serviço**:
+Lista de pendências que só o usuário resolve, mostrada na GUI sem popups e servida pelo agente a qualquer cliente. O trabalho nunca para esperando por ela.
+_Avoid_: notificações, alertas, popup
+
+**Pedido de Serviço**:
+Um item da Fila de Serviço, com tipo, objeto, motivo e estado (aberto, resolvido, dispensado). Na primeira versão os tipos são Pedido de Senha e Falha de Leitura.
+_Avoid_: tarefa, ticket
+
 ## Relationships
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
@@ -112,7 +146,11 @@ _Avoid_: marcação inválida, expirada
 - Um **Dispositivo Físico** hospeda um ou mais **Volumes**.
 - Uma **Execução Interrompida** continua sozinha ao abrir o programa; depois dela, o **Fast Scan** é repetido na **Raiz** até uma passada sem mudanças, e só então a **Raiz** entra no **Ponto de Confiança**.
 - Ao abrir, toda **Raiz** passa por um **Fast Scan** (a menos que o usuário escolha o contrário); só arquivos novos ou alterados recebem **Hash Completo**. Um **Full Scan** com hash de tudo só acontece por pedido explícito.
+- Um **Membro** pertence a um **Contêiner** e conta como cópia: entra em **Grupo de Duplicados**, evita o alerta de **Única Cópia** e dá **Cobertura** quando o **Contêiner** tem **Marcação de Backup** em outro **Dispositivo Físico**. Um **Membro** nunca soma espaço recuperável.
+- Um **Membro** não recebe marcação própria; marcações valem para o **Contêiner** inteiro.
+- Um **Contêiner** cifrado é tentado primeiro com a **Senha do Contêiner** já guardada, depois com o **Cofre de Senhas**; só se tudo falhar vira **Pedido de Serviço** de senha, e os **Membros** ficam não lidos até a resposta.
 
 ## Flagged ambiguities
 
 - "backup" foi usado para a cópia preservada e para a Fase C (backup gerenciado). Aqui, a cópia preservada é **Marcação de Backup**; a Fase C não está neste escopo.
+- "compactado" às vezes quer dizer qualquer coisa que se abre por dentro, inclusive imagens de disco. Aqui, o termo geral é **Contêiner**; **Compactado** e **Imagem de Disco** são os dois tipos.

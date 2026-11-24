@@ -148,7 +148,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     ui.strong("Últimas varreduras");
     estado_da_carga(ui, &app.varredura.execucoes);
     let pode = app.motivo_sem_escrita();
-    let altura = ui.available_height().max(120.0);
+    let altura = super::altura_livre(ui).max(240.0);
     if let Some(execs) = app.varredura.execucoes.dado.as_deref() {
         if execs.is_empty() {
             ui.weak("Nenhuma varredura registrada ainda.");

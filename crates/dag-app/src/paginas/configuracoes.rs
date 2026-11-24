@@ -111,6 +111,98 @@ impl ServicoGui {
     }
 }
 
+/// Atalho no menu e na área de trabalho (`dag desktop instalar`), feito em thread.
+#[derive(Default)]
+pub struct AtalhoGui {
+    rx: Option<Receiver<(bool, String)>>,
+    mensagem: Option<(bool, String)>,
+}
+
+impl std::fmt::Debug for AtalhoGui {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtalhoGui").finish_non_exhaustive()
+    }
+}
+
+impl AtalhoGui {
+    fn disparar(&mut self) {
+        if self.rx.is_some() {
+            return;
+        }
+        self.mensagem = None;
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(criar_atalho());
+        });
+    }
+
+    fn atualizar(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.rx else { return };
+        match rx.try_recv() {
+            Ok(m) => {
+                self.mensagem = Some(m);
+                self.rx = None;
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(200)),
+            Err(TryRecvError::Disconnected) => self.rx = None,
+        }
+    }
+}
+
+/// Instala ícone, entrada de menu e lançador. O `dag-app` é o executável atual.
+fn criar_atalho() -> (bool, String) {
+    use dag_platform_linux::atalho;
+    let Some(amb) = atalho::Ambiente::real() else {
+        return (false, "HOME não definido.".into());
+    };
+    let Some(exec) = std::env::current_exe()
+        .ok()
+        .filter(|e| e.is_file())
+        .or_else(atalho::localizar_dag_app)
+    else {
+        return (false, "Não achei o executável do aplicativo.".into());
+    };
+    match atalho::instalar(&amb, &exec) {
+        Ok(r) => {
+            let mut m = format!("Atalho criado ({} arquivos).", r.escritos.len());
+            for d in r.dicas {
+                m.push(' ');
+                m.push_str(&d);
+            }
+            (true, m)
+        }
+        Err(e) => (false, format!("Falha ao criar o atalho: {e}")),
+    }
+}
+
+/// Seção "Atalho do aplicativo".
+fn secao_atalho(ui: &mut egui::Ui, app: &mut AppDag) {
+    ui.heading("Atalho do aplicativo");
+    app.configuracoes.atalho.atualizar(ui.ctx());
+    let livre = app.configuracoes.atalho.rx.is_none();
+    if ui
+        .add_enabled(
+            livre,
+            egui::Button::new("Criar atalho no menu e na área de trabalho"),
+        )
+        .on_hover_text("Equivale a `dag desktop instalar`; `dag desktop remover` desfaz")
+        .clicked()
+    {
+        app.configuracoes.atalho.disparar();
+    }
+    if !livre {
+        ui.weak("criando o atalho…");
+    }
+    if let Some((ok, m)) = &app.configuracoes.atalho.mensagem {
+        if *ok {
+            ui.label(m);
+        } else {
+            ui.colored_label(ui.visuals().error_fg_color, m);
+        }
+    }
+}
+
 /// Resumo de uma linha do estado, para a página e para testes.
 #[must_use]
 pub fn resumo_do_estado(e: &EstadoServico) -> String {
@@ -271,6 +363,7 @@ pub struct Estado {
     inicializado: bool,
     /// O serviço de segundo plano (systemd de usuário).
     pub servico: ServicoGui,
+    pub atalho: AtalhoGui,
 }
 
 impl Default for Estado {
@@ -282,6 +375,7 @@ impl Default for Estado {
             max_discos: MAX_DISCOS_PADRAO,
             inicializado: false,
             servico: ServicoGui::default(),
+            atalho: AtalhoGui::default(),
         }
     }
 }
@@ -354,6 +448,8 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     informacoes_da_sessao(ui, app);
     ui.add_space(8.0);
     secao_servico(ui, app);
+    ui.add_space(8.0);
+    secao_atalho(ui, app);
     ui.add_space(8.0);
     hash_em_paralelo(ui, app);
     ui.add_space(8.0);

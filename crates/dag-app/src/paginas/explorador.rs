@@ -376,7 +376,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
         );
         return;
     }
-    let altura = ui.available_height().max(200.0);
+    let altura = super::altura_livre(ui).max(200.0);
     let leitor = &app.leitor;
     let est = &mut app.explorador;
     let mut escolhida = None;

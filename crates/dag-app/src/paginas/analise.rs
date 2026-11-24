@@ -388,7 +388,7 @@ fn tree_view(
     let agora = agora_s();
     let mut destino = None;
     let extra = usize::from(a.outros_bytes > 0);
-    let altura = ui.available_height();
+    let altura = super::altura_livre(ui).max(200.0);
     let efetiva = bases.efetiva(base);
     let mut colunas = COLUNAS_TREE;
     colunas[1].titulo = match efetiva {
@@ -482,7 +482,7 @@ fn treemap(
     modo_cor: ModoCor,
 ) -> Option<AlvoAnalise> {
     let agora = agora_s();
-    let h = (ui.available_height() - 30.0).max(220.0);
+    let h = (super::altura_livre(ui) - 30.0).max(220.0);
     let (area, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
     let ret = Ret::novo(
         f64::from(area.min.x),

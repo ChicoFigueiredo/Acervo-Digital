@@ -13,6 +13,7 @@ dag-core.workspace = true
 dag-platform-linux.workspace = true
 dag-scanner.workspace = true
 dag-store.workspace = true
+png = "0.18"
 rusqlite.workspace = true
 
 [dev-dependencies]

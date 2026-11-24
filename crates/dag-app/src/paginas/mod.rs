@@ -66,6 +66,41 @@ pub fn por_id(id: &str) -> Option<&'static DefPagina> {
     todas().into_iter().find(|p| p.id == id)
 }
 
+/// Corpo de uma página dentro de uma rolagem vertical sempre visível: o que passa da janela
+/// nunca é cortado. A altura visível vira o teto do conteúdo, para que as páginas que
+/// preenchem o espaço (`available_height`) tenham um tamanho razoável em vez de "infinito".
+pub fn com_rolagem<R>(
+    ui: &mut egui::Ui,
+    id: &str,
+    corpo: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let visivel = ui.available_height();
+    egui::ScrollArea::vertical()
+        .id_salt(("pagina-rolagem", id))
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .show(ui, |ui| {
+            let topo = ui.min_rect().top();
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new(ALTURA_DA_PAGINA), (visivel, topo)));
+            corpo(ui)
+        })
+}
+
+const ALTURA_DA_PAGINA: &str = "dag-altura-da-pagina";
+
+/// Altura que sobra na janela para a página, descontado o que já foi desenhado. Dentro da
+/// rolagem de [`com_rolagem`] o `available_height` é infinito; as tabelas que preenchem o
+/// espaço usam esta altura (e um mínimo próprio, para a página rolar em vez de espremer).
+pub fn altura_livre(ui: &egui::Ui) -> f32 {
+    let (visivel, topo) = ui
+        .ctx()
+        .data(|d| d.get_temp::<(f32, f32)>(egui::Id::new(ALTURA_DA_PAGINA)))
+        .unwrap_or((f32::INFINITY, 0.0));
+    let usado = ui.cursor().top() - topo;
+    ui.available_height().min((visivel - usado).max(0.0))
+}
+
 /// Painel de estado vazio, com o resumo da página e uma dica do que fazer.
 pub fn estado_vazio(ui: &mut egui::Ui, titulo: &str, resumo: &str, dica: &str) {
     ui.add_space(24.0);
@@ -122,5 +157,52 @@ pub fn estado_da_carga<T>(ui: &mut egui::Ui, carga: &crate::leitor::Carga<T>) {
             ui.spinner();
             ui.weak("Carregando…");
         });
+    }
+}
+
+#[cfg(test)]
+mod testes_rolagem {
+    use super::*;
+    use egui::{RawInput, Rect, pos2, vec2};
+
+    #[test]
+    fn pagina_com_muitas_linhas_rola() {
+        let ctx = egui::Context::default();
+        let mut saida = None;
+        for _ in 0..3 {
+            let entrada = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 400.0))),
+                ..Default::default()
+            };
+            ctx.run_ui(entrada, |ui| {
+                saida = Some(com_rolagem(ui, "teste", |ui| {
+                    for i in 0..500 {
+                        ui.label(format!("linha {i}"));
+                    }
+                }));
+            })
+            .drop_without_applying_deltas();
+        }
+        let s = saida.unwrap();
+        assert!(s.content_size.y > s.inner_rect.height() * 5.0);
+        assert!(s.state.offset.y >= 0.0);
+    }
+
+    #[test]
+    fn pagina_curta_nao_rola() {
+        let ctx = egui::Context::default();
+        let mut saida = None;
+        let entrada = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
+            ..Default::default()
+        };
+        ctx.run_ui(entrada, |ui| {
+            saida = Some(com_rolagem(ui, "curta", |ui| {
+                ui.label("oi");
+            }));
+        })
+        .drop_without_applying_deltas();
+        let s = saida.unwrap();
+        assert!(s.content_size.y < s.inner_rect.height());
     }
 }

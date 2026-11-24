@@ -278,7 +278,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
             "Rode um Full Scan com hash: só arquivos com Hash Completo igual formam um grupo.",
         );
     } else if app.duplicados.lista.dado.is_some() {
-        let altura = (ui.available_height()
+        let altura = (super::altura_livre(ui)
             - if app.duplicados.painel_relatorio {
                 150.0
             } else {

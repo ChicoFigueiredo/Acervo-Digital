@@ -190,7 +190,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     if app.discos.volumes.dado.is_some() {
         ui.weak(resumo(&linhas, ocultos));
     }
-    let altura = (ui.available_height() - 140.0).max(160.0);
+    let altura = (super::altura_livre(ui) - 140.0).max(160.0);
     let est = &mut app.discos;
     match est.volumes.dado.as_deref() {
         Some([]) | None if est.volumes.erro.is_none() && !est.volumes.carregando() => {

@@ -852,6 +852,7 @@ dependencies = [
  "dag-platform-linux",
  "dag-scanner",
  "dag-store",
+ "png",
  "rusqlite",
  "tempfile",
 ]
@@ -865,6 +866,7 @@ dependencies = [
  "dag-agent",
  "dag-core",
  "dag-mcp",
+ "dag-platform-linux",
  "serde_json",
  "tempfile",
 ]

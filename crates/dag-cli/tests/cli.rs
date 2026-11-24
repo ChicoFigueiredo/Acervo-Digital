@@ -553,3 +553,46 @@ fn scan_aceita_flags_de_paralelismo() {
     );
     assert_eq!(json(&o)["desfecho"], "concluida");
 }
+
+#[test]
+fn desktop_instalar_e_remover_com_home_falso() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(home.join("Desktop")).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let app = bin.join("dag-app");
+    std::fs::write(&app, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let rodar = |sub: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dag"))
+            .args(["desktop", sub])
+            .env("HOME", &home)
+            .env_remove("XDG_DATA_HOME")
+            .env("DAG_SEM_UTILITARIOS", "1")
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap()
+    };
+    let o = rodar("instalar");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let menu = home.join(".local/share/applications/dag-app.desktop");
+    let texto = std::fs::read_to_string(&menu).unwrap();
+    // Ao lado do `dag` (se houver `dag-app` compilado) ou, senão, o do PATH falso.
+    assert!(
+        texto
+            .lines()
+            .any(|l| l.starts_with("Exec=/") && l.ends_with("/dag-app"))
+    );
+    let _ = &app;
+    assert!(home.join("Desktop/dag-app.desktop").is_file());
+    assert!(
+        home.join(".local/share/icons/hicolor/128x128/apps/dag-app.png")
+            .is_file()
+    );
+    assert!(rodar("instalar").status.success(), "idempotente");
+    assert!(rodar("remover").status.success());
+    assert!(!menu.exists());
+    assert!(!home.join("Desktop/dag-app.desktop").exists());
+}

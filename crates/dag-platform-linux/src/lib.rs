@@ -10,6 +10,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod atalho;
 mod dispositivo;
 pub mod elevacao;
 mod erro;

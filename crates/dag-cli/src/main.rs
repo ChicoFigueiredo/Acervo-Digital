@@ -348,6 +348,9 @@ enum Sub {
     /// Gerencia o serviço em segundo plano
     #[command(subcommand)]
     Servico(Servico),
+    /// Atalho no menu de aplicativos e na área de trabalho (KDE e GNOME)
+    #[command(subcommand)]
+    Desktop(Desktop),
     /// Operações sobre o Catálogo
     #[command(subcommand)]
     Catalogo(Catalogo),
@@ -382,6 +385,14 @@ enum Marcar {
     Backup(AlvoMarcacao),
     /// Marcação para Deleção: candidata a descarte (não apaga nada)
     Delecao(AlvoMarcacao),
+}
+
+#[derive(Subcommand, Debug)]
+enum Desktop {
+    /// Instala ícone, entrada no menu e lançador na área de trabalho (idempotente)
+    Instalar,
+    /// Remove tudo o que `instalar` criou
+    Remover,
 }
 
 #[derive(Subcommand, Debug)]
@@ -622,7 +633,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             },
         },
         Sub::Catalogo(Catalogo::Backup { destino }) => Comando::BackupCatalogo { destino },
-        Sub::Mcp | Sub::Agente { .. } | Sub::Acompanhar => return None,
+        Sub::Mcp | Sub::Agente { .. } | Sub::Acompanhar | Sub::Desktop(_) => return None,
     })
 }
 
@@ -686,7 +697,17 @@ fn executar(cli: Cli) -> Execucao {
     // O serviço é gerido direto no systemd do usuário: não abre o Catálogo (que pode estar com o
     // agente em segundo plano) nem cria nada.
     if let Comando::Servico { acao } = &comando {
-        return sem(dag_agent::servico::executar_avulso(*acao, &caminho));
+        let resposta = dag_agent::servico::executar_avulso(*acao, &caminho);
+        if matches!(
+            acao,
+            AcaoServico::Instalar | AcaoServico::InstalarEAtivar { .. }
+        ) && !matches!(resposta, Resposta::Erro { .. })
+        {
+            eprintln!(
+                "dica: para o ícone no menu e na área de trabalho, rode `dag desktop instalar`."
+            );
+        }
+        return sem(resposta);
     }
     let socket = cli.socket.unwrap_or_else(caminho_socket_padrao);
     let opcoes = OpcoesConexao::novo(cli.sem_agente);
@@ -851,6 +872,47 @@ fn agente_texto(
     }
 }
 
+/// `dag desktop instalar|remover`: não abre o Catálogo nem fala com o agente.
+fn atalho_desktop(d: &Desktop) -> ExitCode {
+    use dag_platform_linux::atalho;
+    let Some(amb) = atalho::Ambiente::real() else {
+        eprintln!("erro: HOME não definido");
+        return ExitCode::from(1);
+    };
+    let resultado = match d {
+        Desktop::Instalar => {
+            let Some(exec) = atalho::localizar_dag_app() else {
+                eprintln!(
+                    "erro: `dag-app` não encontrado ao lado de `dag` nem no PATH \
+                     (instale com `cargo install --path crates/dag-app --root ~/.local`)"
+                );
+                return ExitCode::from(1);
+            };
+            println!("Aplicativo: {}", exec.display());
+            atalho::instalar(&amb, &exec).map(|r| ("Instalado", r.escritos, r.dicas))
+        }
+        Desktop::Remover => atalho::remover(&amb).map(|r| ("Removido", r.removidos, r.dicas)),
+    };
+    match resultado {
+        Ok((verbo, arquivos, dicas)) => {
+            for a in &arquivos {
+                println!("{verbo}: {}", a.display());
+            }
+            if arquivos.is_empty() {
+                println!("Nada a fazer.");
+            }
+            for d in dicas {
+                println!("dica: {d}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("erro: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if matches!(cli.comando, Sub::Mcp) {
@@ -877,6 +939,9 @@ fn main() -> ExitCode {
             abertura,
             hash,
         );
+    }
+    if let Sub::Desktop(d) = &cli.comando {
+        return atalho_desktop(d);
     }
     let json = cli.json;
     if matches!(cli.comando, Sub::Acompanhar)

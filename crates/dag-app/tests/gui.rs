@@ -705,3 +705,22 @@ fn painel_da_varredura_mostra_a_retomada_do_hash_com_dados_por_disco() {
     assert!(totais.texto.contains("com hash"), "{}", totais.texto);
     a.casca.app.scan = None;
 }
+
+#[test]
+fn todas_as_paginas_desenham_em_janela_baixa_sem_cortar_a_rolagem() {
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    for p in paginas::todas() {
+        a.abrir(p.id);
+        for _ in 0..3 {
+            let entrada = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(720.0, 300.0))),
+                ..Default::default()
+            };
+            a.ctx
+                .run_ui(entrada, |ui| a.casca.desenhar(ui))
+                .drop_without_applying_deltas();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}

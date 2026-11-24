@@ -1212,7 +1212,9 @@ impl AppCasca for AppDag {
         }
         paginas::faixa_de_avisos(ui, &mut self.avisos);
         match paginas::por_id(rota.como_texto()) {
-            Some(p) => (p.desenhar)(ui, self),
+            Some(p) => {
+                paginas::com_rolagem(ui, p.id, |ui| (p.desenhar)(ui, self));
+            }
             None => {
                 ui.label("Página desconhecida.");
             }

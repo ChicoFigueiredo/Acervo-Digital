@@ -14,6 +14,7 @@ pub mod bases;
 pub mod confirmacao;
 pub mod cores;
 pub mod formato;
+pub mod janela;
 pub mod leitor;
 pub mod paginas;
 pub mod progresso;

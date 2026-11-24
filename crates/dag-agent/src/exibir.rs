@@ -13,7 +13,7 @@ use dag_core::{FaseInventario, Progresso, ProgressoHash, ProgressoInventario};
 pub struct ExibidorStderr {
     tty: bool,
     inicio: Instant,
-    ultimo_ms: [u64; 4],
+    ultimo_ms: [u64; 5],
     linha_aberta: bool,
 }
 
@@ -29,7 +29,7 @@ impl ExibidorStderr {
         Self {
             tty: std::io::stderr().is_terminal(),
             inicio: Instant::now(),
-            ultimo_ms: [0; 4],
+            ultimo_ms: [0; 5],
             linha_aberta: false,
         }
     }
@@ -62,6 +62,17 @@ impl ExibidorStderr {
                 2,
                 h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total,
                 linha_hash("hash", h),
+            ),
+            Progresso::Conteineres(c) => (
+                4,
+                c.andamento.arquivos_total > 0
+                    && c.andamento.arquivos_feitos >= c.andamento.arquivos_total,
+                format!(
+                    "{} | {} membros | {} esperando senha",
+                    linha_hash("contêineres", &c.andamento),
+                    inteiro_pt_br(c.membros),
+                    inteiro_pt_br(c.aguardando_senha)
+                ),
             ),
             Progresso::Verificacao(h) => (
                 3,

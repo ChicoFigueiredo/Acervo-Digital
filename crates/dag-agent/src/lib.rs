@@ -17,6 +17,8 @@ mod agente;
 mod caminho;
 mod classificador;
 pub mod cliente;
+pub mod cofre;
+mod conteineres;
 mod erro;
 mod exibir;
 mod explorar;

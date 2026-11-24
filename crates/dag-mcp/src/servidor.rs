@@ -177,7 +177,7 @@ fn inicializar() -> Value {
             "version": env!("CARGO_PKG_VERSION")},
         "instructions": "DAG cataloga discos e acha duplicados. Somente leitura sobre o acervo: \
     nada é apagado nem movido no disco; marcações só mudam o Catálogo. Ações de serviço podem abrir \
-    um diálogo do sistema onde o usuário digita a senha; o MCP nunca recebe senhas."
+    um diálogo do sistema onde o usuário digita a senha; o MCP só fornece senhas de contêineres (`fornecer_senha`) e nunca recebe nenhuma de volta."
     })
 }
 

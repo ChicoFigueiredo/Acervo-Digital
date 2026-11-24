@@ -151,6 +151,40 @@ enum AcaoDuplicados {
     Reconstruir,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AcaoConteineres {
+    /// Lê o conteúdo dos contêineres pendentes
+    Ler,
+}
+
+/// Fila de Serviço (pedidos de senha e falhas de leitura de contêineres).
+#[derive(Subcommand, Debug)]
+enum AcaoFila {
+    /// Lista os itens abertos (`--todos` inclui os já resolvidos ou descartados)
+    Listar {
+        #[arg(long)]
+        todos: bool,
+    },
+    /// Fornece a senha de um Contêiner cifrado (lida da entrada padrão, sem eco no terminal) e
+    /// o lê de novo
+    Senha { id: i64 },
+    /// Descarta o item: o Contêiner fica sem conteúdo catalogado
+    Descartar { id: i64 },
+    /// Reenfileira o Contêiner do item (por exemplo depois de consertar a falha de leitura)
+    TentarDeNovo { id: i64 },
+}
+
+/// Cofre de Senhas: senhas tentadas automaticamente nos Contêineres cifrados.
+#[derive(Subcommand, Debug)]
+enum AcaoCofre {
+    /// Mostra a situação do chaveiro e os rótulos guardados (nunca os valores)
+    Listar,
+    /// Guarda uma senha (lida da entrada padrão, sem eco no terminal)
+    Adicionar { rotulo: String },
+    /// Remove uma senha do Cofre
+    Remover { id: i64 },
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy)]
 enum OrdemArg {
     Recuperavel,
@@ -269,6 +303,36 @@ enum Sub {
     Acompanhar,
     /// Lista os trabalhos do agente (em andamento e na fila) e quem os iniciou
     Jobs,
+    /// Fila de Serviço: pedidos de senha e falhas de leitura de contêineres
+    Fila {
+        #[command(subcommand)]
+        acao: AcaoFila,
+    },
+    /// Cofre de Senhas dos contêineres (as senhas ficam no chaveiro do sistema)
+    Cofre {
+        #[command(subcommand)]
+        acao: AcaoCofre,
+    },
+    /// Conteúdo de contêineres (compactados): `ler` roda a etapa; sem ação mostra o andamento
+    Conteineres {
+        #[arg(value_enum)]
+        acao: Option<AcaoConteineres>,
+    },
+    /// Lista o conteúdo de um contêiner catalogado (pasta virtual)
+    Conteudo {
+        /// Arquivo contêiner (zip, 7z, rar, tar...)
+        conteiner: String,
+        /// Pasta dentro do contêiner (padrão: raiz)
+        #[arg(default_value = "")]
+        pasta: String,
+        /// Entra no Membro aninhado de ordem N (veja a coluna ORDEM)
+        #[arg(long)]
+        aninhado: Option<i64>,
+        #[arg(long)]
+        limite: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Lista Grupos de Duplicados (maior espaço recuperável primeiro)
     Duplicados {
         /// `reconstruir`: refaz os Grupos de Duplicados a partir dos hashes atuais (minutos em
@@ -455,6 +519,33 @@ fn parse_intervalo(t: &str) -> Result<u64, String> {
         .ok_or_else(|| "intervalo grande demais".to_string())
 }
 
+/// Lê uma senha da entrada padrão. Em terminal, pede sem eco (via `stty`) e nunca a aceita em
+/// argumento de linha de comando (ficaria visível em `ps` e no histórico do shell).
+fn ler_senha(pergunta: &str) -> Option<dag_core::Senha> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let tty = std::io::stdin().is_terminal();
+    if tty {
+        eprint!("{pergunta}");
+        let _ = std::io::stderr().flush();
+        let _ = std::process::Command::new("stty").arg("-echo").status();
+    }
+    let mut linha = String::new();
+    let lido = std::io::stdin().lock().read_line(&mut linha);
+    if tty {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        eprintln!();
+    }
+    if lido.is_err() {
+        return None;
+    }
+    let s = linha.trim_end_matches(['\n', '\r']).to_string();
+    if s.is_empty() {
+        eprintln!("erro: senha vazia");
+        return None;
+    }
+    Some(dag_core::Senha(s))
+}
+
 fn exec_controle(a: &ControleArg) -> Option<ExecucaoId> {
     a.execucao.map(ExecucaoId)
 }
@@ -536,6 +627,42 @@ fn montar(sub: Sub) -> Option<Comando> {
             execucao: a.execucao.map(ExecucaoId),
         },
         Sub::Jobs => Comando::ListarJobs,
+        Sub::Fila { acao } => match acao {
+            AcaoFila::Listar { todos } => Comando::ListarPedidos {
+                incluir_encerrados: todos,
+            },
+            AcaoFila::Senha { id } => Comando::ResolverPedido {
+                id,
+                senha: ler_senha("Senha do contêiner: ")?,
+            },
+            AcaoFila::Descartar { id } => Comando::DispensarPedido { id },
+            AcaoFila::TentarDeNovo { id } => Comando::TentarDeNovo { id },
+        },
+        Sub::Cofre { acao } => match acao {
+            AcaoCofre::Listar => Comando::CofreListar,
+            AcaoCofre::Adicionar { rotulo } => Comando::CofreAdicionar {
+                rotulo,
+                senha: ler_senha("Senha a guardar no Cofre: ")?,
+            },
+            AcaoCofre::Remover { id } => Comando::CofreRemover { id },
+        },
+        Sub::Conteineres { acao } => match acao {
+            Some(AcaoConteineres::Ler) => Comando::LerConteineres,
+            None => Comando::StatusConteineres,
+        },
+        Sub::Conteudo {
+            conteiner,
+            pasta,
+            aninhado,
+            limite,
+            cursor,
+        } => Comando::ExplorarConteiner {
+            conteiner,
+            pai_ordem: aninhado,
+            pasta,
+            limite,
+            cursor,
+        },
         Sub::Duplicados {
             acao: Some(AcaoDuplicados::Reconstruir),
             ..

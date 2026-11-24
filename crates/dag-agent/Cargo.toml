@@ -13,6 +13,9 @@ dag-monitor.workspace = true
 dag-platform-linux.workspace = true
 dag-scanner.workspace = true
 dag-store.workspace = true
+bancada-segredos.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
 rusqlite.workspace = true
 rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
@@ -21,6 +24,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+bancada-segredos = { workspace = true, features = ["testes"] }
+zip.workspace = true
 
 [lints]
 workspace = true

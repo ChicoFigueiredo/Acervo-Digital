@@ -167,6 +167,64 @@ pub fn todas() -> Vec<Ferramenta> {
         ),
         objeto(Value::Object(ex), &[]),
     ));
+    v.push(f(
+        "status_conteineres",
+        "status_conteineres",
+        &format!("Andamento da etapa de conteúdo de contêineres (compactados): lidos, pendentes, aguardando senha, falhas e itens abertos na Fila de Serviço. {SEGURO}"),
+        objeto(json!({}), &[]),
+    ));
+    v.push(f(
+        "ler_conteineres",
+        "ler_conteineres",
+        &format!("Lê o conteúdo dos contêineres pendentes (zip, 7z, rar, tar...) em fluxo e na memória, calculando o BLAKE3 de cada Membro; nada é extraído nem gravado em disco. Retomável. {SEGURO}"),
+        objeto(json!({}), &[]),
+    ));
+    v.push(f(
+        "fila_servico",
+        "listar_pedidos",
+        &format!("Fila de Serviço: Pedidos de Senha (contêineres cifrados) e Falhas de Leitura. Nunca devolve senhas. {SEGURO}"),
+        objeto(
+            json!({"incluir_encerrados": {"type": "boolean", "description": "Inclui itens já resolvidos ou dispensados (padrão: só os abertos)"}}),
+            &[],
+        ),
+    ));
+    v.push(f(
+        "fornecer_senha",
+        "resolver_pedido",
+        "Fornece a senha de um contêiner cifrado ao Pedido de Senha `id` da Fila de Serviço. A senha é cifrada no Cofre de Senhas (chave no keyring do sistema) e o contêiner é lido de novo. O MCP só fornece senhas: nenhuma ferramenta as devolve. Só muda o Catálogo.",
+        objeto(
+            json!({"id": {"type": "integer", "description": "Id do pedido (veja `fila_servico`)"},
+                "senha": {"type": "string", "description": "Senha do contêiner"}}),
+            &["id", "senha"],
+        ),
+    ));
+    v.push(f(
+        "dispensar_pedido",
+        "dispensar_pedido",
+        "Dispensa um item da Fila de Serviço (o contêiner fica sem conteúdo catalogado). Só muda o Catálogo.",
+        objeto(json!({"id": {"type": "integer"}}), &["id"]),
+    ));
+    v.push(f(
+        "tentar_de_novo",
+        "tentar_de_novo",
+        "Reenfileira o contêiner de um item da Fila de Serviço (por exemplo uma Falha de Leitura) e o lê de novo. Só muda o Catálogo.",
+        objeto(json!({"id": {"type": "integer"}}), &["id"]),
+    ));
+    let mut mem = json!({
+        "conteiner": {"type": "string", "description": "Caminho do arquivo contêiner catalogado"},
+        "pasta": {"type": "string", "description": "Pasta dentro do contêiner (padrão: a raiz)"},
+        "pai_ordem": {"type": "integer", "description": "Ordem do Membro aninhado em que entrar (campo aninhado_ordem de uma entrada)"}
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    mem.append(&mut pag_props.clone());
+    v.push(f(
+        "explorar_conteiner",
+        "explorar_conteiner",
+        &format!("Lista o conteúdo de um contêiner catalogado como pasta virtual (lido do Catálogo, sem abrir o arquivo). {SEGURO}"),
+        objeto(Value::Object(mem), &["conteiner"]),
+    ));
     let mut dup = json!({
         "volume": {"type": "string", "description": "Só grupos com cópia neste Volume (id, rótulo ou ponto de montagem)"},
         "tamanho_minimo": {"type": "integer", "minimum": 0, "description": "Tamanho mínimo do arquivo, em bytes"},

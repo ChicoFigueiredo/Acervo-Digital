@@ -574,6 +574,12 @@ fn tipo_do_job(pedido: &Pedido) -> Option<(TipoJob, Vec<String>, Option<i64>)> {
             Some((TipoJob::VerificacaoIntegridade, raizes.clone(), None))
         }
         Comando::ReconstruirDuplicados => Some((TipoJob::Duplicados, Vec::new(), None)),
+        // Leitura do conteúdo de Contêineres: a etapa é longa e retomável. Fornecer a senha ou
+        // "tentar de novo" também leem o Contêiner, então também são trabalho de fila.
+        Comando::LerConteineres
+        | Comando::ResolverPedido { .. }
+        | Comando::TentarDeNovo { .. }
+        | Comando::CofreAdicionar { .. } => Some((TipoJob::Conteineres, Vec::new(), None)),
         _ => None,
     }
 }
@@ -1129,7 +1135,7 @@ fn rodar_monitor(agente: &mut Agente, comp: &Arc<Compartilhado>, ultimo_erro: &m
 /// Limita a cadência do progresso (por tipo), sem perder trocas de fase nem o fim.
 #[derive(Default)]
 struct Limitador {
-    ultimo: [Option<Instant>; 4],
+    ultimo: [Option<Instant>; 5],
     fase: [Option<FaseInventario>; 2],
 }
 
@@ -1153,6 +1159,13 @@ impl Limitador {
                 h.preparando
                     || h.janela_ms == 0
                     || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total),
+            ),
+            Progresso::Conteineres(c) => (
+                4,
+                c.andamento.preparando
+                    || c.andamento.janela_ms == 0
+                    || (c.andamento.arquivos_total > 0
+                        && c.andamento.arquivos_feitos >= c.andamento.arquivos_total),
             ),
             Progresso::Verificacao(h) => (
                 3,

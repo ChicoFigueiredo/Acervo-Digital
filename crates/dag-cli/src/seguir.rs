@@ -182,5 +182,8 @@ fn mostrar(
             }
         }
         EventoAgente::Batida => {}
+        EventoAgente::AgenteReiniciando { de, para } => {
+            println!("[{h}] agente reiniciando no lugar ({de} -> {para}); reconectando...");
+        }
     }
 }

@@ -121,6 +121,9 @@ pub enum Comando {
     RetomarJob { job: u64 },
     /// Cancela o trabalho `job`, em andamento ou ainda na fila.
     CancelarJob { job: u64 },
+    /// Pede ao agente em segundo plano que se reexecute no lugar (mesmo processo, binário atual
+    /// do disco), com checkpoint do que estiver rodando. Só existe com agente.
+    ReiniciarAgente,
     /// Consulta progresso das execuções.
     Status { execucao: Option<ExecucaoId> },
     /// Lista Grupos de Duplicados, paginado por cursor (keyset). `volume` filtra grupos com

@@ -473,7 +473,8 @@ impl Agente {
             | Comando::Cancelar { .. }
             | Comando::PausarJob { .. }
             | Comando::RetomarJob { .. }
-            | Comando::CancelarJob { .. } => Err(ErroAgente::SemAgente),
+            | Comando::CancelarJob { .. }
+            | Comando::ReiniciarAgente => Err(ErroAgente::SemAgente),
             // Uma sessão em processo não tem fila: os trabalhos são do agente em segundo plano.
             Comando::ListarJobs => Ok(Resposta::Jobs { jobs: Vec::new() }),
             _ => Err(ErroAgente::NaoImplementado(0)),

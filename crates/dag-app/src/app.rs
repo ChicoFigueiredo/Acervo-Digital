@@ -297,6 +297,10 @@ pub struct AppDag {
     foco: Option<u64>,
     /// A conexão com o agente caiu e a GUI está reconectando.
     reconectando: bool,
+    /// Aviso de versão do agente ("agente desatualizado ..."), com o botão Reiniciar agente.
+    aviso_versao: Option<String>,
+    /// Versão para a qual o agente anunciou que vai reiniciar (até reconectar).
+    reiniciando_para: Option<String>,
     pub ultimo_scan: Option<ResumoScan>,
     pub totais: Carga<TotaisCatalogo>,
     totais_geracao: u64,
@@ -369,6 +373,8 @@ impl AppDag {
             scan: None,
             foco: None,
             reconectando: false,
+            aviso_versao: None,
+            reiniciando_para: None,
             ultimo_scan: None,
             totais: Carga::default(),
             totais_geracao: 0,
@@ -618,6 +624,29 @@ impl AppDag {
                     self.invalidar();
                 }
                 Evento::Monitor(_) | Evento::Confianca(_) => {}
+                Evento::Versao(info) => {
+                    let situacao =
+                        dag_agent::comparar(&info, &dag_agent::IdentidadeBinario::propria());
+                    self.aviso_versao = situacao.aviso();
+                    if let Some(para) = self.reiniciando_para.take() {
+                        self.avisos.retain(|a| !a.texto.starts_with(PREFIXO_AGENTE));
+                        self.aviso(
+                            Tom::Sucesso,
+                            format!("{PREFIXO_AGENTE} atualizado para {para}."),
+                        );
+                    }
+                    self.invalidar();
+                }
+                Evento::AgenteReiniciando { de, para } => {
+                    self.avisos.retain(|a| !a.texto.starts_with(PREFIXO_AGENTE));
+                    self.aviso(
+                        Tom::Info,
+                        format!("{PREFIXO_AGENTE} reiniciando ({de} → {para}); o trabalho em curso continua sozinho."),
+                    );
+                    self.aviso_versao = None;
+                    self.reiniciando_para = Some(para);
+                    self.invalidar();
+                }
                 Evento::Abertura { texto, fim } => {
                     // A recuperação ao abrir é uma execução em andamento para a GUI: aparece em
                     // Varredura e na barra de status, e Pausar/Cancelar valem para ela.
@@ -1128,6 +1157,26 @@ impl AppDag {
         }
     }
 
+    /// Faixa "agente desatualizado" com o botão que reinicia o agente no lugar.
+    fn faixa_de_versao(&mut self, ui: &mut egui::Ui) {
+        let Some(texto) = self.aviso_versao.clone() else {
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Reiniciar agente")
+                .on_hover_text(
+                    "O agente se reexecuta com o binário instalado; varreduras em curso são \
+                     interrompidas num ponto seguro e retomadas sozinhas",
+                )
+                .clicked()
+            {
+                self.worker.reiniciar_agente();
+            }
+            ui.colored_label(ui.visuals().warn_fg_color, texto);
+        });
+    }
+
     // ------------------------------------------------------------------ barra de status
 
     #[must_use]
@@ -1312,6 +1361,7 @@ impl AppCasca for AppDag {
             // Cadência baixa enquanto roda; os eventos do worker acordam a UI quando chegam.
             ui.ctx().request_repaint_after(Duration::from_millis(500));
         }
+        self.faixa_de_versao(ui);
         paginas::faixa_de_avisos(ui, &mut self.avisos);
         match paginas::por_id(rota.como_texto()) {
             Some(p) => {

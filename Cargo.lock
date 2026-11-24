@@ -881,6 +881,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dag-imagens"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "dag-mcp"
 version = "0.1.0"
 dependencies = [

@@ -12,6 +12,38 @@ fn limite(l: usize) -> i64 {
     l.clamp(1, LIMITE_MAXIMO) as i64
 }
 
+/// Marcação (Backup ou Deleção) que vale diretamente para um arquivo ou pasta, para o menu de
+/// contexto mostrar "Marcado para deleção por gui em <data>".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarcaVista {
+    /// `backup` ou `delecao`.
+    pub tipo: String,
+    /// `gui`, `cli` ou `mcp`.
+    pub autor: String,
+    /// Criação, segundos desde a época Unix.
+    pub criada_em: i64,
+}
+
+impl MarcaVista {
+    /// Lê o texto `tipo|autor|criada_em` devolvido pelas consultas.
+    #[must_use]
+    pub fn de_texto(t: Option<String>) -> Option<Self> {
+        let t = t?;
+        let mut p = t.splitn(3, '|');
+        Some(Self {
+            tipo: p.next()?.to_string(),
+            autor: p.next()?.to_string(),
+            criada_em: p.next()?.parse().ok()?,
+        })
+    }
+
+    /// Marcação para Deleção?
+    #[must_use]
+    pub fn e_delecao(&self) -> bool {
+        self.tipo == "delecao"
+    }
+}
+
 /// Uma pasta da árvore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoPasta {
@@ -27,6 +59,8 @@ pub struct NoPasta {
     pub estado_agregado: Option<String>,
     pub tem_subpastas: bool,
     pub mtime_ns: Option<i64>,
+    /// Regra de Marcação sobre a pasta, se houver.
+    pub marca: Option<MarcaVista>,
 }
 
 /// Posição keyset da árvore: `(bytes, id)` da última pasta devolvida.
@@ -46,7 +80,9 @@ pub struct PaginaPastas {
 const COLUNAS_PASTA: &str = "f.id, f.volume_id, f.name_display, f.path_display,
     COALESCE(s.logical_bytes, 0), s.allocated_entry_bytes, COALESCE(s.recursive_file_count, 0),
     COALESCE(s.recursive_folder_count, 0), s.aggregate_state,
-    EXISTS(SELECT 1 FROM folders c WHERE c.parent_folder_id = f.id), f.mtime_ns";
+    EXISTS(SELECT 1 FROM folders c WHERE c.parent_folder_id = f.id), f.mtime_ns,
+    (SELECT m.tipo || '|' || m.autor || '|' || m.criada_em FROM marcacoes m
+      WHERE m.folder_id = f.id ORDER BY m.tipo DESC LIMIT 1)";
 
 fn ler_pasta(l: &rusqlite::Row<'_>) -> rusqlite::Result<NoPasta> {
     Ok(NoPasta {
@@ -61,6 +97,7 @@ fn ler_pasta(l: &rusqlite::Row<'_>) -> rusqlite::Result<NoPasta> {
         estado_agregado: l.get(8)?,
         tem_subpastas: l.get::<_, i64>(9)? != 0,
         mtime_ns: l.get(10)?,
+        marca: MarcaVista::de_texto(l.get(11)?),
     })
 }
 
@@ -139,6 +176,8 @@ pub struct LinhaArquivo {
     pub duplicado: bool,
     /// `backup` ou `delecao` se há Marcação manual neste arquivo.
     pub marcacao: Option<String>,
+    /// Detalhe da marcação (autor e data) para o menu de contexto.
+    pub marca: Option<MarcaVista>,
     /// Está Na Lixeira (dentro da `DAG-Lixeira` do Volume).
     pub na_lixeira: bool,
     /// Caminho completo catalogado (para abrir e para o menu de contexto).
@@ -177,7 +216,9 @@ pub fn arquivos_da_pasta(
                 EXISTS(SELECT 1 FROM hashes h WHERE h.file_id = a.id),
                 EXISTS(SELECT 1 FROM grupo_membros g WHERE g.file_id = a.id),
                 (SELECT m.tipo FROM marcacoes m WHERE m.file_id = a.id LIMIT 1),
-                a.na_lixeira, a.path_display
+                a.na_lixeira, a.path_display,
+                (SELECT m.tipo || '|' || m.autor || '|' || m.criada_em FROM marcacoes m
+                  WHERE m.file_id = a.id ORDER BY m.tipo DESC LIMIT 1)
          FROM files a
          LEFT JOIN file_types t ON t.id = a.mime_id
          LEFT JOIN classifications c ON c.id = a.class_id
@@ -204,6 +245,7 @@ pub fn arquivos_da_pasta(
                 marcacao: l.get(13)?,
                 na_lixeira: l.get::<_, i64>(14)? != 0,
                 caminho: l.get(15)?,
+                marca: MarcaVista::de_texto(l.get(16)?),
             })
         })?
         .collect::<Result<_, _>>()?;

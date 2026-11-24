@@ -43,6 +43,8 @@ pub struct NoAnalise {
     pub caminho: Option<String>,
     /// Arquivo Na Lixeira.
     pub na_lixeira: bool,
+    /// Marcação direta (arquivo) ou regra (pasta), para o menu de contexto.
+    pub marca: Option<super::navegacao::MarcaVista>,
 }
 
 impl NoAnalise {
@@ -136,7 +138,9 @@ fn pastas_filhas(
 ) -> Resultado<Vec<NoAnalise>> {
     let sql = format!(
         "SELECT f.id, f.name_display, COALESCE(s.logical_bytes, 0), s.allocated_entry_bytes,
-                s.recursive_file_count, f.mtime_ns, c.category, f.path_display
+                s.recursive_file_count, f.mtime_ns, c.category, f.path_display,
+                (SELECT m.tipo || '|' || m.autor || '|' || m.criada_em FROM marcacoes m
+                  WHERE m.folder_id = f.id ORDER BY m.tipo DESC LIMIT 1)
          FROM folders f LEFT JOIN folder_stats s ON s.folder_id = f.id
          LEFT JOIN classifications c ON c.id = f.class_id
          WHERE {sql_where}
@@ -156,6 +160,7 @@ fn pastas_filhas(
                 categoria: None,
                 caminho: Some(l.get(7)?),
                 na_lixeira: false,
+                marca: super::navegacao::MarcaVista::de_texto(l.get(8)?),
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -170,7 +175,9 @@ fn pastas_filhas(
 fn arquivos_filhos(conn: &Connection, pasta: i64, limite: usize) -> Resultado<Vec<NoAnalise>> {
     let mut st = conn.prepare_cached(
         "SELECT a.id, a.name_display, a.logical_bytes, a.allocated_bytes, a.mtime_ns,
-                t.broad_category, c.category, a.path_display, a.na_lixeira
+                t.broad_category, c.category, a.path_display, a.na_lixeira,
+                (SELECT m.tipo || '|' || m.autor || '|' || m.criada_em FROM marcacoes m
+                  WHERE m.file_id = a.id ORDER BY m.tipo DESC LIMIT 1)
          FROM files a LEFT JOIN file_types t ON t.id = a.mime_id
          LEFT JOIN classifications c ON c.id = a.class_id
          WHERE a.folder_id = ?1 ORDER BY a.logical_bytes DESC, a.id LIMIT ?2",
@@ -188,6 +195,7 @@ fn arquivos_filhos(conn: &Connection, pasta: i64, limite: usize) -> Resultado<Ve
                 arquivos: None,
                 caminho: Some(l.get(7)?),
                 na_lixeira: l.get::<_, i64>(8)? != 0,
+                marca: super::navegacao::MarcaVista::de_texto(l.get(9)?),
             })
         })?
         .collect::<Result<_, _>>()?)
@@ -220,6 +228,7 @@ pub fn analisar(conn: &Connection, alvo: AlvoAnalise, limite: usize) -> Resultad
                     Ok(NoAnalise {
                         caminho: None,
                         na_lixeira: false,
+                        marca: None,
                         chave: ChaveNo::Volume(id),
                         nome: rotulo_volume(l.get(1)?, l.get(2)?, id),
                         bytes: n(l.get(3)?),

@@ -14,8 +14,9 @@ use rusqlite::{Connection, OpenFlags};
 
 pub use analise::{AlvoAnalise, Analise, ChaveNo, Elo as EloAnalise, NoAnalise, analisar};
 pub use navegacao::{
-    CursorArquivo, CursorPasta, InfoPasta, LIMITE_MAXIMO, LinhaArquivo, NoPasta, PaginaArquivos,
-    PaginaPastas, arquivos_da_pasta, info_da_pasta, raizes, subpastas, trilha_da_pasta,
+    CursorArquivo, CursorPasta, InfoPasta, LIMITE_MAXIMO, LinhaArquivo, MarcaVista, NoPasta,
+    PaginaArquivos, PaginaPastas, arquivos_da_pasta, info_da_pasta, raizes, subpastas,
+    trilha_da_pasta,
 };
 
 use crate::Resultado;

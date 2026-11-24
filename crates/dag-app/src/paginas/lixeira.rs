@@ -282,6 +282,48 @@ pub fn dialogos(ctx: &egui::Context, app: &mut AppDag) {
     }
 }
 
+/// Confirmação de marcar/desmarcar uma pasta inteira (nível 1: só o Catálogo muda).
+pub fn dialogo_marca(ctx: &egui::Context, app: &mut AppDag) {
+    let Some(c) = app.lixeira.confirma_marca.clone() else {
+        return;
+    };
+    let mut fechar = false;
+    let mut enviar = false;
+    egui::Window::new(if c.marcar {
+        "Marcar para deleção"
+    } else {
+        "Desmarcar para deleção"
+    })
+    .collapsible(false)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+    .show(ctx, |ui| {
+        ui.label(c.texto());
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Confirmar").clicked() {
+                enviar = true;
+            }
+            if ui.button("Cancelar").clicked() {
+                fechar = true;
+            }
+        });
+    });
+    if enviar {
+        app.lixeira.confirma_marca = None;
+        app.enviar(
+            crate::lixeira::comando_marca(&c.alvo, c.marcar),
+            Proposito::Marcacao(if c.marcar {
+                crate::confirmacao::AcaoMarcacao::MarcarDelecao
+            } else {
+                crate::confirmacao::AcaoMarcacao::Desmarcar
+            }),
+        );
+    } else if fechar {
+        app.lixeira.confirma_marca = None;
+    }
+}
+
 /// Entrada única para os menus de contexto das outras páginas.
 pub fn menu(
     ui_resposta: &egui::Response,

@@ -518,6 +518,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                 estado_agregado: None,
                 tem_subpastas: true,
                 mtime_ns: None,
+                marca: None,
             });
         let atual = est.selecionada.as_ref().map(|p| p.id);
         if let Some(p) = na_arvore.or(da_trilha).filter(|p| Some(p.id) != atual) {

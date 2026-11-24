@@ -73,7 +73,7 @@ pub fn gerar(c: &ConfigUnidade) -> Result<String, ErroServico> {
     let mut u = String::new();
     u.push_str(
         "[Unit]\n\
-         Description=DAG - agente em segundo plano (catálogo de discos, somente leitura sobre o acervo)\n\
+         Description=DAG - agente em segundo plano (catálogo de discos; só move para a DAG-Lixeira, nunca apaga)\n\
          Documentation=man:dag(1)\n\n\
          [Service]\n\
          Type=simple\n",
@@ -94,10 +94,14 @@ pub fn gerar(c: &ConfigUnidade) -> Result<String, ErroServico> {
          # Prioridade conservadora (A-21): não disputa CPU/disco com o uso normal.\n\
          Nice=10\n\
          IOSchedulingClass=idle\n\
-         # Endurecimento: o acervo é somente leitura; só os diretórios do DAG são graváveis.\n\
+         # Endurecimento (ADR 0005): o DAG nunca apaga nem altera conteúdo; a única escrita nos\n\
+         # arquivos catalogados é mover para a DAG-Lixeira do mesmo Volume e de volta (rename).\n\
+         # Por isso a unidade não deixa home nem os pontos de montagem somente leitura: eles deixariam os\n\
+         # Volumes catalogados (home, /mnt, /media) somente leitura para o agente e o rename\n\
+         # falharia. A garantia de não apagar está no código e no teste estático de segurança.\n\
+         # ProtectSystem=full mantém /usr, /boot e /etc somente leitura.\n\
          NoNewPrivileges=yes\n\
-         ProtectSystem=strict\n\
-         ProtectHome=read-only\n\
+         ProtectSystem=full\n\
          PrivateTmp=yes\n",
     );
     if !rw.is_empty() {

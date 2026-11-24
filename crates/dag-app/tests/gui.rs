@@ -222,17 +222,28 @@ fn explorador_carrega_arvore_sob_demanda_e_arquivos_da_pasta() {
     );
     let raiz = a.casca.app.explorador.arvore[0].pasta.clone();
     assert!(raiz.tem_subpastas);
-    let leitor = &a.casca.app.leitor as *const _;
-    // Seleciona e expande a raiz como o clique faria.
-    {
-        let app = &mut a.casca.app;
-        app.explorador.selecionar(&app.leitor, raiz.clone());
-        app.explorador.expandir_selecionada(&app.leitor);
+    // A árvore pode ser relida quando o Catálogo muda logo após a varredura (perdendo a
+    // expansão): repete selecionar e expandir até os filhos aparecerem.
+    let fim = Instant::now() + Duration::from_secs(60);
+    loop {
+        {
+            let app = &mut a.casca.app;
+            if app.explorador.arvore[0].filhos.is_empty() {
+                let raiz = app.explorador.arvore[0].pasta.clone();
+                app.explorador.selecionar(&app.leitor, raiz);
+                app.explorador.expandir_selecionada(&app.leitor);
+            }
+        }
+        for _ in 0..40 {
+            a.quadro();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let app = &a.casca.app;
+        if app.explorador.arvore[0].filhos.len() == 3 && app.explorador.arquivos.dado.is_some() {
+            break;
+        }
+        assert!(Instant::now() < fim, "tempo esgotado: filhos e arquivos");
     }
-    let _ = leitor;
-    a.ate("filhos e arquivos", |app| {
-        app.explorador.arvore[0].filhos.len() == 3 && app.explorador.arquivos.dado.is_some()
-    });
     let arquivos = a.casca.app.explorador.arquivos.dado.clone().unwrap();
     let nomes: Vec<_> = arquivos.itens.iter().map(|f| f.nome.as_str()).collect();
     assert_eq!(nomes, ["big.pdf", "a.txt"]);
@@ -739,6 +750,8 @@ fn lixeira_dois_dialogos_mover_e_restaurar_de_ponta_a_ponta() {
         caminho: Some(sub.display().to_string()),
         pasta: true,
         na_lixeira: false,
+        marca: None,
+        arquivos: Some(3),
     };
     let ctx = a.ctx.clone();
     a.casca
@@ -850,8 +863,228 @@ fn menu_de_contexto_depende_de_estar_na_lixeira() {
         caminho: Some("/x/a".into()),
         pasta: false,
         na_lixeira: false,
+        marca: None,
+        arquivos: None,
     };
-    assert_eq!(itens_do_menu(&m)[0], ItemMenu::MoverParaLixeira);
+    assert!(itens_do_menu(&m).contains(&ItemMenu::MoverParaLixeira));
     m.na_lixeira = true;
-    assert_eq!(itens_do_menu(&m)[0], ItemMenu::RestaurarDaLixeira);
+    assert!(itens_do_menu(&m).contains(&ItemMenu::RestaurarDaLixeira));
+}
+
+#[derive(Debug, Default)]
+struct AbridorGravador(std::sync::Mutex<Vec<std::path::PathBuf>>);
+
+impl dag_app::lixeira::Abridor for AbridorGravador {
+    fn abrir(&self, caminho: &Path) -> Result<(), String> {
+        self.0.lock().unwrap().push(caminho.to_path_buf());
+        Ok(())
+    }
+}
+
+fn marcas_no_catalogo(a: &Ambiente) -> Vec<(String, String)> {
+    let c = rusqlite::Connection::open_with_flags(
+        a._tmp.path().join("dados/catalogo.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut st = c
+        .prepare("SELECT tipo, escopo FROM marcacoes ORDER BY id")
+        .unwrap();
+    st.query_map([], |l| Ok((l.get(0)?, l.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn menu_abre_arquivo_e_pasta_pelo_abridor_injetavel() {
+    use dag_app::lixeira::{AlvoMenu, ItemMenu};
+    use dag_core::{Alvo, ArquivoId};
+    let mut a = ambiente_populado();
+    let g = std::sync::Arc::new(AbridorGravador::default());
+    a.casca.app.lixeira.abridor = g.clone();
+    let ctx = a.ctx.clone();
+    let mk = |pasta: bool, c: &str| AlvoMenu {
+        alvo: if pasta {
+            Alvo::Pasta(c.into())
+        } else {
+            Alvo::Arquivo(ArquivoId(1))
+        },
+        rotulo: "n".into(),
+        caminho: Some(c.into()),
+        pasta,
+        na_lixeira: false,
+        marca: None,
+        arquivos: None,
+    };
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::AbrirArquivo, mk(false, "/d/sub/y.txt")));
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::AbrirPasta, mk(true, "/d/sub")));
+    a.casca.app.tratar_escolha(
+        &ctx,
+        (ItemMenu::AbrirNoGerenciador, mk(false, "/d/sub/y.txt")),
+    );
+    assert_eq!(
+        *g.0.lock().unwrap(),
+        vec![
+            std::path::PathBuf::from("/d/sub/y.txt"),
+            std::path::PathBuf::from("/d/sub"),
+            std::path::PathBuf::from("/d/sub"),
+        ]
+    );
+}
+
+#[test]
+fn menu_marca_e_desmarca_copia_na_pagina_duplicados() {
+    use dag_app::lixeira::{AlvoMenu, ItemMenu, itens_do_menu};
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    a.abrir("duplicados");
+    a.ate("lista de grupos", |app| {
+        app.duplicados
+            .lista
+            .dado
+            .as_ref()
+            .is_some_and(|l| !l.grupos.is_empty())
+    });
+    let g = a.casca.app.duplicados.lista.dado.as_ref().unwrap().grupos[0].id;
+    a.casca.app.duplicados.selecionado = Some(g);
+    a.ate("detalhe do grupo", |app| {
+        app.duplicados.detalhe.dado.is_some()
+    });
+    let ctx = a.ctx.clone();
+    let copia = a
+        .casca
+        .app
+        .duplicados
+        .detalhe
+        .dado
+        .as_ref()
+        .unwrap()
+        .copias
+        .iter()
+        .find(|c| !c.principal)
+        .unwrap()
+        .clone();
+    let alvo = AlvoMenu::de_copia(&copia);
+    assert!(itens_do_menu(&alvo).contains(&ItemMenu::MarcarDelecao));
+    assert_eq!(alvo.cabecalho(), "Sem marcação para deleção");
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::MarcarDelecao, alvo));
+    a.ate("copia marcada", |app| {
+        app.duplicados.detalhe.dado.as_ref().is_some_and(|d| {
+            d.copias
+                .iter()
+                .any(|c| c.arquivo == copia.arquivo && c.marcacao.is_some())
+        })
+    });
+    assert_eq!(
+        marcas_no_catalogo(&a),
+        vec![("delecao".to_string(), "manual_arquivo".to_string())]
+    );
+    let marcada = a
+        .casca
+        .app
+        .duplicados
+        .detalhe
+        .dado
+        .as_ref()
+        .unwrap()
+        .copias
+        .iter()
+        .find(|c| c.arquivo == copia.arquivo)
+        .unwrap()
+        .clone();
+    let alvo = AlvoMenu::de_copia(&marcada);
+    assert!(itens_do_menu(&alvo).contains(&ItemMenu::DesmarcarDelecao));
+    assert!(alvo.cabecalho().starts_with("Marcado para deleção"));
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::DesmarcarDelecao, alvo));
+    a.ate("copia desmarcada", |app| {
+        app.pedidos.is_empty()
+            && app
+                .duplicados
+                .detalhe
+                .dado
+                .as_ref()
+                .is_some_and(|d| d.copias.iter().all(|c| c.marcacao.is_none()))
+    });
+    assert!(marcas_no_catalogo(&a).is_empty());
+    // Só o Catálogo mudou.
+    assert!(a.raiz.join("copia/big.pdf").exists() && a.raiz.join("big.pdf").exists());
+}
+
+#[test]
+fn menu_marca_pasta_com_confirmacao_de_contagem_e_mostra_o_estado() {
+    use dag_app::lixeira::{AlvoMenu, ItemMenu, comando_marca};
+    use dag_store::consulta_gui::{NoPasta, subpastas};
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    let ctx = a.ctx.clone();
+    let sub = a.raiz.join("sub").display().to_string();
+    let pasta = NoPasta {
+        id: 0,
+        volume_id: 0,
+        nome: "sub".into(),
+        caminho: sub,
+        bytes_logicos: 0,
+        bytes_alocados: None,
+        arquivos: 3,
+        pastas: 1,
+        estado_agregado: None,
+        tem_subpastas: true,
+        mtime_ns: None,
+        marca: None,
+    };
+    let alvo = AlvoMenu::de_pasta(&pasta);
+    a.ate("quietude", |app| app.pedidos.is_empty());
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::MarcarDelecao, alvo.clone()));
+    // Pasta pede confirmação com a contagem; nada foi enviado.
+    let c = a.casca.app.lixeira.confirma_marca.clone().unwrap();
+    assert!(c.texto().contains("3 arquivo(s)"), "{}", c.texto());
+    a.quadro();
+    assert!(a.casca.app.pedidos.is_empty());
+    assert!(marcas_no_catalogo(&a).is_empty());
+    // Confirmar grava a regra de pasta (só no Catálogo).
+    a.casca.app.lixeira.confirma_marca = None;
+    a.casca.app.enviar(
+        comando_marca(&alvo, true),
+        dag_app::app::Proposito::Marcacao(dag_app::confirmacao::AcaoMarcacao::MarcarDelecao),
+    );
+    a.ate("marca da pasta", |app| app.pedidos.is_empty());
+    assert_eq!(
+        marcas_no_catalogo(&a),
+        vec![("delecao".to_string(), "regra_pasta".to_string())]
+    );
+    assert!(a.raiz.join("sub/x.bin").exists());
+    // A árvore agora traz o estado e o menu mostra "Marcado para deleção por gui em ...".
+    let c = rusqlite::Connection::open_with_flags(
+        a._tmp.path().join("dados/catalogo.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let raiz_id: i64 = c
+        .query_row(
+            "SELECT id FROM folders WHERE path_display = ?1",
+            [a.raiz.display().to_string()],
+            |l| l.get(0),
+        )
+        .unwrap();
+    let filhas = subpastas(&c, raiz_id, None, 50).unwrap().itens;
+    let sub = filhas.iter().find(|p| p.nome == "sub").unwrap();
+    let alvo = AlvoMenu::de_pasta(sub);
+    assert!(
+        alvo.cabecalho()
+            .starts_with("Marcado para deleção por gui em "),
+        "{}",
+        alvo.cabecalho()
+    );
+    assert!(alvo.marcado());
 }

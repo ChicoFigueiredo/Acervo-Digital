@@ -904,7 +904,9 @@ impl AppDag {
 
     /// Trata o item escolhido num menu de contexto (mover, restaurar, abrir, copiar).
     pub fn tratar_escolha(&mut self, ctx: &egui::Context, escolha: crate::lixeira::Escolha) {
-        use crate::lixeira::{Dialogo, ItemMenu, comando_restaurar, pasta_para_abrir};
+        use crate::lixeira::{
+            ConfirmaMarca, Dialogo, ItemMenu, caminho_para_abrir, comando_marca, comando_restaurar,
+        };
         let (item, alvo) = escolha;
         match item {
             ItemMenu::MoverParaLixeira | ItemMenu::RestaurarDaLixeira => {
@@ -924,11 +926,31 @@ impl AppDag {
                     );
                 }
             }
-            ItemMenu::AbrirNoGerenciador => {
-                if let Some(p) = pasta_para_abrir(&alvo)
+            ItemMenu::AbrirArquivo | ItemMenu::AbrirPasta | ItemMenu::AbrirNoGerenciador => {
+                if let Some(p) = caminho_para_abrir(&alvo, item)
                     && let Err(e) = self.lixeira.abridor.abrir(&p)
                 {
                     self.aviso(Tom::Aviso, e);
+                }
+            }
+            ItemMenu::MarcarDelecao | ItemMenu::DesmarcarDelecao => {
+                if let Some(m) = self.motivo_sem_escrita() {
+                    self.aviso(Tom::Aviso, m);
+                    return;
+                }
+                let marcar = item == ItemMenu::MarcarDelecao;
+                if alvo.pasta {
+                    // Pasta vale para todos os arquivos dentro: pede confirmação com a contagem.
+                    self.lixeira.confirma_marca = Some(ConfirmaMarca { alvo, marcar });
+                } else {
+                    self.enviar(
+                        comando_marca(&alvo, marcar),
+                        Proposito::Marcacao(if marcar {
+                            AcaoMarcacao::MarcarDelecao
+                        } else {
+                            AcaoMarcacao::Desmarcar
+                        }),
+                    );
                 }
             }
             ItemMenu::CopiarCaminho => {
@@ -1301,6 +1323,7 @@ impl AppCasca for AppDag {
         }
         duplicados::dialogo_de_confirmacao(ui.ctx(), self);
         paginas::lixeira::dialogos(ui.ctx(), self);
+        paginas::lixeira::dialogo_marca(ui.ctx(), self);
     }
 
     fn status(&self) -> Vec<SegmentoStatus> {

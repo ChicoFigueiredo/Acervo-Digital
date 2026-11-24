@@ -444,6 +444,7 @@ fn detalhe(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
         bytes_humanos(g.bytes_redundantes_estimados),
     ));
     let mut sel = app.duplicados.copia;
+    let mut menu = None;
     tabela(
         ui,
         "dup-copias",
@@ -452,11 +453,11 @@ fn detalhe(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
         (altura - 170.0).max(100.0),
         |l, i| {
             let c = &d.copias[i];
-            if l.selecionavel(sel == Some(c.arquivo), if c.principal { "★" } else { " " })
-                .clicked()
-            {
+            let r = l.selecionavel(sel == Some(c.arquivo), if c.principal { "★" } else { " " });
+            if r.clicked() {
                 sel = Some(c.arquivo);
             }
+            super::lixeira::menu(&r, &crate::lixeira::AlvoMenu::de_copia(c), &mut menu);
             l.texto(
                 c.volume_rotulo
                     .clone()
@@ -471,7 +472,8 @@ fn detalhe(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
             } else {
                 String::new()
             };
-            l.texto(format!("{}{extra}", c.caminho));
+            let r = l.texto(format!("{}{extra}", c.caminho));
+            super::lixeira::menu(&r, &crate::lixeira::AlvoMenu::de_copia(c), &mut menu);
             l.texto(if c.conectado {
                 "Conectado".to_string()
             } else {
@@ -483,6 +485,9 @@ fn detalhe(ui: &mut egui::Ui, app: &mut AppDag, altura: f32) {
         },
     );
     app.duplicados.copia = sel;
+    if let Some(m) = menu {
+        app.tratar_escolha(ui.ctx(), m);
+    }
     ui.weak("★ = Cópia Principal. Cobertura = cópia com Marcação de Backup em outro Dispositivo Físico.");
     let motivo = app.motivo_sem_escrita();
     let mut pedir = None;

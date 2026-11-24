@@ -171,8 +171,7 @@ fn conteudo_da_unidade() {
         "TimeoutStopSec=120",
         "Restart=on-failure",
         "NoNewPrivileges=yes",
-        "ProtectSystem=strict",
-        "ProtectHome=read-only",
+        "ProtectSystem=full",
         "PrivateTmp=yes",
         "Nice=10",
         "IOSchedulingClass=idle",
@@ -181,6 +180,11 @@ fn conteudo_da_unidade() {
     ] {
         assert!(u.contains(esperado), "falta `{esperado}` em:\n{u}");
     }
+    // ADR 0005: o agente precisa mover (rename) dentro dos Volumes catalogados.
+    assert!(!u.contains("ProtectHome"), "{u}");
+    assert!(!u.contains("ProtectSystem=strict"), "{u}");
+    assert!(!u.contains("somente leitura sobre o acervo"), "{u}");
+    assert!(u.contains("nunca apaga"), "{u}");
     // Instalar não habilita: não há símbolos de enable no texto, e a unidade é de usuário.
     assert!(!u.contains("User="));
     assert!(!u.contains("multi-user.target"));

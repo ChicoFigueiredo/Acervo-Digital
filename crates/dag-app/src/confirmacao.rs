@@ -244,6 +244,7 @@ mod testes {
                 hash: HashCompleto([1; 32]),
                 tamanho: 10,
                 copias: copias.len() as u32,
+                copias_em_conteineres: 0,
                 copias_offline: 0,
                 copia_principal: Some(ArquivoId(1)),
                 modo_principal: ModoPrincipal::Auto,
@@ -252,6 +253,7 @@ mod testes {
                 espaco_recuperavel_bytes: 0,
             },
             copias,
+            copias_em_conteineres: Vec::new(),
         }
     }
 

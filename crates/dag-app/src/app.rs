@@ -23,7 +23,7 @@ use crate::confirmacao::{AcaoMarcacao, AlvoAcao, planejar};
 use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::leitor::{Acordador, Carga, Leitor, erro};
 use crate::paginas::{
-    self, DefPagina, analise, configuracoes, discos, duplicados, explorador, varredura,
+    self, DefPagina, analise, configuracoes, discos, duplicados, explorador, fila, varredura,
 };
 use crate::progresso::{AndamentoHash, FaseScan, ProgressoScan, restante_estimado, taxa_do_hash};
 use crate::selecao::Classificacao;
@@ -307,6 +307,7 @@ pub struct AppDag {
     pub explorador: explorador::Estado,
     pub analise: analise::Estado,
     pub duplicados: duplicados::Estado,
+    pub fila: fila::Estado,
     pub configuracoes: configuracoes::Estado,
 }
 
@@ -374,6 +375,7 @@ impl AppDag {
             explorador: explorador::Estado::default(),
             analise: analise::Estado::default(),
             duplicados: duplicados::Estado::default(),
+            fila: fila::Estado::default(),
             configuracoes: configuracoes::Estado::default(),
         }
     }
@@ -993,6 +995,14 @@ impl AppDag {
                     "Agrupando duplicados… (o agente avisa ao terminar)",
                 );
             }
+            "fila.atualizar" => self.invalidar(),
+            "fila.ler_conteineres" => {
+                self.enviar(Comando::LerConteineres, Proposito::Exportar);
+                self.aviso(
+                    Tom::Info,
+                    "Lendo o conteúdo dos contêineres… (o agente avisa ao terminar)",
+                );
+            }
             "duplicados.relatorio" => {
                 self.duplicados.painel_relatorio = true;
                 abrir("duplicados");
@@ -1262,13 +1272,14 @@ mod testes {
     use bancada_casca::{Disponibilidade, ListaDeAcoes};
     use std::collections::HashSet;
 
-    const ABAS: [&str; 8] = [
+    const ABAS: [&str; 9] = [
         "Início",
         "Discos",
         "Varredura",
         "Explorador",
         "Análise",
         "Duplicados",
+        "Fila de Serviço",
         "Monitoramento",
         "Configurações",
     ];
@@ -1302,7 +1313,7 @@ mod testes {
     }
 
     #[test]
-    fn as_oito_abas_estao_presentes_na_ordem() {
+    fn as_nove_abas_estao_presentes_na_ordem() {
         let rotulos: Vec<String> = AppDag::lista_de_abas()
             .into_iter()
             .map(|a| a.rotulo)

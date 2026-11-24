@@ -29,7 +29,11 @@ fn mais(c: &Option<String>) -> &'static str {
 pub fn resumir(r: &Resposta) -> String {
     match r {
         Resposta::Ok { mensagem } => mensagem.clone().unwrap_or_else(|| "Concluído.".into()),
-        Resposta::Volumes { volumes } => format!("{} Volume(s) conhecido(s).", volumes.len()),
+        Resposta::Volumes { volumes, ocultos } => format!(
+            "{} Volume(s) real(is); {} de imagem/virtuais ocultos.",
+            volumes.len(),
+            ocultos.len()
+        ),
         Resposta::ExecucaoIniciada { execucao } => {
             format!("Execução {} iniciada.", execucao.0)
         }

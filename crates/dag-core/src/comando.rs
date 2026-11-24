@@ -3,6 +3,7 @@
 //! Todo cliente envia um [`Pedido`] (autor + [`Comando`]) e recebe uma [`Resposta`].
 //! O transporte (socket local, etc.) não faz parte deste crate; só o formato.
 
+use crate::ClasseVolume;
 use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
     EventoInfo, ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId,
@@ -170,6 +171,12 @@ pub struct VolumeInfo {
     pub conectado: bool,
     pub capacidade_bytes: Option<u64>,
     pub livre_bytes: Option<u64>,
+    /// Natureza do volume; volumes antigos (sem o campo) contam como físicos.
+    #[serde(default)]
+    pub classe: ClasseVolume,
+    /// Partição de sistema (`/boot/efi`...) de um disco real.
+    #[serde(default)]
+    pub sistema: bool,
 }
 
 /// Progresso de uma execução de varredura.
@@ -245,8 +252,13 @@ pub enum Resposta {
     Ok {
         mensagem: Option<String>,
     },
+    /// `volumes`: reais (físicos, removíveis, rede), registrados no Catálogo.
+    /// `ocultos`: imagem/virtuais (snap, loop, zram...), fora da visão padrão e do Catálogo
+    /// (a menos que tenham sido varridos explicitamente); `id` 0 = não registrado.
     Volumes {
         volumes: Vec<VolumeInfo>,
+        #[serde(default)]
+        ocultos: Vec<VolumeInfo>,
     },
     ExecucaoIniciada {
         execucao: ExecucaoId,

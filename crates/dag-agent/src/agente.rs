@@ -1,5 +1,6 @@
 //! O [`Agente`]: abre o Catálogo e executa [`Comando`]s.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -9,9 +10,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dag_core::Plataforma as _;
 use dag_core::{
-    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId, FaseInventario,
-    ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario, Resposta,
-    ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
+    Alvo, Autor, ClasseVolume, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId,
+    FaseInventario, ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario,
+    Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
     ResumoVerificacao, SaudeMonitorInfo, StatusExecucao, TipoDispositivo, TipoMarcacao,
     TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
 };
@@ -367,12 +368,28 @@ impl Agente {
     fn listar_volumes(&mut self) -> Result<Resposta, ErroAgente> {
         let descobertos = self.volumes_do_sistema()?;
         let t = agora();
+        // Volumes de imagem/virtuais (snap, loop, zram...) são ruído: não entram no Catálogo por
+        // aqui. Os que já estavam registrados (varridos antes, de propósito) continuam
+        // sincronizados para não virarem "desmontados" por engano.
+        let registrados: HashSet<String> = {
+            let mut st = self
+                .catalogo
+                .armazem()
+                .conexao()
+                .prepare("SELECT platform_id FROM volumes")?;
+            st.query_map([], |l| l.get(0))?.collect::<Result<_, _>>()?
+        };
+        let a_sincronizar: Vec<VolumeDescoberto> = descobertos
+            .iter()
+            .filter(|v| v.classe.eh_real() || registrados.contains(&v.platform_id))
+            .cloned()
+            .collect();
         self.catalogo
             .armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroAgente> {
                 // Conectados são registrados; os que sumiram ficam `mounted = 0` (última vez visto
                 // preservada, nenhuma linha de arquivo alterada) com evento `desmontado`.
-                reconciliacao::sincronizar_volumes(tx, &descobertos, t)?;
+                reconciliacao::sincronizar_volumes(tx, &a_sincronizar, t)?;
                 Ok(())
             })?;
         let conn = self.catalogo.armazem().conexao();
@@ -380,27 +397,78 @@ impl Agente {
             "SELECT v.id, v.device_id, d.tipo, v.fs_type, v.rotulo, v.capacity_bytes,
                     v.free_bytes, v.mounted,
                     (SELECT path_display FROM mount_points m WHERE m.volume_id = v.id
-                     ORDER BY length(m.path_raw), m.id LIMIT 1)
+                     ORDER BY length(m.path_raw), m.id LIMIT 1),
+                    v.platform_id
              FROM volumes v LEFT JOIN dispositivos d ON d.id = v.device_id
              ORDER BY v.mounted DESC, v.id",
         )?;
-        let volumes = st
-            .query_map([], |l| {
-                let tipo: Option<String> = l.get(2)?;
-                Ok(VolumeInfo {
-                    id: VolumeId(l.get(0)?),
-                    dispositivo: l.get::<_, Option<i64>>(1)?.map(Into::into),
-                    tipo_dispositivo: tipo.as_deref().and_then(tipo_dispositivo),
-                    fs_type: l.get(3)?,
-                    rotulo: l.get(4)?,
-                    capacidade_bytes: l.get::<_, Option<i64>>(5)?.map(|x| x as u64),
-                    livre_bytes: l.get::<_, Option<i64>>(6)?.map(|x| x as u64),
-                    conectado: l.get::<_, i64>(7)? != 0,
-                    ponto_montagem: l.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Resposta::Volumes { volumes })
+        let classes: HashMap<&str, (ClasseVolume, bool)> = descobertos
+            .iter()
+            .map(|v| (v.platform_id.as_str(), (v.classe, v.sistema)))
+            .collect();
+        let mut volumes = Vec::new();
+        let mut ocultos = Vec::new();
+        let linhas = st.query_map([], |l| {
+            let tipo: Option<String> = l.get(2)?;
+            let platform_id: String = l.get(9)?;
+            let (classe, sistema) = classes
+                .get(platform_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            Ok(VolumeInfo {
+                id: VolumeId(l.get(0)?),
+                dispositivo: l.get::<_, Option<i64>>(1)?.map(Into::into),
+                tipo_dispositivo: tipo.as_deref().and_then(tipo_dispositivo),
+                fs_type: l.get(3)?,
+                rotulo: l.get(4)?,
+                capacidade_bytes: l.get::<_, Option<i64>>(5)?.map(|x| x as u64),
+                livre_bytes: l.get::<_, Option<i64>>(6)?.map(|x| x as u64),
+                conectado: l.get::<_, i64>(7)? != 0,
+                ponto_montagem: l.get(8)?,
+                classe,
+                sistema,
+            })
+        })?;
+        for v in linhas {
+            let v = v?;
+            if v.classe.eh_real() {
+                volumes.push(v);
+            } else {
+                ocultos.push(v);
+            }
+        }
+        // Ocultos ainda fora do Catálogo: descritos direto da descoberta, com id 0.
+        for d in descobertos
+            .iter()
+            .filter(|v| !v.classe.eh_real() && !registrados.contains(&v.platform_id) && !v.pseudo)
+        {
+            ocultos.push(info_descoberto(d));
+        }
+        Ok(Resposta::Volumes { volumes, ocultos })
+    }
+
+    /// Ids de Volumes registrados que hoje são de imagem/virtuais e nunca foram varridos:
+    /// ficam fora dos totais do Catálogo.
+    fn volumes_ruido_registrados(&self) -> Result<HashSet<i64>, ErroAgente> {
+        let ocultos: HashSet<String> = self
+            .volumes_do_sistema()?
+            .into_iter()
+            .filter(|v| !v.classe.eh_real())
+            .map(|v| v.platform_id)
+            .collect();
+        let conn = self.catalogo.armazem().conexao();
+        let mut st = conn.prepare(
+            "SELECT id, platform_id FROM volumes
+             WHERE id NOT IN (SELECT volume_id FROM volume_stats)",
+        )?;
+        let ids = st
+            .query_map([], |l| Ok((l.get::<_, i64>(0)?, l.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, p)| ocultos.contains(p))
+            .map(|(i, _)| i)
+            .collect();
+        Ok(ids)
     }
 
     // ------------------------------------------------------------------ varredura
@@ -798,6 +866,7 @@ impl Agente {
     // ------------------------------------------------------------------ status
 
     fn status(&self, execucao: Option<ExecucaoId>) -> Result<Resposta, ErroAgente> {
+        let ruido = self.volumes_ruido_registrados()?;
         let conn = self.catalogo.armazem().conexao();
         let ids: Vec<i64> = match execucao {
             Some(id) => vec![id.0],
@@ -821,7 +890,8 @@ impl Agente {
             [],
             |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
         )?;
-        let volumes: i64 = conn.query_row("SELECT COUNT(*) FROM volumes", [], |l| l.get(0))?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM volumes", [], |l| l.get(0))?;
+        let volumes = total - i64::try_from(ruido.len()).unwrap_or(0);
         let n = |x: i64| u64::try_from(x).unwrap_or(0);
         Ok(Resposta::Status {
             execucoes,
@@ -923,6 +993,27 @@ fn resumo_reconciliacao(r: &dag_scanner::ResumoFast) -> ResumoReconciliacao {
         remocao_aplicada: r.remocao_aplicada,
         motivo_sem_remocao: r.motivo_sem_remocao.clone(),
         eventos_omitidos: r.eventos_omitidos,
+    }
+}
+
+/// Resumo de um volume descoberto que não está no Catálogo (`id` 0).
+fn info_descoberto(d: &VolumeDescoberto) -> VolumeInfo {
+    VolumeInfo {
+        id: VolumeId(0),
+        dispositivo: None,
+        tipo_dispositivo: d.dispositivo.as_ref().map(|x| x.tipo),
+        fs_type: Some(d.fs_type.clone()),
+        rotulo: d.rotulo.clone(),
+        ponto_montagem: d
+            .pontos_de_montagem
+            .iter()
+            .min_by_key(|p| p.len())
+            .map(|p| String::from_utf8_lossy(p).into_owned()),
+        conectado: true,
+        capacidade_bytes: d.capacidade_bytes,
+        livre_bytes: d.livre_bytes,
+        classe: d.classe,
+        sistema: d.sistema,
     }
 }
 

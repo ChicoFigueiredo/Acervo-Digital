@@ -5,9 +5,11 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use dag_core::{DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
+use dag_core::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 
-use crate::dispositivo::{caminho_sysfs, majmin_por_nome, resolver_dispositivo};
+use crate::dispositivo::{
+    caminho_sysfs, discos_de, ler_texto, majmin_por_nome, resolver_dispositivo,
+};
 use crate::erro::Erro;
 use crate::fonte::{FonteSistema, FonteSistemaReal};
 use crate::mountinfo::{EntradaMontagem, parse_mountinfo};
@@ -135,6 +137,89 @@ fn bloco_do_grupo(
     majmin_por_nome(fonte, &nome)
 }
 
+/// Filesystems de imagem (somente leitura por natureza): sem disco real por baixo, são
+/// imagens montadas (snaps, AppImages, ISOs).
+const FS_IMAGEM: &[&str] = &[
+    "squashfs",
+    "erofs",
+    "iso9660",
+    "udf",
+    "fuse.squashfuse",
+    "fuse.fuseiso",
+    "fuse.archivemount",
+    "fuse.ratarmount",
+    "fuse.appimage",
+];
+
+/// Pontos de montagem de partições de sistema (inicialização) em discos reais.
+const PONTOS_SISTEMA: &[&str] = &["/boot", "/boot/efi", "/boot/firmware", "/efi"];
+
+/// Classifica o volume a partir de evidências do sistema. Regras, em ordem:
+///
+/// 1. filesystem de rede -> `Rede`;
+/// 2. pseudo-filesystem (proc, tmpfs...) -> `Virtual`;
+/// 3. com dispositivo de bloco, olha os discos inteiros por baixo (sysfs; dm/md via `slaves/`):
+///    - algum sob `/sys/devices/virtual`: `loop*` -> `Imagem`; demais (zram, ram, dm sem disco
+///      físico) -> `Virtual`;
+///    - todos físicos: `removable=1` ou transporte USB -> `Removivel`; senão `Fisico`;
+/// 4. sem dispositivo de bloco: filesystem de imagem (squashfs, erofs, iso9660, squashfuse)
+///    -> `Imagem`; qualquer outro (overlay, fuse local...) -> `Virtual`.
+fn classificar(
+    fonte: &dyn FonteSistema,
+    fs_type: &str,
+    pseudo: bool,
+    bloco: Option<(u32, u32)>,
+) -> ClasseVolume {
+    if eh_rede(fs_type) {
+        return ClasseVolume::Rede;
+    }
+    if pseudo {
+        return ClasseVolume::Virtual;
+    }
+    let discos = bloco
+        .and_then(|(a, b)| caminho_sysfs(fonte, a, b))
+        .and_then(|sysfs| discos_de(fonte, &sysfs, 0));
+    let Some(discos) = discos.filter(|d| !d.is_empty()) else {
+        return if FS_IMAGEM.contains(&fs_type) {
+            ClasseVolume::Imagem
+        } else {
+            ClasseVolume::Virtual
+        };
+    };
+    let eh_virtual = |d: &&std::path::PathBuf| d.starts_with("/sys/devices/virtual");
+    if let Some(v) = discos.iter().find(eh_virtual) {
+        let loop_ = v
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("loop"));
+        return if loop_ {
+            ClasseVolume::Imagem
+        } else {
+            ClasseVolume::Virtual
+        };
+    }
+    let removivel = discos.iter().any(|d| {
+        ler_texto(fonte, &d.join("removable")).as_deref() == Some("1")
+            || d.components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with("usb"))
+    });
+    if removivel {
+        ClasseVolume::Removivel
+    } else {
+        ClasseVolume::Fisico
+    }
+}
+
+/// Partição de sistema: volume real montado em `/boot`, `/boot/efi`, `/boot/firmware` ou `/efi`.
+/// Heurística simples e documentada: não lê o GUID do tipo de partição (ESP) nem inspeciona
+/// swap (que não aparece em mountinfo).
+fn eh_sistema(classe: ClasseVolume, pontos: &[Vec<u8>]) -> bool {
+    matches!(classe, ClasseVolume::Fisico | ClasseVolume::Removivel)
+        && pontos.iter().any(|p| {
+            let p = String::from_utf8_lossy(p);
+            PONTOS_SISTEMA.contains(&p.trim_end_matches('/'))
+        })
+}
+
 struct Grupo {
     major: u32,
     minor: u32,
@@ -211,6 +296,13 @@ pub fn descobrir_volumes_com(fonte: &dyn FonteSistema) -> Result<Vec<VolumeDesco
         } else {
             bloco.and_then(|(a, b)| resolver_dispositivo(fonte, a, b))
         };
+        let classe = classificar(fonte, &fs_type, pseudo, bloco);
+        let pontos: Vec<Vec<u8>> = g
+            .entradas
+            .iter()
+            .map(|e| e.ponto_de_montagem.clone())
+            .collect();
+        let sistema = eh_sistema(classe, &pontos);
         volumes.push(VolumeDescoberto {
             platform_id,
             st_dev: rustix::fs::makedev(g.major, g.minor),
@@ -225,6 +317,8 @@ pub fn descobrir_volumes_com(fonte: &dyn FonteSistema) -> Result<Vec<VolumeDesco
                 .collect(),
             pseudo,
             dispositivo,
+            classe,
+            sistema,
         });
     }
     Ok(volumes)
@@ -547,5 +641,114 @@ mod testes {
         let v = descobrir(&f);
         assert_eq!(v[0].platform_id, "uuid-btrfs");
         assert_eq!(v[0].dispositivo.as_ref().unwrap().identificador, "eui.z");
+    }
+
+    fn classes(f: &FonteFalsa) -> Vec<(ClasseVolume, bool)> {
+        descobrir(f).iter().map(|v| (v.classe, v.sistema)).collect()
+    }
+
+    #[test]
+    fn snap_em_loop_squashfs_e_imagem() {
+        let mut f = FonteFalsa::default();
+        let loop0 = "devices/virtual/block/loop0";
+        bloco(&mut f, 7, 0, "loop0", loop0);
+        f.arquivo(
+            &format!("/sys/{loop0}/loop/backing_file"),
+            "/var/lib/snapd/snaps/x.snap\n",
+        );
+        f.arquivo(
+            "/proc/self/mountinfo",
+            "39 27 7:0 / /snap/gnome-46-2404/177 ro - squashfs /dev/loop0 ro\n",
+        );
+        assert_eq!(classes(&f), vec![(ClasseVolume::Imagem, false)]);
+    }
+
+    #[test]
+    fn loop_ext4_e_imagem_e_squashfs_sem_bloco_tambem() {
+        let mut f = FonteFalsa::default();
+        let loop1 = "devices/virtual/block/loop1";
+        bloco(&mut f, 7, 1, "loop1", loop1);
+        let mut mi = String::from("39 27 7:1 / /mnt/img rw - ext4 /dev/loop1 rw\n");
+        mi.push_str("40 27 0:90 / /tmp/.mount_app ro - squashfs /dev/loop9 ro\n");
+        mi.push_str("41 27 0:91 / /tmp/.mount_b ro - fuse.squashfuse x ro\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        assert_eq!(
+            classes(&f).iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![ClasseVolume::Imagem; 3]
+        );
+    }
+
+    #[test]
+    fn raiz_ext4_em_nvme_e_fisico_e_efi_e_sistema() {
+        let mut f = FonteFalsa::default();
+        disco(&mut f, NVME, "0", "0", "T-CREATE TM8FPM002T", Some("eui.t"));
+        particao(&mut f, 259, 1, "nvme0n1p1", NVME, 1);
+        particao(&mut f, 259, 2, "nvme0n1p2", NVME, 2);
+        let mut mi = String::from("27 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n");
+        mi.push_str("28 27 259:1 / /boot/efi rw - vfat /dev/nvme0n1p1 rw\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        assert_eq!(
+            classes(&f),
+            vec![(ClasseVolume::Fisico, false), (ClasseVolume::Fisico, true)]
+        );
+    }
+
+    #[test]
+    fn usb_e_removivel_e_flag_removable_tambem() {
+        let mut f = FonteFalsa::default();
+        disco(&mut f, USB, "1", "1", "Flash", None);
+        particao(&mut f, 8, 17, "sdb1", USB, 1);
+        disco(&mut f, SATA, "1", "1", "Cartao", None);
+        particao(&mut f, 8, 1, "sda1", SATA, 1);
+        let mut mi = String::from("40 27 8:17 / /media/u/PEN rw - vfat /dev/sdb1 rw\n");
+        mi.push_str("41 27 8:1 / /media/u/CARD rw - ext4 /dev/sda1 rw\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        assert_eq!(classes(&f), vec![(ClasseVolume::Removivel, false); 2]);
+    }
+
+    #[test]
+    fn nfs_e_rede() {
+        let mut f = FonteFalsa::default();
+        f.arquivo(
+            "/proc/self/mountinfo",
+            "60 27 0:50 / /mnt/nas rw - nfs4 nas.local:/export rw\n",
+        );
+        assert_eq!(classes(&f), vec![(ClasseVolume::Rede, false)]);
+    }
+
+    #[test]
+    fn zram_overlay_e_tmpfs_sao_virtuais() {
+        let mut f = FonteFalsa::default();
+        bloco(&mut f, 252, 0, "zram0", "devices/virtual/block/zram0");
+        let mut mi = String::from("30 27 252:0 / /mnt/z rw - ext4 /dev/zram0 rw\n");
+        mi.push_str("38 27 0:70 / /var/lib/docker/x rw - overlay overlay rw\n");
+        mi.push_str("25 24 0:23 / /dev/shm rw - tmpfs tmpfs rw\n");
+        mi.push_str("26 24 0:24 / /run/user/1000/doc rw - fuse.portal portal rw\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        assert_eq!(
+            classes(&f).iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![ClasseVolume::Virtual; 4]
+        );
+    }
+
+    #[test]
+    fn luks_sobre_nvme_e_fisico_e_dm_sem_disco_e_virtual() {
+        let mut f = FonteFalsa::default();
+        disco(&mut f, NVME, "0", "0", "WD", Some("eui.abc"));
+        particao(&mut f, 259, 3, "nvme0n1p3", NVME, 3);
+        let dm = "devices/virtual/block/dm-0";
+        bloco(&mut f, 254, 0, "dm-0", dm);
+        f.link(&format!("/sys/{dm}/slaves/nvme0n1p3"), "../../../../pci/x");
+        bloco(&mut f, 254, 5, "dm-5", "devices/virtual/block/dm-5");
+        let mut mi = String::from("27 1 254:0 / / rw - ext4 /dev/mapper/cripto rw\n");
+        mi.push_str("28 27 254:5 / /mnt/zero rw - ext4 /dev/dm-5 rw\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        assert_eq!(
+            classes(&f),
+            vec![
+                (ClasseVolume::Fisico, false),
+                (ClasseVolume::Virtual, false)
+            ]
+        );
     }
 }

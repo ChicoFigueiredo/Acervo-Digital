@@ -22,6 +22,8 @@ fn volume_desc() -> VolumeDescoberto {
         livre_bytes: Some(400),
         pontos_de_montagem: vec![b"/mnt/dados".to_vec(), b"/srv/\xff".to_vec()],
         pseudo: false,
+        classe: dag_core::ClasseVolume::Fisico,
+        sistema: false,
         dispositivo: Some(DispositivoDescoberto {
             identificador: "wwn-1".into(),
             modelo: Some("M".into()),

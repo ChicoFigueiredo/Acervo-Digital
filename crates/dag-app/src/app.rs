@@ -20,6 +20,7 @@ use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::leitor::{Acordador, Carga, Leitor, erro};
 use crate::paginas::{self, DefPagina, analise, discos, duplicados, explorador, varredura};
 use crate::progresso::{AndamentoHash, FaseScan, ProgressoScan, restante_estimado, taxa_do_hash};
+use crate::selecao::Classificacao;
 use crate::worker::{ConfigWorker, Evento, ModoWorker, Worker};
 
 const TOKENS: &str = include_str!("../dados/tokens.json");
@@ -157,6 +158,9 @@ pub struct AppDag {
     pub totais: Carga<TotaisCatalogo>,
     totais_geracao: u64,
     pub discos: discos::Estado,
+    /// Classe dos volumes (física, imagem...), vinda de `ListarVolumes`.
+    pub classificacao: Classificacao,
+    classificacao_pedida: bool,
     pub varredura: varredura::Estado,
     pub explorador: explorador::Estado,
     pub analise: analise::Estado,
@@ -190,6 +194,8 @@ impl AppDag {
             totais: Carga::default(),
             totais_geracao: 0,
             discos: discos::Estado::default(),
+            classificacao: Classificacao::default(),
+            classificacao_pedida: false,
             varredura: varredura::Estado::default(),
             explorador: explorador::Estado::default(),
             analise: analise::Estado::default(),
@@ -246,6 +252,23 @@ impl AppDag {
 
     /// Dispara o Full Scan sobre as raízes escolhidas.
     pub fn iniciar_full_scan(&mut self, sem_hash: bool) {
+        self.iniciar_scan(ModoVarredura::FullScan, sem_hash);
+    }
+
+    /// Dispara o Fast Scan sobre as raízes escolhidas.
+    pub fn iniciar_fast_scan(&mut self) {
+        self.iniciar_scan(ModoVarredura::FastScan, true);
+    }
+
+    /// Define as raízes como `raizes` e dispara a varredura (a partir da página Discos).
+    pub fn varrer_raizes(&mut self, raizes: Vec<String>, modo: ModoVarredura) {
+        for r in raizes {
+            self.varredura.adicionar_raiz(r);
+        }
+        self.iniciar_scan(modo, modo == ModoVarredura::FastScan);
+    }
+
+    fn iniciar_scan(&mut self, modo: ModoVarredura, sem_hash: bool) {
         if let Some(m) = self.motivo_sem_escrita() {
             self.aviso(Tom::Aviso, m);
             return;
@@ -257,7 +280,7 @@ impl AppDag {
         }
         let id = self.enviar(
             Comando::IniciarScan {
-                modo: ModoVarredura::FullScan,
+                modo,
                 raizes,
                 sem_hash,
                 elevar: false,
@@ -280,6 +303,26 @@ impl AppDag {
             Proposito::Scan { sem_hash: false },
         );
         self.scan = Some(ScanAtivo::novo(id, false));
+    }
+
+    /// Linhas classificadas da página Discos (e quantas estão ocultas).
+    #[must_use]
+    pub fn linhas_de_discos(&self) -> (Vec<crate::selecao::LinhaDisco>, usize) {
+        match self.discos.volumes.dado.as_deref() {
+            Some(v) => {
+                crate::selecao::montar_linhas(v, &self.classificacao, self.discos.mostrar_todos)
+            }
+            None => (Vec::new(), 0),
+        }
+    }
+
+    /// Pede a classificação dos volumes uma vez por sessão (se puder escrever): sem ela a página
+    /// Discos usa a classe presumida pelo filesystem.
+    pub fn garantir_classificacao(&mut self) {
+        if !self.classificacao_pedida && self.motivo_sem_escrita().is_none() {
+            self.classificacao_pedida = true;
+            self.enviar(Comando::ListarVolumes, Proposito::Volumes);
+        }
     }
 
     pub fn atualizar_volumes(&mut self) {
@@ -367,15 +410,17 @@ impl AppDag {
             Resposta::Erro { codigo, mensagem } => {
                 self.aviso(Tom::Perigo, format!("{mensagem} [{codigo}]"));
             }
-            Resposta::Volumes { volumes } => {
+            Resposta::Volumes { volumes, ocultos } => {
                 let on = volumes.iter().filter(|v| v.conectado).count();
                 self.aviso(
                     Tom::Sucesso,
                     format!(
-                        "{} volume(s) conhecido(s), {on} conectado(s).",
-                        volumes.len()
+                        "{} volume(s) real(is), {on} conectado(s); {} de imagem/virtuais ocultos.",
+                        volumes.len(),
+                        ocultos.len()
                     ),
                 );
+                self.classificacao = Classificacao::de_resposta(&volumes, &ocultos);
                 self.invalidar();
             }
             Resposta::ScanConcluido {
@@ -495,6 +540,11 @@ impl AppDag {
             id if id.starts_with("configuracoes.") => futuro(),
             "varredura.fast_scan" => Some("Fast Scan chega no incremento 5".into()),
             "discos.detectar" => m(self.motivo_sem_escrita()),
+            "discos.usar_na_varredura" => self
+                .discos
+                .marcados
+                .is_empty()
+                .then(|| "Marque ao menos um volume (caixa \"Varrer\")".to_string()),
             "discos.incluir" => self
                 .discos
                 .montagem_selecionada()
@@ -545,6 +595,15 @@ impl AppDag {
             "inicio.atualizar" | "duplicados.grupos" => self.invalidar(),
             "discos.detectar" => self.atualizar_volumes(),
             "discos.propriedades" => self.discos.detalhes = !self.discos.detalhes,
+            "discos.usar_na_varredura" => {
+                let (linhas, _) = self.linhas_de_discos();
+                let raizes =
+                    crate::selecao::raizes_dos_selecionados(&linhas, &self.discos.marcados);
+                for r in raizes {
+                    self.varredura.adicionar_raiz(r);
+                }
+                abrir("varredura");
+            }
             "discos.incluir" => {
                 if let Some(m) = self.discos.montagem_selecionada() {
                     self.varredura.adicionar_raiz(m);

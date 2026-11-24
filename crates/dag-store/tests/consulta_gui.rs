@@ -22,6 +22,8 @@ fn volume(uuid: &str, dev: u64, montagens: &[&[u8]]) -> VolumeDescoberto {
         livre_bytes: Some(4_000),
         pontos_de_montagem: montagens.iter().map(|m| m.to_vec()).collect(),
         pseudo: false,
+        classe: dag_core::ClasseVolume::Fisico,
+        sistema: false,
         dispositivo: Some(DispositivoDescoberto {
             identificador: format!("wwn-{uuid}"),
             modelo: Some("Modelo".into()),

@@ -16,6 +16,7 @@ pub mod formato;
 pub mod leitor;
 pub mod paginas;
 pub mod progresso;
+pub mod selecao;
 pub mod treemap;
 pub mod worker;
 

@@ -521,6 +521,8 @@ mod testes {
             livre_bytes: Some(400),
             pontos_de_montagem: vec![p.as_os_str().as_bytes().to_vec()],
             pseudo: false,
+            classe: dag_core::ClasseVolume::Fisico,
+            sistema: false,
             dispositivo: None,
         }
     }
@@ -653,7 +655,7 @@ mod testes {
         };
         let resposta = *resposta;
         match resposta {
-            Resposta::Volumes { volumes } => assert_eq!(volumes.len(), 1),
+            Resposta::Volumes { volumes, .. } => assert_eq!(volumes.len(), 1),
             outra => panic!("{outra:?}"),
         }
         let id = w.enviar(Comando::IniciarScan {

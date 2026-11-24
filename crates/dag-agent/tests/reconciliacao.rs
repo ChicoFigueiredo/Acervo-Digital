@@ -25,6 +25,8 @@ fn volume(raiz: &Path) -> VolumeDescoberto {
         livre_bytes: Some(400_000),
         pontos_de_montagem: vec![raiz.as_os_str().as_bytes().to_vec()],
         pseudo: false,
+        classe: dag_core::ClasseVolume::Fisico,
+        sistema: false,
         dispositivo: None,
     }
 }

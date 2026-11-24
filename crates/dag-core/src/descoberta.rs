@@ -19,6 +19,45 @@ pub enum TipoDispositivo {
     Outro,
 }
 
+/// Natureza do Volume, deduzida de evidências do sistema (sysfs, tipo de filesystem).
+///
+/// Serve para separar o que é armazenamento real do ruído do sistema (snaps, AppImages,
+/// zram, overlay...). A visão padrão mostra `Fisico`, `Removivel` e `Rede`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClasseVolume {
+    /// Sustentado por um disco de verdade (SATA, NVMe, MMC, virtio, md/dm sobre discos reais).
+    #[default]
+    Fisico,
+    /// Disco removível (`removable=1`) ou conectado por USB.
+    Removivel,
+    /// Filesystem de rede ou nuvem (NFS, CIFS, sshfs, rclone...).
+    Rede,
+    /// Imagem montada: dispositivo loop (snaps, AppImages, ISOs) ou filesystem somente
+    /// leitura de imagem (squashfs, erofs, iso9660) sem disco real por baixo.
+    Imagem,
+    /// Sem disco real: zram, ram, device-mapper sem disco físico, overlay, fuse local...
+    Virtual,
+}
+
+impl ClasseVolume {
+    /// `true` para as classes mostradas por padrão (físico, removível e rede).
+    pub fn eh_real(self) -> bool {
+        matches!(self, Self::Fisico | Self::Removivel | Self::Rede)
+    }
+
+    /// Nome curto em português, para tabelas e listagens.
+    pub fn rotulo(self) -> &'static str {
+        match self {
+            Self::Fisico => "físico",
+            Self::Removivel => "removível",
+            Self::Rede => "rede",
+            Self::Imagem => "imagem",
+            Self::Virtual => "virtual",
+        }
+    }
+}
+
 /// Disco ou mídia física que hospeda um ou mais Volumes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispositivoDescoberto {
@@ -46,4 +85,11 @@ pub struct VolumeDescoberto {
     pub pseudo: bool,
     /// Dispositivo físico que hospeda o volume, quando determinável.
     pub dispositivo: Option<DispositivoDescoberto>,
+    /// Natureza do volume (físico, removível, rede, imagem, virtual).
+    #[serde(default)]
+    pub classe: ClasseVolume,
+    /// Partição de sistema de um disco real (`/boot`, `/boot/efi`, `/efi`...): não é onde ficam
+    /// os dados do usuário, mas é real e aparece na visão padrão com o selo "sistema".
+    #[serde(default)]
+    pub sistema: bool,
 }

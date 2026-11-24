@@ -62,10 +62,29 @@ fn opt(s: Option<&str>) -> String {
     s.unwrap_or("-").to_string()
 }
 
-pub fn volumes(v: &[VolumeInfo]) -> String {
-    if v.is_empty() {
-        return "Nenhum volume.\n".into();
+/// Lista de volumes. Sem `todos`, só os reais, com rodapé sobre os ocultos; com `todos`, junta os
+/// ocultos e acrescenta a coluna CLASSE.
+pub fn volumes(reais: &[VolumeInfo], ocultos: &[VolumeInfo], todos: bool) -> String {
+    let mostrar: Vec<&VolumeInfo> = if todos {
+        reais.iter().chain(ocultos).collect()
+    } else {
+        reais.iter().collect()
+    };
+    let mut s = if mostrar.is_empty() {
+        "Nenhum volume.\n".to_string()
+    } else {
+        tabela_volumes(&mostrar, todos)
+    };
+    if !todos && !ocultos.is_empty() {
+        s.push_str(&format!(
+            "\n{} volume(s) de imagem/virtuais ocultos (snap, loop...): use --todos\n",
+            ocultos.len()
+        ));
     }
+    s
+}
+
+fn tabela_volumes(v: &[&VolumeInfo], com_classe: bool) -> String {
     let linhas: Vec<Vec<String>> = v
         .iter()
         .map(|v| {
@@ -75,8 +94,12 @@ pub fn volumes(v: &[VolumeInfo]) -> String {
                 }
                 _ => "-".into(),
             };
-            vec![
-                v.id.to_string(),
+            let mut linha = vec![
+                if v.id.0 == 0 {
+                    "-".into()
+                } else {
+                    v.id.to_string()
+                },
                 opt(v.ponto_montagem.as_deref()),
                 opt(v.fs_type.as_deref()),
                 opt(v.rotulo.as_deref()),
@@ -84,23 +107,34 @@ pub fn volumes(v: &[VolumeInfo]) -> String {
                 v.livre_bytes.map_or("-".into(), bytes_humanos),
                 uso,
                 if v.conectado { "conectado" } else { "offline" }.into(),
-            ]
+            ];
+            if com_classe {
+                let c = v.classe.rotulo();
+                linha.push(if v.sistema {
+                    format!("{c} (sistema)")
+                } else {
+                    c.into()
+                });
+            }
+            linha
         })
         .collect();
-    tabela(
-        &[
-            "ID",
-            "MONTAGEM",
-            "FS",
-            "RÓTULO",
-            "CAPACIDADE",
-            "LIVRE",
-            "USO",
-            "ESTADO",
-        ],
-        &[true, false, false, false, true, true, true, false],
-        &linhas,
-    )
+    let mut titulos = vec![
+        "ID",
+        "MONTAGEM",
+        "FS",
+        "RÓTULO",
+        "CAPACIDADE",
+        "LIVRE",
+        "USO",
+        "ESTADO",
+    ];
+    let mut alinh = vec![true, false, false, false, true, true, true, false];
+    if com_classe {
+        titulos.push("CLASSE");
+        alinh.push(false);
+    }
+    tabela(&titulos, &alinh, &linhas)
 }
 
 fn estado(e: &StatusExecucao) -> String {
@@ -906,14 +940,17 @@ pub fn explorar(
 }
 
 /// Imprime a resposta em texto: dados em stdout, erros em stderr.
-pub fn imprimir(r: &Resposta) {
+pub fn imprimir(r: &Resposta, todos: bool) {
     match r {
         Resposta::Ok { mensagem } => {
             if let Some(m) = mensagem {
                 println!("{m}");
             }
         }
-        Resposta::Volumes { volumes: v } => print!("{}", volumes(v)),
+        Resposta::Volumes {
+            volumes: v,
+            ocultos,
+        } => print!("{}", volumes(v, ocultos, todos)),
         Resposta::Status {
             execucoes,
             catalogo,
@@ -990,5 +1027,49 @@ pub fn imprimir(r: &Resposta) {
                 println!("{j}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod testes_volumes {
+    use super::*;
+    use dag_core::{ClasseVolume, VolumeId};
+
+    fn v(id: i64, mont: &str, classe: ClasseVolume, sistema: bool) -> VolumeInfo {
+        VolumeInfo {
+            id: VolumeId(id),
+            dispositivo: None,
+            tipo_dispositivo: None,
+            fs_type: Some("ext4".into()),
+            rotulo: None,
+            ponto_montagem: Some(mont.into()),
+            conectado: true,
+            capacidade_bytes: Some(100),
+            livre_bytes: Some(50),
+            classe,
+            sistema,
+        }
+    }
+
+    #[test]
+    fn padrao_oculta_com_rodape_e_todos_mostra_classe() {
+        let reais = [
+            v(1, "/", ClasseVolume::Fisico, false),
+            v(2, "/boot/efi", ClasseVolume::Fisico, true),
+        ];
+        let ocultos = [v(0, "/snap/bare/5", ClasseVolume::Imagem, false)];
+        let p = volumes(&reais, &ocultos, false);
+        assert!(!p.contains("/snap/bare/5") && !p.contains("CLASSE"), "{p}");
+        assert!(
+            p.contains("1 volume(s) de imagem/virtuais ocultos (snap, loop...): use --todos"),
+            "{p}"
+        );
+        let t = volumes(&reais, &ocultos, true);
+        assert!(t.contains("CLASSE") && t.contains("/snap/bare/5"), "{t}");
+        assert!(
+            t.contains("físico (sistema)") && t.contains("imagem"),
+            "{t}"
+        );
+        assert!(!t.contains("use --todos"), "{t}");
     }
 }

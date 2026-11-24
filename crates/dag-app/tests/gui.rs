@@ -34,6 +34,8 @@ fn volume_de(p: &Path) -> VolumeDescoberto {
             [p.as_os_str().as_bytes(), b"/../arvore"].concat(),
         ],
         pseudo: false,
+        classe: dag_core::ClasseVolume::Fisico,
+        sistema: false,
         dispositivo: None,
     }
 }
@@ -156,7 +158,13 @@ fn discos_e_varredura_mostram_o_que_o_worker_gravou() {
     let mut a = ambiente_populado();
     varrer(&mut a);
     a.abrir("discos");
-    a.ate("tabela de volumes", |app| app.discos.volumes.dado.is_some());
+    a.ate("tabela de volumes", |app| {
+        app.discos
+            .volumes
+            .dado
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|x| x.bytes_catalogados.is_some()))
+    });
     let v = a.casca.app.discos.volumes.dado.clone().unwrap();
     assert_eq!(v.len(), 1);
     assert_eq!(v[0].montagens, 2);
@@ -164,7 +172,11 @@ fn discos_e_varredura_mostram_o_que_o_worker_gravou() {
     assert!(v[0].bytes_catalogados.is_some());
     a.abrir("varredura");
     a.ate("últimas varreduras", |app| {
-        app.varredura.execucoes.dado.is_some()
+        app.varredura
+            .execucoes
+            .dado
+            .as_ref()
+            .is_some_and(|e| e.iter().any(|x| x.estado == "concluida"))
     });
     let e = a.casca.app.varredura.execucoes.dado.clone().unwrap();
     assert_eq!(e.len(), 1);
@@ -342,4 +354,61 @@ fn exportar_relatorio_pelo_worker_grava_o_arquivo() {
             .iter()
             .any(|v| v.texto.contains("Relatório gravado"))
     );
+}
+
+#[test]
+fn discos_e_varredura_com_mistura_de_volumes_reais_e_de_imagem() {
+    use dag_core::ClasseVolume;
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = fs::canonicalize(tmp.path()).unwrap().join("arvore");
+    escrever(&raiz.join("a.txt"), &[4u8; 100]);
+    let mut snap = volume_de(&raiz);
+    snap.platform_id = "loop-snap".into();
+    snap.st_dev = 0x9_0001;
+    snap.fs_type = "squashfs".into();
+    snap.classe = ClasseVolume::Imagem;
+    snap.pontos_de_montagem = vec![b"/snap/bare/5".to_vec()];
+    let mut zram = snap.clone();
+    zram.platform_id = "zram".into();
+    zram.st_dev = 0x9_0002;
+    zram.classe = ClasseVolume::Virtual;
+    zram.pontos_de_montagem = vec![b"/mnt/zram".to_vec()];
+    let mut cfg = ConfigApp::com_caminho(tmp.path().join("dados/catalogo.sqlite"));
+    cfg.volumes_fixos = Some(vec![volume_de(&raiz), snap, zram]);
+    let mut a = Ambiente {
+        _tmp: tmp,
+        raiz,
+        casca: montar(cfg).unwrap(),
+        ctx: egui::Context::default(),
+    };
+    a.ate("worker abrir o Catálogo", |app| {
+        *app.worker.modo() == ModoWorker::Escritor
+    });
+    a.abrir("discos");
+    // A página pede a classificação sozinha; só então os ocultos aparecem.
+    a.ate("classificação recebida", |app| app.classificacao.recebida);
+    a.ate("tabela de volumes", |app| app.discos.volumes.dado.is_some());
+    let (linhas, ocultos) = a.casca.app.linhas_de_discos();
+    assert_eq!((linhas.len(), ocultos), (1, 2));
+    a.casca.app.discos.mostrar_todos = true;
+    let (linhas, ocultos) = a.casca.app.linhas_de_discos();
+    assert_eq!((linhas.len(), ocultos), (3, 0));
+    // Marcar o volume real e levar à Varredura.
+    let id = linhas
+        .iter()
+        .find(|l| l.classe.eh_real())
+        .unwrap()
+        .volume
+        .id;
+    a.casca.app.discos.marcados.insert(id);
+    for _ in 0..3 {
+        a.quadro();
+    }
+    a.abrir("varredura");
+    a.casca.app.varredura.adicionar_raiz("/");
+    for _ in 0..3 {
+        a.quadro();
+    }
+    a.abrir("discos");
+    a.quadro();
 }

@@ -31,7 +31,7 @@ fn normalizar(base: &Path, alvo: &Path) -> PathBuf {
     saida
 }
 
-fn ler_texto(fonte: &dyn FonteSistema, caminho: &Path) -> Option<String> {
+pub(crate) fn ler_texto(fonte: &dyn FonteSistema, caminho: &Path) -> Option<String> {
     let bytes = fonte.ler_arquivo(caminho).ok()?;
     let texto = String::from_utf8_lossy(&bytes).trim().to_string();
     (!texto.is_empty()).then_some(texto)
@@ -54,7 +54,11 @@ pub(crate) fn majmin_por_nome(fonte: &dyn FonteSistema, nome: &OsStr) -> Option<
 
 /// Conjunto de discos inteiros (caminhos sysfs) que sustentam o dispositivo.
 /// `None` se a árvore for profunda demais (ciclo suspeito).
-fn discos_de(fonte: &dyn FonteSistema, sysfs: &Path, nivel: u8) -> Option<BTreeSet<PathBuf>> {
+pub(crate) fn discos_de(
+    fonte: &dyn FonteSistema,
+    sysfs: &Path,
+    nivel: u8,
+) -> Option<BTreeSet<PathBuf>> {
     if nivel > PROFUNDIDADE_MAXIMA {
         return None;
     }

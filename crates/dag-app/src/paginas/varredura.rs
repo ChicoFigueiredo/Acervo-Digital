@@ -9,6 +9,9 @@ use crate::app::AppDag;
 use crate::formato::{bytes_humanos, data_s, duracao, inteiro_pt_br, percentual, taxa_itens};
 use crate::leitor::{Carga, erro};
 use crate::progresso::{FaseScan, fase_texto, fracao_global};
+use crate::selecao::{
+    aviso_raiz_sistema, normalizar_raiz, raiz_do_volume, raizes_dos_discos_fisicos,
+};
 use bancada_casca::{Tom, egui};
 use dag_scanner::EstadoControle;
 use dag_store::consulta_gui::{LinhaExecucao, ultimas_execucoes};
@@ -95,10 +98,7 @@ pub struct Estado {
 impl Estado {
     /// Adiciona uma raiz (sem repetir; barra final removida).
     pub fn adicionar_raiz(&mut self, caminho: impl Into<String>) {
-        let mut c: String = caminho.into().trim().to_string();
-        while c.len() > 1 && c.ends_with('/') {
-            c.pop();
-        }
+        let c = normalizar_raiz(&caminho.into());
         if !c.is_empty() && !self.raizes.contains(&c) {
             self.raizes.push(c);
         }
@@ -133,6 +133,8 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
         );
     }
     app.varredura.execucoes.atualizar();
+    app.discos.atualizar(&app.leitor, app.geracao);
+    app.garantir_classificacao();
 
     let mut agir = Acao::Nada;
     secao_raizes(ui, app);
@@ -198,8 +200,63 @@ enum Acao {
     Cancelar,
 }
 
+fn volumes_detectados(ui: &mut egui::Ui, app: &mut AppDag) {
+    let (linhas, ocultos) = app.linhas_de_discos();
+    ui.strong("Volumes detectados");
+    if linhas.is_empty() {
+        ui.weak("Nenhum volume detectado ainda (veja a página Discos).");
+        return;
+    }
+    let mut alternar: Option<(String, bool)> = None;
+    ui.horizontal_wrapped(|ui| {
+        for d in &linhas {
+            let Some(raiz) = raiz_do_volume(d) else {
+                continue;
+            };
+            let mut marcada = app.varredura.raizes.contains(&raiz);
+            let nome = d.volume.rotulo.as_deref().filter(|r| !r.is_empty());
+            let texto = format!(
+                "{raiz}{} [{}{}]",
+                nome.map_or_else(String::new, |n| format!(" ({n})")),
+                d.classe.rotulo(),
+                if d.sistema { ", sistema" } else { "" }
+            );
+            if ui.checkbox(&mut marcada, texto).changed() {
+                alternar = Some((raiz, marcada));
+            }
+        }
+    });
+    let fisicos = raizes_dos_discos_fisicos(&linhas);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!fisicos.is_empty(), egui::Button::new("Selecionar todos os discos físicos"))
+            .on_hover_text("Marca os volumes físicos conectados (sem partições de sistema, removíveis ou de rede)")
+            .clicked()
+        {
+            for r in fisicos {
+                app.varredura.adicionar_raiz(r);
+            }
+        }
+        if ocultos > 0 {
+            ui.weak(format!("{ocultos} volume(s) de imagem/virtuais ocultos"));
+        }
+    });
+    if let Some((raiz, marcada)) = alternar {
+        if marcada {
+            app.varredura.adicionar_raiz(raiz);
+        } else {
+            app.varredura.raizes.retain(|r| r != &raiz);
+        }
+    }
+    if let Some(a) = aviso_raiz_sistema(&app.varredura.raizes) {
+        ui.colored_label(ui.visuals().warn_fg_color, a);
+    }
+    ui.add_space(4.0);
+}
+
 fn secao_raizes(ui: &mut egui::Ui, app: &mut AppDag) {
-    ui.strong("Raízes da varredura");
+    volumes_detectados(ui, app);
+    ui.strong("Raízes da varredura (volumes marcados e pastas avulsas)");
     ui.horizontal(|ui| {
         let r = ui.add(
             egui::TextEdit::singleline(&mut app.varredura.campo)

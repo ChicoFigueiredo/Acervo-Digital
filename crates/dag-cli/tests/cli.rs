@@ -443,3 +443,29 @@ fn servico_estado_em_instalacao_limpa() {
     assert!(!tmp.path().join("cfg").exists());
     assert!(!tmp.path().join("nao-criar").exists());
 }
+
+#[test]
+fn volumes_padrao_mostra_so_reais_e_todos_traz_a_classe() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat = tmp.path().join("c.sqlite");
+    let c = cat.to_str().unwrap();
+    let padrao = dag(&["--catalogo", c, "volumes"]);
+    assert_eq!(padrao.status.code(), Some(0));
+    let texto = String::from_utf8_lossy(&padrao.stdout).to_string();
+    assert!(!texto.contains("CLASSE"), "{texto}");
+    let todos = dag(&["--catalogo", c, "volumes", "--todos"]);
+    assert_eq!(todos.status.code(), Some(0));
+    let texto_todos = String::from_utf8_lossy(&todos.stdout).to_string();
+    if !texto_todos.contains("Nenhum volume") {
+        assert!(texto_todos.contains("CLASSE"), "{texto_todos}");
+    }
+    // Se há ocultos (snap, loop...), o rodapé avisa e o --todos os lista.
+    if texto.contains("ocultos") {
+        assert!(texto.contains("use --todos"), "{texto}");
+    }
+    let j = json(&dag(&["--catalogo", c, "--json", "volumes"]));
+    assert!(j["ocultos"].is_array(), "{j}");
+    for v in j["volumes"].as_array().unwrap() {
+        assert!(v["classe"].is_string() && v["sistema"].is_boolean(), "{v}");
+    }
+}

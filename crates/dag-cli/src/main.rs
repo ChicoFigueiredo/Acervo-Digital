@@ -143,8 +143,12 @@ enum NivelArg {
 
 #[derive(Subcommand, Debug)]
 enum Sub {
-    /// Lista Volumes
-    Volumes,
+    /// Lista Volumes (padrão: só os reais: físicos, removíveis e de rede)
+    Volumes {
+        /// Mostra também os volumes de imagem/virtuais (snap, loop, zram...), com a coluna CLASSE
+        #[arg(long)]
+        todos: bool,
+    },
     /// Inicia uma varredura
     Scan {
         /// Full Scan: inventário, Hash Completo, Grupos de Duplicados e reavaliação das Marcações
@@ -354,7 +358,7 @@ fn exec(a: &ExecArg) -> Option<ExecucaoId> {
 /// `None` para `dag mcp`, que não é um `Comando`.
 fn montar(sub: Sub) -> Option<Comando> {
     Some(match sub {
-        Sub::Volumes => Comando::ListarVolumes,
+        Sub::Volumes { .. } => Comando::ListarVolumes,
         Sub::Scan {
             retomar: Some(id), ..
         } => Comando::Retomar {
@@ -657,6 +661,7 @@ fn main() -> ExitCode {
         return rodar_agente(cli.catalogo.as_deref(), cli.socket, sem_monitor);
     }
     let json = cli.json;
+    let todos = matches!(cli.comando, Sub::Volumes { todos: true });
     let Execucao { resposta, agente } = executar(cli);
     let codigo = codigo_de_saida(&resposta);
     if json {
@@ -678,7 +683,7 @@ fn main() -> ExitCode {
         if let Some(info) = &agente {
             println!("{}", agente_texto(info.as_ref()));
         }
-        saida::imprimir(&resposta);
+        saida::imprimir(&resposta, todos);
     }
     ExitCode::from(codigo)
 }

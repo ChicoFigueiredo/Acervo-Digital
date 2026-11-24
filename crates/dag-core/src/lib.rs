@@ -28,7 +28,7 @@ pub use comando::{
     AcaoServico, Alvo, Comando, EntradaExploracao, Pedido, Resposta, ResumoCatalogo,
     StatusExecucao, TipoEntradaExploracao, VolumeInfo,
 };
-pub use descoberta::{DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
+pub use descoberta::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use duplicados::{
     AlertaUnicaCopia, ArquivoSemCobertura, ClasseRecuperavel, CoberturaArquivo, CoberturaPasta,
     CoberturaVolume, CopiaGrupo, DadosRelatorio, DetalheGrupo, EscopoMarcacao, EspacoItem,

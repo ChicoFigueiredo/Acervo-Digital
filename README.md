@@ -24,7 +24,8 @@
 cargo build --release                    # gera target/release/dag (CLI) e target/release/dag-app (GUI)
 export DAG_CATALOGO=~/dag/catalogo.sqlite  # opcional; padrão ~/.local/share/dag/catalogo.sqlite (0700/0600)
 
-dag volumes                              # volumes montados (e os conhecidos, offline)
+dag volumes                              # volumes reais (físicos, removíveis, rede); oculta snap/loop/zram
+dag volumes --todos                      # inclui imagem/virtuais, com a coluna CLASSE
 dag scan --full ~/Documentos /mnt/hd2    # Full Scan: inventário + Hash Completo + duplicados
 dag duplicados --limite 20               # Grupos de Duplicados, maior espaço recuperável primeiro
 dag grupo 7                              # cópias, Marcações e Cobertura do grupo 7

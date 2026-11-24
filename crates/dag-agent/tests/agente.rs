@@ -26,6 +26,8 @@ fn volume_de(p: &Path) -> VolumeDescoberto {
         livre_bytes: Some(400),
         pontos_de_montagem: vec![p.as_os_str().as_bytes().to_vec()],
         pseudo: false,
+        classe: dag_core::ClasseVolume::Fisico,
+        sistema: false,
         dispositivo: None,
     }
 }
@@ -306,7 +308,7 @@ fn status_mostra_execucoes_e_totais() {
 fn listar_volumes_registra_no_catalogo() {
     let c = cenario();
     let mut a = agente(&c);
-    let Resposta::Volumes { volumes } = a.executar(Comando::ListarVolumes) else {
+    let Resposta::Volumes { volumes, .. } = a.executar(Comando::ListarVolumes) else {
         panic!()
     };
     assert_eq!(volumes.len(), 1);
@@ -393,4 +395,73 @@ fn pausar_e_cancelar_em_processo_apontam_para_o_agente_em_segundo_plano() {
         assert_eq!(codigo, "sem_agente");
         assert!(mensagem.contains("dag agente"), "{mensagem}");
     }
+}
+
+fn volume_oculto(plataforma: &str, classe: dag_core::ClasseVolume, mont: &str) -> VolumeDescoberto {
+    VolumeDescoberto {
+        platform_id: plataforma.into(),
+        st_dev: 0x7_0000 + u64::from(plataforma.len() as u32),
+        rotulo: None,
+        fs_type: "squashfs".into(),
+        capacidade_bytes: Some(10),
+        livre_bytes: Some(0),
+        pontos_de_montagem: vec![mont.as_bytes().to_vec()],
+        pseudo: false,
+        classe,
+        sistema: false,
+        dispositivo: None,
+    }
+}
+
+#[test]
+fn listar_volumes_separa_reais_de_imagem_e_virtuais_sem_registrar_o_ruido() {
+    use dag_core::ClasseVolume::{Imagem, Virtual};
+    let c = cenario();
+    let mut a = Agente::abrir(&c.catalogo)
+        .unwrap()
+        .silencioso()
+        .com_volumes_fixos(vec![
+            volume_de(&c.raiz),
+            volume_oculto("loop-a", Imagem, "/snap/core/1"),
+            volume_oculto("zram-b", Virtual, "/mnt/zram"),
+        ]);
+    let Resposta::Volumes { volumes, ocultos } = a.executar(Comando::ListarVolumes) else {
+        panic!()
+    };
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].classe, dag_core::ClasseVolume::Fisico);
+    assert_eq!(ocultos.len(), 2);
+    assert!(ocultos.iter().all(|o| o.id.0 == 0 && !o.classe.eh_real()));
+    // Nada de ruído no Catálogo nem nos totais.
+    let Resposta::Status { catalogo, .. } = a.executar(Comando::Status { execucao: None }) else {
+        panic!()
+    };
+    assert_eq!(catalogo.volumes, 1);
+}
+
+#[test]
+fn varrer_raiz_em_volume_de_imagem_registra_sob_demanda() {
+    let c = cenario();
+    let mut v = volume_de(&c.raiz);
+    v.classe = dag_core::ClasseVolume::Imagem;
+    let mut a = Agente::abrir(&c.catalogo)
+        .unwrap()
+        .silencioso()
+        .com_volumes_fixos(vec![v]);
+    let Resposta::Volumes { volumes, ocultos } = a.executar(Comando::ListarVolumes) else {
+        panic!()
+    };
+    assert_eq!((volumes.len(), ocultos.len()), (0, 1));
+    let r = a.executar(scan_cmd(&c.raiz));
+    assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    // Já varrido de propósito: entra no Catálogo (visível em ocultos, com id) e nos totais.
+    let Resposta::Volumes { ocultos, .. } = a.executar(Comando::ListarVolumes) else {
+        panic!()
+    };
+    assert_eq!(ocultos.len(), 1);
+    assert_ne!(ocultos[0].id.0, 0);
+    let Resposta::Status { catalogo, .. } = a.executar(Comando::Status { execucao: None }) else {
+        panic!()
+    };
+    assert_eq!(catalogo.volumes, 1);
 }

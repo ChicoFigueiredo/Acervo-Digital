@@ -142,6 +142,51 @@ pub fn resumir(r: &Resposta) -> String {
         Resposta::Marcacao { .. } => {
             "Marcação registrada no Catálogo (nada foi apagado nem movido no disco).".into()
         }
+        Resposta::Lixeira { resultado: r } => {
+            let verbo = match (r.acao, r.simulado) {
+                (dag_core::AcaoLixeira::Mover, true) => "Simulação: seriam movidos",
+                (dag_core::AcaoLixeira::Mover, false) => "Movidos para a DAG-Lixeira",
+                (dag_core::AcaoLixeira::Restaurar, _) => "Restaurados",
+            };
+            let mut t = format!(
+                "{verbo}: {} arquivo(s), {}.",
+                r.total_arquivos,
+                bytes(r.total_bytes)
+            );
+            if !r.destinos.is_empty() {
+                t.push_str(&format!(" Destino: {}.", r.destinos.join(", ")));
+            }
+            if r.unicas_copias > 0 {
+                t.push_str(&format!(
+                    " ATENÇÃO: {} arquivo(s) são Única Cópia.",
+                    r.unicas_copias
+                ));
+            }
+            if !r.recusados.is_empty() {
+                t.push_str(&format!(" {} recusado(s):", r.recusados.len()));
+                for x in r.recusados.iter().take(5) {
+                    t.push_str(&format!(" [{}] {}: {};", x.codigo, x.alvo, x.motivo));
+                }
+            }
+            if !r.simulado && r.total_arquivos > 0 {
+                t.push_str(" Nada foi apagado; só o usuário esvazia a DAG-Lixeira.");
+            }
+            t
+        }
+        Resposta::ListaLixeira {
+            itens,
+            total,
+            bytes: b,
+            descartados,
+            proximo_cursor,
+            ..
+        } => format!(
+            "{} item(ns) Na Lixeira ({}); {} nesta página{}; {descartados} Descartado(s) no histórico.",
+            total,
+            bytes(*b),
+            itens.len(),
+            mais(proximo_cursor)
+        ),
         Resposta::Desmarcado { removidas } => {
             format!("{} marcação(ões) removida(s) do Catálogo.", removidas.len())
         }

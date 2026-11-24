@@ -22,6 +22,7 @@ mod exibir;
 mod explorar;
 mod finalidade;
 pub mod lancar;
+pub mod lixeira;
 pub mod observador;
 pub mod protocolo;
 mod registro;

@@ -10,6 +10,7 @@ pub mod consulta_gui;
 pub mod duplicados;
 pub mod hashes;
 pub mod inventario;
+pub mod lixeira;
 pub mod reconciliacao;
 
 use std::path::Path;
@@ -47,6 +48,10 @@ pub const MIGRACOES: &[Migracao] = &[
     Migracao::sql(
         "contador mantido de arquivos com hash (evita COUNT(*) em dezenas de milhões de linhas)",
         include_str!("../migrations/0007_contador_hashes.sql"),
+    ),
+    Migracao::sql(
+        "Lixeira em dois níveis: estado Na Lixeira por arquivo e histórico de Descartados",
+        include_str!("../migrations/0008_lixeira.sql"),
     ),
 ];
 

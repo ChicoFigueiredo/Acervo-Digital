@@ -100,6 +100,9 @@ fn lista_todas_as_ferramentas_com_schema_valido() {
         "saude_monitor",
         "servico",
         "backup_catalogo",
+        "mover_para_lixeira",
+        "restaurar_da_lixeira",
+        "listar_lixeira",
     ] {
         assert!(nomes.contains(&esperado), "falta {esperado}");
     }
@@ -317,4 +320,114 @@ fn progresso_so_com_token() {
     assert_eq!(r[1]["id"], 9);
     let r = rodar(&mut f, &[chamar("scan_fast", json!({}))]);
     assert_eq!(r.len(), 1);
+}
+
+// ---------------------------------------------------------------------- Lixeira (ADR 0005)
+
+#[test]
+fn mover_para_lixeira_exige_as_duas_confirmacoes_explicitas() {
+    let alvos = json!([{"tipo":"caminho","valor":"/mnt/d/a.bin"}]);
+    for args in [
+        json!({"alvos": alvos}),
+        json!({"alvos": alvos, "confirmacao_1": true}),
+        json!({"alvos": alvos, "confirmacao_2": true}),
+        json!({"alvos": alvos, "confirmacao_1": true, "confirmacao_2": false}),
+        json!({"alvos": alvos, "confirmacao_1": "true", "confirmacao_2": "true"}),
+        json!({"alvos": alvos, "confirmacao_unica_copia": true}),
+    ] {
+        let mut f = Falso::default();
+        let r = rodar(&mut f, &[chamar("mover_para_lixeira", args.clone())]);
+        assert_eq!(r[0]["result"]["isError"], true, "{args}");
+        let t = r[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(t.contains("duas confirmações"), "{t}");
+        assert!(f.pedidos.is_empty(), "nada pode chegar ao agente: {args}");
+    }
+    // Alvos vazios: recusado mesmo com as confirmações.
+    let mut f = Falso::default();
+    let r = rodar(
+        &mut f,
+        &[chamar(
+            "mover_para_lixeira",
+            json!({"alvos": [], "confirmacao_1": true, "confirmacao_2": true}),
+        )],
+    );
+    assert_eq!(r[0]["result"]["isError"], true);
+    assert!(f.pedidos.is_empty());
+    // Com as duas, o comando segue (as confirmações não vão para o agente).
+    let (c, a) = comando_de(
+        "mover_para_lixeira",
+        json!({"alvos": alvos, "confirmacao_1": true, "confirmacao_2": true,
+               "confirmacao_unica_copia": true}),
+    );
+    assert_eq!(a, Autor::Mcp);
+    assert_eq!(
+        c,
+        Comando::MoverParaLixeira {
+            alvos: vec![Alvo::Caminho("/mnt/d/a.bin".into())],
+            confirmacao_unica_copia: true,
+            marcar_tudo: false,
+            simular: false,
+        }
+    );
+    // Simulação não exige confirmação: só planeja.
+    let (c, _) = comando_de(
+        "mover_para_lixeira",
+        json!({"alvos": alvos, "simular": true}),
+    );
+    assert!(matches!(c, Comando::MoverParaLixeira { simular: true, .. }));
+}
+
+#[test]
+fn restaurar_e_listar_lixeira_montam_comandos() {
+    let (c, _) = comando_de(
+        "restaurar_da_lixeira",
+        json!({"alvos":[{"tipo":"arquivo","valor":4},{"tipo":"volume","valor":"HD"}]}),
+    );
+    assert_eq!(
+        c,
+        Comando::RestaurarDaLixeira {
+            alvos: vec![
+                Alvo::Arquivo(dag_core::ArquivoId(4)),
+                Alvo::Volume("HD".into())
+            ]
+        }
+    );
+    let (c, _) = comando_de("listar_lixeira", json!({"limite": 5}));
+    assert_eq!(
+        c,
+        Comando::ListarLixeira {
+            limite: Some(5),
+            cursor: None
+        }
+    );
+    let mut f = Falso::default();
+    let r = rodar(&mut f, &[chamar("restaurar_da_lixeira", json!({}))]);
+    assert_eq!(r[0]["result"]["isError"], true);
+}
+
+#[test]
+fn descricao_do_mover_avisa_das_confirmacoes_e_so_o_usuario_esvazia() {
+    let mut f = Falso::default();
+    let r = rodar(
+        &mut f,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})],
+    );
+    let ts = r[0]["result"]["tools"].as_array().unwrap();
+    let m = ts
+        .iter()
+        .find(|t| t["name"] == "mover_para_lixeira")
+        .unwrap();
+    let d = m["description"].as_str().unwrap();
+    assert!(
+        d.contains("DUAS confirmações") && d.contains("esvaziar"),
+        "{d}"
+    );
+    let req: Vec<_> = m["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    assert_eq!(req, [&json!("alvos")]);
+    assert!(m["inputSchema"]["properties"]["confirmacao_1"].is_object());
+    assert!(m["inputSchema"]["properties"]["confirmacao_2"].is_object());
 }

@@ -30,7 +30,7 @@ Ferramenta `jobs`: lista todos os trabalhos do agente (qualquer origem, com prog
 
 ## Garantias
 
-- **Somente leitura sobre o acervo.** Nenhuma ferramenta apaga, move ou altera arquivos. `marcar_delecao` apenas registra uma candidata a descarte no Catálogo.
+- **Nada é apagado nem alterado no acervo.** `marcar_delecao` apenas registra uma candidata a descarte no Catálogo. A única exceção é a Lixeira em dois níveis (ADR 0005): `mover_para_lixeira` e `restaurar_da_lixeira` fazem `rename` (sem sobrescrever, no mesmo Volume) de e para a pasta `DAG-Lixeira` do Volume. `mover_para_lixeira` exige `confirmacao_1` e `confirmacao_2` verdadeiros, depois de uma chamada com `simular: true` mostrada ao usuário. Esvaziar a Lixeira é ato do usuário, fora do DAG.
 - **Senhas nunca passam pelo MCP.** `servico` pode abrir o diálogo do sistema (Polkit), onde o usuário digita a senha; o MCP só recebe o resultado.
 
 ## Ferramentas
@@ -47,6 +47,9 @@ Ferramenta `jobs`: lista todos os trabalhos do agente (qualquer origem, com prog
 | `detalhar_grupo` | Cópias, Marcações e Cobertura de um grupo | `grupo` |
 | `definir_copia_principal` | Troca (ou volta ao automático) a Cópia Principal | `grupo`, `arquivo` |
 | `marcar_backup` / `marcar_delecao` / `desmarcar` | Marcações (só no Catálogo) | `alvo` `{tipo, valor}` |
+| `mover_para_lixeira` | Move cópias com Marcação para Deleção para a `DAG-Lixeira` do Volume (dupla confirmação) | `alvos`, `simular`, `confirmacao_1`, `confirmacao_2`, `confirmacao_unica_copia`, `marcar_tudo` |
+| `restaurar_da_lixeira` | Devolve Na Lixeira ao caminho de origem (sufixo se ocupado) | `alvos` |
+| `listar_lixeira` | O que está Na Lixeira e os Descartados | `limite`, `cursor` |
 | `confirmar_marcacao` | Reconfirma Marcação Pendente | `marcacao` |
 | `definir_prioridade` | Prioridade de Volume | `ordem` |
 | `relatorio` | Cobertura, sem cobertura, espaço, marcações | `tipo`, `nivel`, `saida`, `limite`, `cursor` |

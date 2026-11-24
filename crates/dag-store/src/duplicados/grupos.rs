@@ -92,6 +92,7 @@ pub fn reconstruir_grupos(
                     "INSERT INTO _alvo (file_id, logical_bytes, hash)
                      SELECT f.id, f.logical_bytes, h.hash FROM files f JOIN hashes h ON h.file_id = f.id
                      WHERE f.state = 'ativo' AND f.kind = 'arquivo' AND f.logical_bytes > 0
+                       AND f.na_lixeira = 0
                        AND {HASH_VALIDO}
                        AND (f.hardlink_group IS NULL OR f.id = {rep}){filtro_f}
                        AND (h.size_bytes, h.hash) IN (

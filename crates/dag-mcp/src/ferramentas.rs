@@ -3,8 +3,9 @@
 use dag_core::Comando;
 use serde_json::{Map, Value, json};
 
-const SEGURO: &str = "Somente leitura sobre o acervo: nenhum arquivo é apagado, movido ou \
-alterado no disco; marcações só mudam o Catálogo.";
+const SEGURO: &str = "Esta ferramenta não apaga, move nem altera arquivos no disco; marcações \
+só mudam o Catálogo. (Só `mover_para_lixeira` e `restaurar_da_lixeira` movem, e só para a \
+DAG-Lixeira do próprio Volume e de volta.)";
 const ELEVACAO: &str = "Pode abrir um diálogo do sistema (Polkit) em que o usuário digita a \
 senha; o MCP nunca recebe senhas.";
 
@@ -229,6 +230,54 @@ pub fn todas() -> Vec<Ferramenta> {
         objeto(json!({"alvo": alvo_schema("O que marcar")}), &["alvo"]),
     ));
     v.push(f(
+        "mover_para_lixeira",
+        "mover_para_lixeira",
+        "Move cópias com Marcação para Deleção para a DAG-Lixeira do próprio Volume (rename no \
+         mesmo sistema de arquivos; nunca apaga, sobrescreve nem copia entre Volumes; esvaziar a \
+         Lixeira é sempre ato do usuário, fora do DAG). É a ÚNICA ferramenta que altera o disco \
+         (junto com `restaurar_da_lixeira`) e exige DUAS confirmações explícitas como parâmetros: \
+         `confirmacao_1` e `confirmacao_2` precisam ser `true`, e só depois de o usuário ter visto \
+         o resumo de uma chamada com `simular: true`. Pasta só vai se todo arquivo catalogado nela \
+         tem Marcação para Deleção (`marcar_tudo` é o passo explícito separado). Única Cópia só \
+         vai com `confirmacao_unica_copia: true`. Hard links, arquivos que mudaram no disco e \
+         Volumes diferentes são recusados.",
+        objeto(
+            json!({
+                "alvos": {"type": "array", "minItems": 1,
+                    "items": alvo_schema("Arquivo (caminho ou id), pasta ou grupo a mover"),
+                    "description": "Alvos a mover (tipos caminho, arquivo, pasta ou grupo)"},
+                "confirmacao_1": {"type": "boolean",
+                    "description": "Primeira confirmação explícita: o usuário aprovou mover estes alvos para a DAG-Lixeira. Obrigatória (true) quando simular não é true"},
+                "confirmacao_2": {"type": "boolean",
+                    "description": "Segunda confirmação explícita, separada: o usuário entende que os arquivos saem do lugar e que só ele esvazia a Lixeira. Obrigatória (true) quando simular não é true"},
+                "confirmacao_unica_copia": {"type": "boolean",
+                    "description": "O usuário confirmou que mover Única Cópia (a última cópia conhecida) é intencional"},
+                "marcar_tudo": {"type": "boolean",
+                    "description": "Passo explícito: marca para deleção o que falta numa pasta antes de movê-la"},
+                "simular": {"type": "boolean",
+                    "description": "Só planeja: devolve quantidade, bytes, Volume, destino e alertas, sem tocar no disco nem no Catálogo. Não exige as confirmações"}
+            }),
+            &["alvos"],
+        ),
+    ));
+    v.push(f(
+        "restaurar_da_lixeira",
+        "restaurar_da_lixeira",
+        "Devolve itens Na Lixeira para o caminho de origem (rename de volta; nunca sobrescreve: \
+         se a origem estiver ocupada o nome ganha um sufixo; pasta de origem ausente é recriada).",
+        objeto(
+            json!({"alvos": {"type": "array", "minItems": 1,
+                "items": alvo_schema("Arquivo (caminho ou id), pasta ou Volume (tudo o que está Na Lixeira dele) a restaurar")}}),
+            &["alvos"],
+        ),
+    ));
+    v.push(f(
+        "listar_lixeira",
+        "listar_lixeira",
+        &format!("Lista o que está Na Lixeira (com a origem de cada item) e os últimos Descartados. {SEGURO}"),
+        objeto(Value::Object(pag_props.clone()), &[]),
+    ));
+    v.push(f(
         "desmarcar",
         "desmarcar",
         &format!("Remove a Marcação do alvo (arquivo, grupo ou regra de Volume/pasta). {SEGURO}"),
@@ -384,6 +433,32 @@ pub fn montar(nome: &str, args: &Value) -> Result<Comando, String> {
             };
             obj.clear();
             obj.insert("acao".into(), a);
+        }
+        "mover_para_lixeira" => {
+            let c1 = obj.remove("confirmacao_1").and_then(|v| v.as_bool()) == Some(true);
+            let c2 = obj.remove("confirmacao_2").and_then(|v| v.as_bool()) == Some(true);
+            let simular = obj.get("simular").and_then(Value::as_bool) == Some(true);
+            if !simular && !(c1 && c2) {
+                return Err("mover_para_lixeira exige as duas confirmações explícitas: \
+                    `confirmacao_1` e `confirmacao_2` precisam ser `true` (ou use `simular: true` \
+                    para só ver o que seria movido). Nada foi movido."
+                    .into());
+            }
+            if obj
+                .get("alvos")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+            {
+                return Err("faltou o argumento `alvos` (lista não vazia)".into());
+            }
+        }
+        "restaurar_da_lixeira"
+            if obj
+                .get("alvos")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty) =>
+        {
+            return Err("faltou o argumento `alvos` (lista não vazia)".into());
         }
         "verificar_integridade" => {
             obj.entry("raizes").or_insert_with(|| json!([]));

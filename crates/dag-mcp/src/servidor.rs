@@ -175,9 +175,12 @@ fn inicializar() -> Value {
         "capabilities": {"tools": {"listChanged": false}},
         "serverInfo": {"name": "dag", "title": "DAG: catalogador de acervo digital",
             "version": env!("CARGO_PKG_VERSION")},
-        "instructions": "DAG cataloga discos e acha duplicados. Somente leitura sobre o acervo: \
-    nada é apagado nem movido no disco; marcações só mudam o Catálogo. Ações de serviço podem abrir \
-    um diálogo do sistema onde o usuário digita a senha; o MCP nunca recebe senhas."
+        "instructions": "DAG cataloga discos e acha duplicados. O DAG nunca apaga nem altera arquivos: \
+    a única escrita possível é mover (rename) cópias com Marcação para Deleção para a DAG-Lixeira do \
+    próprio Volume e de volta, pelas ferramentas mover_para_lixeira (exige duas confirmações \
+    explícitas como parâmetros, depois de uma simulação mostrada ao usuário) e restaurar_da_lixeira. \
+    Esvaziar a Lixeira é sempre ato do usuário. Ações de serviço podem abrir um diálogo do sistema onde \
+    o usuário digita a senha; o MCP nunca recebe senhas."
     })
 }
 

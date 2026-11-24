@@ -46,8 +46,8 @@ pub use grupos::{
     reconstruir_grupos, resumo_duplicados, resumo_duplicados_referencia,
 };
 pub use marcacoes::{
-    HistoricoMarcacao, confirmar, desmarcar, historico_da_marcacao, listar_marcacoes, marcar,
-    reavaliar_marcacoes,
+    HistoricoMarcacao, confirmar, desmarcar, fixar_delecao_individual, historico_da_marcacao,
+    listar_marcacoes, marcar, reavaliar_marcacoes,
 };
 pub use prioridade::{ItemPrioridade, definir_prioridade, listar_prioridades};
 pub use relatorios::{relatorio_cobertura, relatorio_sem_cobertura};
@@ -377,7 +377,7 @@ pub(crate) fn tem_outra_copia(conn: &Connection, file_id: i64) -> rusqlite::Resu
             JOIN hashes h ON h.hash = h0.hash AND h.size_bytes = h0.size_bytes
             JOIN files f ON f.id = h.file_id
             WHERE f0.id = ?1
-              AND f.state = 'ativo' AND f.kind = 'arquivo'
+              AND f.state = 'ativo' AND f.kind = 'arquivo' AND f.na_lixeira = 0
               AND h.size_bytes = f.logical_bytes AND h.mtime_ns IS f.mtime_ns
               AND h.ctime_ns IS f.ctime_ns AND h.native_file_id IS f.native_file_id
               AND NOT (f.volume_id = f0.volume_id
@@ -386,6 +386,23 @@ pub(crate) fn tem_outra_copia(conn: &Connection, file_id: i64) -> rusqlite::Resu
     )?
     .query_row([file_id], |l| l.get::<_, i64>(0))
     .map(|n| n != 0)
+}
+
+/// `files.id` das outras cópias físicas (hash e tamanho iguais, fora da Lixeira) de `file_id`.
+pub fn outras_copias(conn: &Connection, file_id: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut st = conn.prepare_cached(
+        "SELECT f.id FROM files f0 JOIN hashes h0 ON h0.file_id = f0.id
+         JOIN hashes h ON h.hash = h0.hash AND h.size_bytes = h0.size_bytes
+         JOIN files f ON f.id = h.file_id
+         WHERE f0.id = ?1
+           AND f.state = 'ativo' AND f.kind = 'arquivo' AND f.na_lixeira = 0
+           AND h.size_bytes = f.logical_bytes AND h.mtime_ns IS f.mtime_ns
+           AND h.ctime_ns IS f.ctime_ns AND h.native_file_id IS f.native_file_id
+           AND NOT (f.volume_id = f0.volume_id
+                    AND (f.id = f0.id
+                         OR (f0.hardlink_group IS NOT NULL AND f.hardlink_group = f0.hardlink_group)))",
+    )?;
+    st.query_map([file_id], |l| l.get(0))?.collect()
 }
 
 /// Única Cópia: tem Hash Completo válido e nenhuma outra cópia física no Catálogo.

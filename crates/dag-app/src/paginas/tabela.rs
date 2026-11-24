@@ -70,7 +70,7 @@ impl Linha<'_> {
                 Layout::left_to_right(Align::Center)
                     .with_main_align(if c.direita { Align::Max } else { Align::Min })
                     .with_main_justify(true),
-                |ui| ui.add(Label::new(texto.clone()).truncate()),
+                |ui| ui.add(Label::new(texto.clone()).truncate().sense(Sense::click())),
             )
             .inner;
         r.on_hover_text(texto)

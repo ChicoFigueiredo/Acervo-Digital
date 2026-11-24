@@ -201,6 +201,30 @@ pub enum Comando {
     Servico { acao: AcaoServico },
     /// Backup consistente do Catálogo (SQLite) para `destino`.
     BackupCatalogo { destino: String },
+    /// Move para a Lixeira do Volume (`<ponto de montagem>/DAG-Lixeira`) as cópias com Marcação
+    /// para Deleção dos `alvos` (arquivo, caminho, pasta ou grupo), por `rename(2)` no mesmo
+    /// Volume (ADR 0005). Nunca apaga nem sobrescreve.
+    ///
+    /// * Única Cópia só vai com `confirmacao_unica_copia`.
+    /// * Pasta só vai se **todo** arquivo catalogado dentro dela tem Marcação para Deleção;
+    ///   `marcar_tudo` é o passo explícito "marcar tudo e mover".
+    /// * `simular`: só planeja (contagens, bytes, destino), sem tocar no disco nem no Catálogo.
+    MoverParaLixeira {
+        alvos: Vec<Alvo>,
+        #[serde(default)]
+        confirmacao_unica_copia: bool,
+        #[serde(default)]
+        marcar_tudo: bool,
+        #[serde(default)]
+        simular: bool,
+    },
+    /// Devolve Na Lixeira para o caminho de origem (nome novo com sufixo se estiver ocupado).
+    RestaurarDaLixeira { alvos: Vec<Alvo> },
+    /// Lista o que está Na Lixeira (e quantos registros Descartados existem).
+    ListarLixeira {
+        limite: Option<u32>,
+        cursor: Option<String>,
+    },
     /// Filhos diretos de `pasta` (ou as Raízes catalogadas, se `None`), do maior para o menor.
     /// `cursor` é o `proximo_cursor` opaco da página anterior.
     Explorar {
@@ -461,6 +485,23 @@ pub enum Resposta {
         threads_por_disco: u32,
         max_discos: u32,
     },
+    /// Resultado de mover ou restaurar (ou da simulação).
+    Lixeira {
+        resultado: crate::ResultadoLixeira,
+    },
+    /// O que está Na Lixeira.
+    ListaLixeira {
+        itens: Vec<crate::ItemLixeira>,
+        /// Itens Na Lixeira (todas as páginas) e a soma dos bytes.
+        total: u64,
+        bytes: u64,
+        /// Registros Descartados no histórico.
+        descartados: u64,
+        /// Últimos Descartados (amostra).
+        #[serde(default)]
+        ultimos_descartados: Vec<crate::ItemDescartado>,
+        proximo_cursor: Option<String>,
+    },
     /// Falha; `codigo` é estável para máquinas, `mensagem` é para humanos.
     Erro {
         codigo: String,
@@ -481,6 +522,19 @@ mod tests {
     fn comandos_serializam_e_voltam() {
         for c in [
             Comando::ListarVolumes,
+            Comando::MoverParaLixeira {
+                alvos: vec![Alvo::Pasta("/x".into()), Alvo::Arquivo(ArquivoId(3))],
+                confirmacao_unica_copia: true,
+                marcar_tudo: false,
+                simular: true,
+            },
+            Comando::RestaurarDaLixeira {
+                alvos: vec![Alvo::Arquivo(ArquivoId(3))],
+            },
+            Comando::ListarLixeira {
+                limite: Some(5),
+                cursor: None,
+            },
             Comando::IniciarScan {
                 modo: ModoVarredura::FastScan,
                 raizes: vec!["/tmp".into()],

@@ -269,6 +269,7 @@ fn desenhar_no(
     leitor: &Leitor,
     selecionada: Option<i64>,
     escolhida: &mut Option<NoPasta>,
+    menu: &mut Option<crate::lixeira::Escolha>,
 ) {
     ui.horizontal(|ui| {
         ui.add_space(nivel as f32 * 14.0);
@@ -295,13 +296,14 @@ fn desenhar_no(
         if r.clicked() {
             *escolhida = Some(no.pasta.clone());
         }
+        super::lixeira::menu(&r, &crate::lixeira::AlvoMenu::de_pasta(&no.pasta), menu);
         if r.double_clicked() && no.pasta.tem_subpastas {
             no.expandir(leitor);
         }
     });
     if no.expandido {
         for f in &mut no.filhos {
-            desenhar_no(ui, f, nivel + 1, leitor, selecionada, escolhida);
+            desenhar_no(ui, f, nivel + 1, leitor, selecionada, escolhida, menu);
         }
         if no.carga.is_some() {
             ui.horizontal(|ui| {
@@ -380,6 +382,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     let leitor = &app.leitor;
     let est = &mut app.explorador;
     let mut escolhida = None;
+    let mut menu = None;
     let mut carregar_mais_arquivos = false;
     let mut ir_para: Option<i64> = None;
     ui.horizontal_top(|ui| {
@@ -393,7 +396,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                 .show(ui, |ui| {
                     let sel = est.selecionada.as_ref().map(|p| p.id);
                     for n in &mut est.arvore {
-                        desenhar_no(ui, n, 0, leitor, sel, &mut escolhida);
+                        desenhar_no(ui, n, 0, leitor, sel, &mut escolhida, &mut menu);
                     }
                 });
         });
@@ -445,7 +448,12 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                         restante,
                         |l, i| {
                             let a = &pg.itens[i];
-                            l.texto(a.nome.clone());
+                            let r = l.texto(a.nome.clone());
+                            super::lixeira::menu(
+                                &r,
+                                &crate::lixeira::AlvoMenu::de_arquivo(a),
+                                &mut menu,
+                            );
                             l.texto(bytes_humanos(a.bytes_logicos));
                             l.texto(a.bytes_alocados.map_or_else(|| "—".into(), bytes_humanos));
                             l.texto(
@@ -518,5 +526,8 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     }
     if carregar_mais_arquivos {
         est.mais_arquivos(&app.leitor);
+    }
+    if let Some(m) = menu {
+        app.tratar_escolha(ui.ctx(), m);
     }
 }

@@ -39,6 +39,10 @@ pub struct NoAnalise {
     pub mtime_ns: Option<i64>,
     /// Pasta: arquivos regulares na subárvore.
     pub arquivos: Option<u64>,
+    /// Caminho catalogado de pasta ou arquivo (`None` para Volume).
+    pub caminho: Option<String>,
+    /// Arquivo Na Lixeira.
+    pub na_lixeira: bool,
 }
 
 impl NoAnalise {
@@ -132,7 +136,7 @@ fn pastas_filhas(
 ) -> Resultado<Vec<NoAnalise>> {
     let sql = format!(
         "SELECT f.id, f.name_display, COALESCE(s.logical_bytes, 0), s.allocated_entry_bytes,
-                s.recursive_file_count, f.mtime_ns, c.category
+                s.recursive_file_count, f.mtime_ns, c.category, f.path_display
          FROM folders f LEFT JOIN folder_stats s ON s.folder_id = f.id
          LEFT JOIN classifications c ON c.id = f.class_id
          WHERE {sql_where}
@@ -150,6 +154,8 @@ fn pastas_filhas(
                 mtime_ns: l.get(5)?,
                 finalidade: l.get(6)?,
                 categoria: None,
+                caminho: Some(l.get(7)?),
+                na_lixeira: false,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -164,7 +170,7 @@ fn pastas_filhas(
 fn arquivos_filhos(conn: &Connection, pasta: i64, limite: usize) -> Resultado<Vec<NoAnalise>> {
     let mut st = conn.prepare_cached(
         "SELECT a.id, a.name_display, a.logical_bytes, a.allocated_bytes, a.mtime_ns,
-                t.broad_category, c.category
+                t.broad_category, c.category, a.path_display, a.na_lixeira
          FROM files a LEFT JOIN file_types t ON t.id = a.mime_id
          LEFT JOIN classifications c ON c.id = a.class_id
          WHERE a.folder_id = ?1 ORDER BY a.logical_bytes DESC, a.id LIMIT ?2",
@@ -180,6 +186,8 @@ fn arquivos_filhos(conn: &Connection, pasta: i64, limite: usize) -> Resultado<Ve
                 categoria: l.get(5)?,
                 finalidade: l.get(6)?,
                 arquivos: None,
+                caminho: Some(l.get(7)?),
+                na_lixeira: l.get::<_, i64>(8)? != 0,
             })
         })?
         .collect::<Result<_, _>>()?)
@@ -210,6 +218,8 @@ pub fn analisar(conn: &Connection, alvo: AlvoAnalise, limite: usize) -> Resultad
                 .query_map([limite as i64 + 1], |l| {
                     let id: i64 = l.get(0)?;
                     Ok(NoAnalise {
+                        caminho: None,
+                        na_lixeira: false,
                         chave: ChaveNo::Volume(id),
                         nome: rotulo_volume(l.get(1)?, l.get(2)?, id),
                         bytes: n(l.get(3)?),

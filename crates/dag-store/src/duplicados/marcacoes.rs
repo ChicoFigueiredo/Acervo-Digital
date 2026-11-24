@@ -168,6 +168,52 @@ fn inserir(
     Ok(info)
 }
 
+/// Fixa numa cópia a Marcação para Deleção que hoje vale por regra de pasta ou de Volume,
+/// criando a Marcação manual equivalente (mesmo hash). Usada ao mover para a Lixeira: fora da
+/// pasta de origem a regra não alcança mais a cópia. Devolve `false` se não havia o que fixar.
+///
+/// # Errors
+/// [`ErroDuplicados::SemHash`] se a cópia não tem Hash Completo válido.
+pub fn fixar_delecao_individual(
+    cat: &mut Catalogo,
+    file_id: i64,
+    autor: Autor,
+    agora: i64,
+) -> Resultado<bool> {
+    cat.armazem_mut().transacao_imediata(|tx| {
+        let manual: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM marcacoes WHERE file_id = ?1)",
+            [file_id],
+            |l| l.get::<_, i64>(0),
+        )? != 0;
+        if manual {
+            return Ok(false);
+        }
+        let Some(m) = marca_efetiva(tx, file_id)? else {
+            return Ok(false);
+        };
+        if m.tipo != TipoMarcacao::Delecao || m.estado != EstadoMarcacao::Ativa {
+            return Ok(false);
+        }
+        let hash = hash_valido(tx, file_id)?.ok_or_else(|| {
+            ErroDuplicados::SemHash("a cópia não tem Hash Completo válido".into())
+        })?;
+        inserir(
+            tx,
+            TipoMarcacao::Delecao,
+            EscopoMarcacao::ManualArquivo,
+            None,
+            None,
+            Some(file_id),
+            None,
+            Some(&hash),
+            autor,
+            agora,
+        )?;
+        Ok(true)
+    })
+}
+
 /// Cria Marcação de Backup ou para Deleção no alvo.
 ///
 /// * `Caminho`/`Arquivo`: Marcação manual de um arquivo (guarda o Hash Completo do momento).
@@ -504,7 +550,7 @@ fn unicas_sob(
            AND NOT EXISTS (
                SELECT 1 FROM hashes h2 JOIN files f2 ON f2.id = h2.file_id
                WHERE h2.hash = h.hash AND h2.size_bytes = h.size_bytes
-                 AND f2.state = 'ativo' AND f2.kind = 'arquivo'
+                 AND f2.state = 'ativo' AND f2.kind = 'arquivo' AND f2.na_lixeira = 0
                  AND h2.size_bytes = f2.logical_bytes AND h2.mtime_ns IS f2.mtime_ns
                  AND h2.ctime_ns IS f2.ctime_ns AND h2.native_file_id IS f2.native_file_id
                  AND NOT (f2.volume_id = f.volume_id

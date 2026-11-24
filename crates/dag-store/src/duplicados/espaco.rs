@@ -176,6 +176,7 @@ pub fn espaco_de_grupos_referencia(conn: &Connection) -> Resultado<EspacoCatalog
 fn marcadas_fora_de_grupo(conn: &Connection, r: &mut EspacoCatalogo) -> Resultado<()> {
     let comum = format!(
         "f.state = 'ativo' AND f.kind = 'arquivo' AND f.logical_bytes > 0
+         AND f.na_lixeira = 0
          AND NOT EXISTS (SELECT 1 FROM grupo_membros gm WHERE gm.file_id = f.id)
          AND (f.hardlink_group IS NULL OR f.id = {})",
         representante_sql("f")

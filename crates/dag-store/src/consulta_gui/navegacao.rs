@@ -139,6 +139,10 @@ pub struct LinhaArquivo {
     pub duplicado: bool,
     /// `backup` ou `delecao` se há Marcação manual neste arquivo.
     pub marcacao: Option<String>,
+    /// Está Na Lixeira (dentro da `DAG-Lixeira` do Volume).
+    pub na_lixeira: bool,
+    /// Caminho completo catalogado (para abrir e para o menu de contexto).
+    pub caminho: String,
 }
 
 /// Posição keyset da tabela de arquivos.
@@ -172,7 +176,8 @@ pub fn arquivos_da_pasta(
                 t.broad_category, t.mime, c.category, c.confidence, a.mtime_ns, a.birthtime_ns,
                 EXISTS(SELECT 1 FROM hashes h WHERE h.file_id = a.id),
                 EXISTS(SELECT 1 FROM grupo_membros g WHERE g.file_id = a.id),
-                (SELECT m.tipo FROM marcacoes m WHERE m.file_id = a.id LIMIT 1)
+                (SELECT m.tipo FROM marcacoes m WHERE m.file_id = a.id LIMIT 1),
+                a.na_lixeira, a.path_display
          FROM files a
          LEFT JOIN file_types t ON t.id = a.mime_id
          LEFT JOIN classifications c ON c.id = a.class_id
@@ -197,6 +202,8 @@ pub fn arquivos_da_pasta(
                 tem_hash: l.get::<_, i64>(11)? != 0,
                 duplicado: l.get::<_, i64>(12)? != 0,
                 marcacao: l.get(13)?,
+                na_lixeira: l.get::<_, i64>(14)? != 0,
+                caminho: l.get(15)?,
             })
         })?
         .collect::<Result<_, _>>()?;

@@ -14,6 +14,7 @@ pub mod formato;
 pub mod hash;
 pub mod ids;
 pub mod jobs;
+pub mod lixeira;
 pub mod painel;
 pub mod plataforma;
 pub mod progresso;
@@ -47,6 +48,10 @@ pub use duplicados::{
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
 pub use jobs::{EstadoJob, EventoAgente, JobInfo, OrigemJob, TipoJob, VisaoJobs, job_em_foco};
+pub use lixeira::{
+    AcaoLixeira, FRASE_ENTENDIMENTO, ItemDescartado, ItemLixeira, ItemMovido, ItemRecusado,
+    NOME_LIXEIRA, ResultadoLixeira,
+};
 pub use painel::{EntradaPainel, Onde, PainelJob};
 pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
 pub use progresso::{

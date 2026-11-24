@@ -16,6 +16,7 @@ pub mod cores;
 pub mod formato;
 pub mod janela;
 pub mod leitor;
+pub mod lixeira;
 pub mod paginas;
 pub mod progresso;
 pub mod selecao;

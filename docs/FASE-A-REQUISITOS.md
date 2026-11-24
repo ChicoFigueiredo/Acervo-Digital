@@ -11,7 +11,7 @@ A Fase A passa a entregar a especificação v1.0 inteira **mais** o escopo da an
 | Hash | Proibido como obrigação na Fase A | Hash Completo BLAKE3 de **todos** os arquivos, em etapa própria do Full Scan |
 | Duplicados | Fase B | Grupos de Duplicados, pastas clones (a confirmar) e espaço recuperável na Fase A |
 | Marcações | Não existiam | Marcação de Backup, Marcação para Deleção, Cobertura, Cópia Principal |
-| Somente leitura | Total | Continua total para os **arquivos**; as marcações só alteram o Catálogo |
+| Somente leitura | Total | O DAG nunca apaga nem altera arquivos. Única escrita: mover cópia com Marcação para Deleção para a `DAG-Lixeira` do mesmo Volume e de volta (ADR 0005) |
 | Inventário na nuvem | Nunca | Exceção: cliente MCP configurado pelo usuário (ADR 0002) |
 | Interfaces | GUI Bancada | GUI Bancada + CLI `dag` + MCP `dag mcp`, todas sobre o mesmo núcleo |
 
@@ -31,7 +31,7 @@ A-01 a A-22 continuam obrigatórios como escritos na v1.0, com dois ajustes:
 | A-26 | Escolher a Cópia Principal de cada grupo pela Prioridade de Volume/pasta definida pelo usuário, com troca manual por grupo. |
 | A-27 | Marcação de Backup por regra (Volume ou pasta inteira) e manual (arquivo ou grupo). A cópia marcada sai do espaço recuperável. |
 | A-28 | Cobertura: indicar, por arquivo, pasta e volume, quais arquivos têm cópia com Marcação de Backup em outro **Dispositivo Físico**; relatório de arquivos sem Cobertura. Cópias em volumes desconectados mantêm Cobertura com selo "não verificada desde <data>". |
-| A-29 | Marcação para Deleção em qualquer arquivo, manual ou por grupo, somente no Catálogo. Arquivo sem outra cópia recebe alerta de Única Cópia. Relatório exportável (CSV/JSON) das marcações. O DAG nunca apaga, move nem altera arquivos. |
+| A-29 | Marcação para Deleção em qualquer arquivo, manual ou por grupo, somente no Catálogo. Arquivo sem outra cópia recebe alerta de Única Cópia. Relatório exportável (CSV/JSON) das marcações. O DAG nunca apaga nem altera arquivos. Lixeira em dois níveis (ADR [0005](adr/0005-lixeira-em-dois-niveis.md)): a cópia com Marcação para Deleção pode ser movida para a `DAG-Lixeira` na raiz do próprio Volume (`renameat2` com `RENAME_NOREPLACE`, mesmo sistema de arquivos, nunca entre Volumes) e restaurada; fica **Na Lixeira** e fora de grupos, Única Cópia, Cobertura e espaço recuperável; quando o usuário a esvazia, o registro vira **Descartado**. Mover exige duas confirmações (GUI: dois diálogos; CLI `dag lixeira mover`: pré-visualização e duas confirmações; MCP `mover_para_lixeira`: `confirmacao_1` e `confirmacao_2`). Única Cópia só vai com aceite explícito; pasta só vai se todo arquivo está marcado (`marcar_tudo` é passo à parte). Hard links e arquivos cujo inode, tamanho ou mtime divergem do Catálogo são recusados. A elevação por Polkit para mover onde o usuário não tem escrita está **pendente**: hoje a operação falha com `permissao_negada` e nada é movido. |
 | A-30 | Uma cópia tem no máximo uma marcação. Se o Hash Completo mudar após a marcação, ela vira Marcação Pendente e sai de todas as contas até nova confirmação. Toda marcação e mudança de estado fica no histórico com autor (GUI, CLI ou MCP) e data. |
 | A-31 | Espaço recuperável por grupo, pasta, volume e computador = bytes das cópias com Marcação para Deleção, mais estimativa das cópias redundantes sem marcação, descontando Marcação de Backup e Mesmo Arquivo Físico; indicar limitações (reflinks, COW, compressão). |
 | A-32 | Pastas clones: detectar pastas cujo conteúdo recursivo é idêntico ao de outra pasta. *(Pendente de decisão: não implementado; a confirmação do produto ainda não saiu. Ver [ACEITE-FASE-A.md](ACEITE-FASE-A.md).)* |
@@ -43,7 +43,7 @@ A-01 a A-22 continuam obrigatórios como escritos na v1.0, com dois ajustes:
 
 ## 4. Critérios de aceite
 
-CA-A01 a CA-A17 da v1.0 continuam valendo. CA-A15 passa a incluir: "marcações não alteram arquivos; nenhum comando da GUI, CLI ou MCP apaga, move ou renomeia".
+CA-A01 a CA-A17 da v1.0 continuam valendo. CA-A15 passa a incluir: "marcações não alteram arquivos; nenhum comando da GUI, CLI ou MCP apaga ou altera arquivo; a única escrita permitida é mover cópia com Marcação para Deleção para a `DAG-Lixeira` do próprio Volume e de volta (ADR 0005), por `rename` sem sobrescrever, com dupla confirmação e sem nunca cruzar Volumes". Teste estático: `dag-agent/tests/seguranca_disco.rs`.
 
 **CA-A18 — Hash:** num conjunto de teste com conteúdos conhecidos, todo arquivo regular tem BLAKE3 igual ao da referência `b3sum`; a árvore é navegável antes do fim da etapa de hash; pausar, encerrar abruptamente e retomar não refaz arquivos já hasheados nem deixa hash parcial gravado.
 

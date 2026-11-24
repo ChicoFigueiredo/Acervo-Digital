@@ -4,7 +4,7 @@
 
 ## Estado atual
 
-**Fase A (Linux) implementada nos seis incrementos**, sempre em modo **somente leitura sobre os arquivos catalogados**: o DAG só escreve no Catálogo (SQLite), no arquivo `<catálogo>.lock` ao lado dele, no socket do agente e em relatórios/backups que você pedir. Nenhum comando da CLI, da GUI ou do MCP apaga, move, renomeia ou altera arquivo; as Marcações (Backup, Deleção) vivem só no Catálogo. O estado de cada critério de aceite, com os testes que o provam e o que continua manual, está em [docs/ACEITE-FASE-A.md](docs/ACEITE-FASE-A.md).
+**Fase A (Linux) implementada nos seis incrementos**, **sem nunca apagar nem alterar os arquivos catalogados**: o DAG escreve no Catálogo (SQLite), no arquivo `<catálogo>.lock` ao lado dele, no socket do agente e em relatórios/backups que você pedir. A **única** escrita sobre arquivos catalogados é a Lixeira em dois níveis ([ADR 0005](docs/adr/0005-lixeira-em-dois-niveis.md)): uma cópia com Marcação para Deleção pode ser movida (`rename` atômico, sem sobrescrever, só dentro do mesmo Volume) para a pasta `DAG-Lixeira` na raiz do Volume, e restaurada de lá. Nada é apagado, copiado entre Volumes ou alterado; esvaziar a `DAG-Lixeira` é sempre ato seu, fora do DAG. Mover exige duas confirmações (GUI: dois diálogos; CLI: `dag lixeira mover`; MCP: `mover_para_lixeira`). O estado de cada critério de aceite, com os testes que o provam e o que continua manual, está em [docs/ACEITE-FASE-A.md](docs/ACEITE-FASE-A.md).
 
 ### O que já existe
 
@@ -77,7 +77,7 @@ Assinatura de conteúdo (magic bytes) existe em `dag-core` mas ainda não é usa
 - Tree View e Treemap com análise por HD ou computador.
 - Monitoramento contínuo enquanto aplicativo aberto; serviço independente **opcional** instalado e configurado pela GUI.
 - Escalonamento de permissões apenas quando necessário, no Linux via Polkit e helper restrito.
-- **Somente leitura dos arquivos catalogados. Sem exclusões ou movimentações.**
+- **Nunca apaga nem altera arquivos catalogados.** Única exceção: mover cópias com Marcação para Deleção para a `DAG-Lixeira` do próprio Volume e de volta (dupla confirmação, `rename` sem sobrescrever; ADR 0005). Esvaziar a Lixeira é com você.
 - Arquitetura preparada para Windows/macOS.
 
 ## Próximas fases

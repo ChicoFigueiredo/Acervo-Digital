@@ -704,7 +704,7 @@ fn alerta_unica(r: &ResultadoMarcacao) -> String {
         s.push_str(&format!("  ... e mais {}\n", inteiro_pt_br(resto)));
     }
     s.push_str(
-        "  Se esta for a decisão errada, remova com `dag desmarcar`. O DAG nunca apaga nem move arquivos.\n",
+        "  Se esta for a decisão errada, remova com `dag desmarcar`. O DAG nunca apaga arquivos; só os move para a DAG-Lixeira do Volume, a seu pedido.\n",
     );
     s
 }
@@ -739,6 +739,101 @@ pub fn marcacao(r: &ResultadoMarcacao) -> String {
     }
     s.push_str(&alerta_unica(r));
     s.push_str("Somente o Catálogo foi alterado.\n");
+    s
+}
+
+/// Resultado (ou simulação) de mover/restaurar.
+pub fn lixeira(r: &dag_core::ResultadoLixeira) -> String {
+    use dag_core::AcaoLixeira;
+    let mut s = String::new();
+    let (verbo_p, verbo_f) = match (r.acao, r.simulado) {
+        (AcaoLixeira::Mover, true) => ("iriam", "Seriam movidos"),
+        (AcaoLixeira::Mover, false) => ("foram", "Movidos"),
+        (AcaoLixeira::Restaurar, _) => ("foram", "Restaurados"),
+    };
+    let _ = verbo_p;
+    s.push_str(&format!(
+        "{verbo_f}: {} arquivo(s), {}\n",
+        inteiro_pt_br(r.total_arquivos),
+        bytes_humanos(r.total_bytes)
+    ));
+    if !r.volumes.is_empty() {
+        s.push_str(&format!("Volume(s): {}\n", r.volumes.join(", ")));
+    }
+    if r.acao == AcaoLixeira::Mover && !r.destinos.is_empty() {
+        s.push_str(&format!("Destino: {}\n", r.destinos.join(", ")));
+    }
+    if r.marcados_agora > 0 {
+        s.push_str(&format!(
+            "Marcações para Deleção criadas agora: {}\n",
+            inteiro_pt_br(r.marcados_agora)
+        ));
+    }
+    if r.unicas_copias > 0 {
+        s.push_str(&format!(
+            "ATENÇÃO: {} arquivo(s) são Única Cópia: depois de movidos não resta outra cópia fora da Lixeira.\n",
+            inteiro_pt_br(r.unicas_copias)
+        ));
+    }
+    for m in r.movidos.iter().take(20) {
+        s.push_str(&format!("  {} -> {}\n", m.de, m.para));
+    }
+    if r.movidos.len() > 20 {
+        s.push_str(&format!("  ... e mais {}\n", r.movidos.len() - 20));
+    }
+    for x in &r.recusados {
+        s.push_str(&format!(
+            "Recusado [{}] {}: {}\n",
+            x.codigo, x.alvo, x.motivo
+        ));
+        for a in &x.arquivos {
+            s.push_str(&format!("    {a}\n"));
+        }
+    }
+    if !r.simulado && r.acao == AcaoLixeira::Mover && r.total_arquivos > 0 {
+        s.push_str(
+            "Nada foi apagado. Para devolver: `dag lixeira restaurar`. Esvaziar a DAG-Lixeira é ato seu, fora do DAG.\n",
+        );
+    }
+    s
+}
+
+/// O que está Na Lixeira.
+pub fn lista_lixeira(
+    itens: &[dag_core::ItemLixeira],
+    total: u64,
+    bytes: u64,
+    descartados: u64,
+    proximo: Option<&str>,
+) -> String {
+    let mut s = format!(
+        "Na Lixeira: {} arquivo(s), {}; {} Descartado(s) no histórico\n",
+        inteiro_pt_br(total),
+        bytes_humanos(bytes),
+        inteiro_pt_br(descartados)
+    );
+    if !itens.is_empty() {
+        let linhas: Vec<Vec<String>> = itens
+            .iter()
+            .map(|i| {
+                vec![
+                    i.arquivo.to_string(),
+                    bytes_humanos(i.bytes),
+                    i.movido_em.map_or_else(|| "-".into(), data_hora_utc),
+                    i.origem.clone(),
+                    i.caminho.clone(),
+                ]
+            })
+            .collect();
+        s.push_str(&tabela(
+            &["ID", "TAMANHO", "MOVIDO EM", "ORIGEM", "NA LIXEIRA"],
+            &[true, true, false, false, false],
+            &linhas,
+        ));
+    }
+    if let Some(c) = proximo {
+        s.push_str(&format!("Há mais; use --cursor {c}\n"));
+    }
     s
 }
 
@@ -1191,6 +1286,24 @@ pub fn imprimir(r: &Resposta, todos: bool) {
         Resposta::Grupo { detalhe } => print!("{}", grupo(detalhe)),
         Resposta::Marcacao { resultado } => print!("{}", marcacao(resultado)),
         Resposta::Desmarcado { removidas } => print!("{}", desmarcado(removidas)),
+        Resposta::Lixeira { resultado } => print!("{}", lixeira(resultado)),
+        Resposta::ListaLixeira {
+            itens,
+            total,
+            bytes,
+            descartados,
+            proximo_cursor,
+            ..
+        } => print!(
+            "{}",
+            lista_lixeira(
+                itens,
+                *total,
+                *bytes,
+                *descartados,
+                proximo_cursor.as_deref()
+            )
+        ),
         Resposta::Relatorio {
             dados,
             proximo_cursor,

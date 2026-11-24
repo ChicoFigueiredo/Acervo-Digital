@@ -49,6 +49,12 @@ Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_
 | `marcacoes` | Marcação de Backup/Deleção. `escopo`: `regra_volume`, `regra_pasta`, `manual_arquivo`, `manual_grupo`; `estado` ativa/pendente; `hash_na_marcacao`; `autor` gui/cli/mcp. | CHECK amarra colunas ao escopo. Manual exige hash. Índices únicos: no máximo uma marcação por arquivo (A-30) e uma regra por volume/pasta. Hash mudou ⇒ `pendente` (fora das contas). |
 | `marcacoes_historico` | Histórico de cada marcação e mudança de estado (evento, estados, alvo, hash, autor, `em`). | **Somente de acréscimo** (triggers do `bancada-armazem` recusam UPDATE/DELETE). Sem FK, para sobreviver à remoção da marcação ou do arquivo. A aplicação grava a linha na mesma transação da mudança. |
 
+## Lixeira (migração 0008, ADR 0005)
+
+- `files.na_lixeira` (0/1), `files.lixeira_origem_path`/`lixeira_origem_display` (de onde veio) e `files.lixeira_movido_em` (segundos Unix). Quem está Na Lixeira continua uma linha de `files` (o scan reconcilia pela raiz extra `<montagem>/DAG-Lixeira`), mas todo filtro de grupos, Única Cópia, Cobertura, espaço e relatórios exclui `na_lixeira = 1`.
+- `descartados`: histórico de quem estava Na Lixeira e sumiu (o usuário a esvaziou): caminhos, hash, bytes, `movido_em`, `descartado_em`. Nunca é apagado pelo DAG.
+- O Catálogo só registra o que o agente fez; o único código que toca o disco é `dag-agent/src/lixeira/fs.rs`.
+
 ## Consultas de duplicados em SQL
 
 A listagem paginada de grupos, o resumo e o espaço recuperável por Volume/pasta/grupo são calculados **em SQL** (`src/duplicados/agregado.rs`), sem carregar grupos no processo: CTEs agregam as cópias de cada grupo (Marcação efetiva = arquivo > regra da pasta mais específica > regra do Volume) e a página sai por keyset `(espaço recuperável desc, id)` ou `(tamanho desc, id)`. Os `CROSS JOIN` e o `INDEXED BY idx_grupo_membros_grupo` fixam a ordem de junção, porque sem `ANALYZE` o planejador varria `files` inteiro por grupo. As versões que carregam tudo na memória sobrevivem só como referência de teste (`*_referencia`).

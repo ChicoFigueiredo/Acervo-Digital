@@ -724,3 +724,134 @@ fn todas_as_paginas_desenham_em_janela_baixa_sem_cortar_a_rolagem() {
         }
     }
 }
+
+#[test]
+fn lixeira_dois_dialogos_mover_e_restaurar_de_ponta_a_ponta() {
+    use dag_app::lixeira::{AlvoMenu, ItemMenu, Passo};
+    use dag_core::Alvo;
+
+    let mut a = ambiente_populado();
+    varrer(&mut a);
+    let sub = a.raiz.join("sub");
+    let alvo = AlvoMenu {
+        alvo: Alvo::Pasta(sub.display().to_string()),
+        rotulo: "sub".into(),
+        caminho: Some(sub.display().to_string()),
+        pasta: true,
+        na_lixeira: false,
+    };
+    let ctx = a.ctx.clone();
+    a.casca
+        .app
+        .tratar_escolha(&ctx, (ItemMenu::MoverParaLixeira, alvo));
+    // Primeiro diálogo: a simulação não tem nada a mover (nenhum arquivo está marcado).
+    a.ate("prévia", |app| {
+        app.lixeira
+            .dialogo
+            .as_ref()
+            .is_some_and(|d| !matches!(d.passo, Passo::Calculando))
+    });
+    {
+        let d = a.casca.app.lixeira.dialogo.as_mut().unwrap();
+        d.continuar();
+        assert!(
+            matches!(d.passo, Passo::Previa(_)),
+            "nada a mover: não avança"
+        );
+        assert!(d.comando_mover().is_none());
+        d.marcar_tudo = true;
+        d.passo = Passo::Calculando;
+    }
+    let cmd = a
+        .casca
+        .app
+        .lixeira
+        .dialogo
+        .as_ref()
+        .unwrap()
+        .comando_previa();
+    a.casca
+        .app
+        .enviar(cmd, dag_app::app::Proposito::LixeiraPrevia);
+    a.ate("prévia com marcar tudo", |app| {
+        matches!(
+            app.lixeira.dialogo.as_ref().map(|d| &d.passo),
+            Some(Passo::Previa(r)) if r.total_arquivos > 0 || !r.recusados.is_empty()
+        )
+    });
+    if let Some(Passo::Previa(r)) = a.casca.app.lixeira.dialogo.as_ref().map(|d| &d.passo) {
+        assert_eq!(r.total_arquivos, 3, "{r:?}");
+    }
+    // Segundo diálogo: sem a confirmação e o aceite da Única Cópia, nada é enviado.
+    {
+        let d = a.casca.app.lixeira.dialogo.as_mut().unwrap();
+        d.continuar();
+        assert!(matches!(d.passo, Passo::Confirmar(_)));
+        assert!(d.comando_mover().is_none());
+        d.entendo = true;
+        assert!(d.comando_mover().is_none(), "falta aceitar a Única Cópia");
+        d.aceita_unica = true;
+    }
+    a.quadro_texto();
+    let cmd = a
+        .casca
+        .app
+        .lixeira
+        .dialogo
+        .as_ref()
+        .unwrap()
+        .comando_mover()
+        .unwrap();
+    a.casca.app.lixeira.dialogo = None;
+    a.casca
+        .app
+        .enviar(cmd, dag_app::app::Proposito::LixeiraMover);
+    a.ate("mover", |app| app.pedidos.is_empty());
+    assert!(!sub.join("x.bin").exists());
+    assert!(a.raiz.join("DAG-Lixeira/sub/x.bin").exists());
+
+    // Página Lixeira: lista, banner e restauração pelo Ribbon.
+    a.abrir("lixeira");
+    a.ate("lista Na Lixeira", |app| {
+        app.lixeira
+            .lista
+            .dado
+            .as_ref()
+            .is_some_and(|l| l.total == 3)
+    });
+    let texto = a.quadro_texto();
+    assert!(texto.contains("Na Lixeira"), "{texto}");
+    let ids: Vec<i64> = a
+        .casca
+        .app
+        .lixeira
+        .lista
+        .dado
+        .as_ref()
+        .unwrap()
+        .itens
+        .iter()
+        .map(|i| i.arquivo.0)
+        .collect();
+    a.casca.app.lixeira.marcados.extend(ids);
+    a.casca.app.executar_acao(&ctx, "lixeira.restaurar");
+    a.ate("restaurar", |app| app.pedidos.is_empty());
+    assert!(sub.join("x.bin").exists());
+    assert!(!a.raiz.join("DAG-Lixeira/sub/x.bin").exists());
+}
+
+#[test]
+fn menu_de_contexto_depende_de_estar_na_lixeira() {
+    use dag_app::lixeira::{AlvoMenu, ItemMenu, itens_do_menu};
+    use dag_core::{Alvo, ArquivoId};
+    let mut m = AlvoMenu {
+        alvo: Alvo::Arquivo(ArquivoId(1)),
+        rotulo: "a".into(),
+        caminho: Some("/x/a".into()),
+        pasta: false,
+        na_lixeira: false,
+    };
+    assert_eq!(itens_do_menu(&m)[0], ItemMenu::MoverParaLixeira);
+    m.na_lixeira = true;
+    assert_eq!(itens_do_menu(&m)[0], ItemMenu::RestaurarDaLixeira);
+}

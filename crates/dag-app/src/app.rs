@@ -110,6 +110,12 @@ pub enum Proposito {
     Exportar,
     /// Salvar o paralelismo do hash em Configurações.
     ConfigHash,
+    /// Simulação do primeiro diálogo de mover para a Lixeira.
+    LixeiraPrevia,
+    /// Mover de verdade (depois dos dois diálogos).
+    LixeiraMover,
+    /// Restaurar da Lixeira.
+    LixeiraRestaurar,
 }
 
 /// Varredura em andamento, vista pela GUI.
@@ -307,6 +313,7 @@ pub struct AppDag {
     pub explorador: explorador::Estado,
     pub analise: analise::Estado,
     pub duplicados: duplicados::Estado,
+    pub lixeira: crate::lixeira::Estado,
     pub configuracoes: configuracoes::Estado,
 }
 
@@ -372,6 +379,7 @@ impl AppDag {
             descoberta,
             varredura: varredura::Estado::default(),
             explorador: explorador::Estado::default(),
+            lixeira: crate::lixeira::Estado::default(),
             analise: analise::Estado::default(),
             duplicados: duplicados::Estado::default(),
             configuracoes: configuracoes::Estado::default(),
@@ -869,6 +877,21 @@ impl AppDag {
                     ),
                 );
             }
+            Resposta::Lixeira { resultado } => {
+                if matches!(proposito, Some(Proposito::LixeiraPrevia)) {
+                    if let Some(d) = self.lixeira.dialogo.as_mut() {
+                        d.receber_previa(resultado);
+                    }
+                } else {
+                    let tom = if resultado.recusados.is_empty() {
+                        Tom::Sucesso
+                    } else {
+                        Tom::Aviso
+                    };
+                    self.aviso(tom, crate::lixeira::resumo_do_resultado(&resultado));
+                    self.invalidar();
+                }
+            }
             Resposta::Ok { mensagem } => {
                 if let Some(m) = mensagem {
                     self.aviso(Tom::Sucesso, m);
@@ -876,6 +899,43 @@ impl AppDag {
                 self.invalidar();
             }
             _ => {}
+        }
+    }
+
+    /// Trata o item escolhido num menu de contexto (mover, restaurar, abrir, copiar).
+    pub fn tratar_escolha(&mut self, ctx: &egui::Context, escolha: crate::lixeira::Escolha) {
+        use crate::lixeira::{Dialogo, ItemMenu, comando_restaurar, pasta_para_abrir};
+        let (item, alvo) = escolha;
+        match item {
+            ItemMenu::MoverParaLixeira | ItemMenu::RestaurarDaLixeira => {
+                if let Some(m) = self.motivo_sem_escrita() {
+                    self.aviso(Tom::Aviso, m);
+                    return;
+                }
+                if item == ItemMenu::MoverParaLixeira {
+                    let d = Dialogo::novo(alvo);
+                    let cmd = d.comando_previa();
+                    self.lixeira.dialogo = Some(d);
+                    self.enviar(cmd, Proposito::LixeiraPrevia);
+                } else {
+                    self.enviar(
+                        comando_restaurar(vec![alvo.alvo]),
+                        Proposito::LixeiraRestaurar,
+                    );
+                }
+            }
+            ItemMenu::AbrirNoGerenciador => {
+                if let Some(p) = pasta_para_abrir(&alvo)
+                    && let Err(e) = self.lixeira.abridor.abrir(&p)
+                {
+                    self.aviso(Tom::Aviso, e);
+                }
+            }
+            ItemMenu::CopiarCaminho => {
+                if let Some(c) = alvo.caminho {
+                    ctx.copy_text(c);
+                }
+            }
         }
     }
 
@@ -898,6 +958,12 @@ impl AppDag {
             id if id.starts_with("configuracoes.") => futuro(),
             "varredura.fast_scan" => Some("Fast Scan chega no incremento 5".into()),
             "discos.detectar" => m(self.motivo_sem_escrita()),
+            "lixeira.restaurar" => m(self.motivo_sem_escrita()).or_else(|| {
+                self.lixeira
+                    .marcados
+                    .is_empty()
+                    .then(|| "Marque ao menos um item na lista".to_string())
+            }),
             "discos.usar_na_varredura" => self
                 .discos
                 .marcados
@@ -986,6 +1052,20 @@ impl AppDag {
             "duplicados.marcar_backup" => self.pedir_confirmacao(AcaoMarcacao::MarcarBackup),
             "duplicados.marcar_delecao" => self.pedir_confirmacao(AcaoMarcacao::MarcarDelecao),
             "duplicados.desmarcar" => self.pedir_confirmacao(AcaoMarcacao::Desmarcar),
+            "lixeira.restaurar" => {
+                let alvos = self.lixeira.alvos_marcados();
+                self.lixeira.marcados.clear();
+                self.enviar(
+                    crate::lixeira::comando_restaurar(alvos),
+                    Proposito::LixeiraRestaurar,
+                );
+            }
+            "lixeira.atualizar" => self.invalidar(),
+            "lixeira.sobre" => self.aviso(
+                Tom::Info,
+                "O DAG nunca apaga arquivos: para liberar espaço, esvazie a pasta DAG-Lixeira de \
+                 cada Volume pelo gerenciador de arquivos.",
+            ),
             "duplicados.reconstruir" => {
                 self.enviar(Comando::ReconstruirDuplicados, Proposito::Exportar);
                 self.aviso(
@@ -1220,6 +1300,7 @@ impl AppCasca for AppDag {
             }
         }
         duplicados::dialogo_de_confirmacao(ui.ctx(), self);
+        paginas::lixeira::dialogos(ui.ctx(), self);
     }
 
     fn status(&self) -> Vec<SegmentoStatus> {
@@ -1262,13 +1343,14 @@ mod testes {
     use bancada_casca::{Disponibilidade, ListaDeAcoes};
     use std::collections::HashSet;
 
-    const ABAS: [&str; 8] = [
+    const ABAS: [&str; 9] = [
         "Início",
         "Discos",
         "Varredura",
         "Explorador",
         "Análise",
         "Duplicados",
+        "Lixeira",
         "Monitoramento",
         "Configurações",
     ];
@@ -1302,7 +1384,7 @@ mod testes {
     }
 
     #[test]
-    fn as_oito_abas_estao_presentes_na_ordem() {
+    fn as_nove_abas_estao_presentes_na_ordem() {
         let rotulos: Vec<String> = AppDag::lista_de_abas()
             .into_iter()
             .map(|a| a.rotulo)

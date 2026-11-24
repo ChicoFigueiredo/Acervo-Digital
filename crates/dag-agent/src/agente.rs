@@ -70,6 +70,8 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::Eventos { .. }
             | Comando::SaudeMonitor
             | Comando::ListarJobs
+            | Comando::ListarLixeira { .. }
+            | Comando::MoverParaLixeira { simular: true, .. }
             | Comando::ConfigHash {
                 threads_por_disco: None,
                 max_discos: None
@@ -101,7 +103,9 @@ pub struct Agente {
     pub(crate) controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     volumes_fixos: Option<Vec<VolumeDescoberto>>,
-    autor: Autor,
+    pub(crate) autor: Autor,
+    /// Conferência de `st_dev` do `rename` da Lixeira (injetável nos testes).
+    pub(crate) dispositivos: Arc<dyn crate::lixeira::Dispositivos>,
     /// Paralelismo do hash dado por flag do agente (vence o persistido, perde para o pedido).
     opcoes_hash: OpcoesHash,
 }
@@ -164,6 +168,7 @@ impl Agente {
             progresso: Some(progresso_stderr()),
             volumes_fixos: None,
             autor: Autor::Cli,
+            dispositivos: Self::dispositivos_padrao(),
             opcoes_hash: OpcoesHash::default(),
         }
     }
@@ -427,6 +432,16 @@ impl Agente {
                     )),
                 })
             }
+            Comando::MoverParaLixeira {
+                alvos,
+                confirmacao_unica_copia,
+                marcar_tudo,
+                simular,
+            } => self.mover_para_lixeira(&alvos, confirmacao_unica_copia, marcar_tudo, simular),
+            Comando::RestaurarDaLixeira { alvos } => self.restaurar_da_lixeira(&alvos),
+            Comando::ListarLixeira { limite, cursor } => {
+                self.listar_lixeira(limite, cursor.as_deref())
+            }
             Comando::Relatorio {
                 tipo,
                 nivel,
@@ -465,7 +480,7 @@ impl Agente {
         }
     }
 
-    fn volumes_do_sistema(&self) -> Result<Vec<VolumeDescoberto>, ErroAgente> {
+    pub(crate) fn volumes_do_sistema(&self) -> Result<Vec<VolumeDescoberto>, ErroAgente> {
         match &self.volumes_fixos {
             Some(v) => Ok(v.clone()),
             None => Ok(PlataformaLinux.descobrir_volumes()?),
@@ -609,7 +624,8 @@ impl Agente {
             return Err(ErroAgente::Invalido("informe ao menos uma raiz".into()));
         }
         self.config_hash(opcoes)?;
-        let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect(), elevar)?;
+        let raizes = self.raizes_com_lixeira(raizes.iter().map(PathBuf::from).collect())?;
+        let scan = self.novo_scan(raizes, elevar)?;
         let r = scan.executar(&mut self.catalogo)?;
         self.concluir_scan(r, sem_hash, releitura_total, opcoes)
     }
@@ -629,6 +645,7 @@ impl Agente {
         } else {
             raizes.iter().map(PathBuf::from).collect()
         };
+        let raizes = self.raizes_com_lixeira(raizes)?;
         let elevado = crate::servico::leitor_elevado_se(&raizes, elevar);
         let mut scan = FastScan::novo(raizes, self.volumes_do_sistema()?)
             .com_controle(self.controle.clone())
@@ -842,6 +859,8 @@ impl Agente {
         if r.desfecho != DesfechoScan::Cancelada {
             self.mensagem("classificando finalidade (por caminho)...");
             classificar_execucao(&mut self.catalogo, r.execucao_id, agora())?;
+            // A varredura visitou a DAG-Lixeira: reconhece o que o usuário pôs, tirou ou esvaziou.
+            let lixeira = self.reconciliar_lixeira()?;
             if !sem_hash {
                 if releitura_total {
                     hashes::invalidar_evidencia(self.catalogo.armazem().conexao(), r.execucao_id)?;
@@ -876,6 +895,7 @@ impl Agente {
                     // desde a última reconstrução completa (ou grupos nunca construídos) sempre
                     // reconstroem: vale para a retomada do hash e para a abertura do agente.
                     let nada_mudou = h.hasheados == 0
+                        && !lixeira.mudou_copias()
                         && r.reconciliacao
                             .as_ref()
                             .map(resumo_reconciliacao)
@@ -910,6 +930,8 @@ impl Agente {
             "[duplicados] Agrupando duplicados (pode levar minutos em Catálogos grandes)...",
         );
         let t = agora();
+        // Hashes novos podem liberar Marcações de quem está Na Lixeira; a cópia lá não conta.
+        self.reconciliar_lixeira()?;
         duplicados::reconstruir_grupos(&mut self.catalogo, Escopo::Tudo, self.autor, t)?;
         self.mensagem("[marcações] reavaliando Marcações contra o hash atual...");
         let pendentes = duplicados::reavaliar_marcacoes(&mut self.catalogo, self.autor, t)?;
@@ -1196,7 +1218,8 @@ fn pos_reconciliacao(
             .executar(cat)?;
     }
     let t = agora();
-    if hashes::grupos_desatualizados(cat.armazem().conexao())? {
+    let lixeira = dag_store::lixeira::reconciliar(cat, autor, t)?;
+    if lixeira.mudou_copias() || hashes::grupos_desatualizados(cat.armazem().conexao())? {
         duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
     }
     duplicados::reavaliar_marcacoes(cat, autor, t)?;

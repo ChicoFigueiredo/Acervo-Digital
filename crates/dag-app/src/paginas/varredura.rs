@@ -280,7 +280,7 @@ fn secao_raizes(ui: &mut egui::Ui, app: &mut AppDag) {
     });
     let mut remover = None;
     if app.varredura.raizes.is_empty() {
-        ui.weak("Nenhuma raiz escolhida. A varredura é somente leitura: o DAG nunca altera o que varre.");
+        ui.weak("Nenhuma raiz escolhida. A varredura só lê: o DAG nunca altera o que varre.");
     }
     for (i, r) in app.varredura.raizes.iter().enumerate() {
         ui.horizontal(|ui| {

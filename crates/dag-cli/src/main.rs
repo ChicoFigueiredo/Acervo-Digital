@@ -4,6 +4,7 @@
 //!
 //! Códigos de saída: 0 ok; 1 erro; 2 ainda não implementado; 130 varredura cancelada (Ctrl-C).
 
+mod lixeira;
 mod saida;
 mod seguir;
 
@@ -24,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[command(
     name = "dag",
     version,
-    about = "DAG: catalogador de acervo digital (somente leitura)"
+    about = "DAG: catalogador de acervo digital (nunca apaga arquivos; só move para a DAG-Lixeira, a seu pedido)"
 )]
 struct Cli {
     /// Saída em JSON
@@ -310,6 +311,9 @@ enum Sub {
     Marcar(Marcar),
     /// Remove uma Marcação
     Desmarcar(AlvoMarcacao),
+    /// Lixeira em dois níveis: mover para a DAG-Lixeira do Volume, restaurar e listar
+    #[command(subcommand)]
+    Lixeira(Lixeira),
     /// Confirma de novo uma Marcação Pendente (conteúdo mudou depois de marcada)
     Confirmar {
         /// Id da Marcação (veja `dag relatorio marcacoes`)
@@ -385,6 +389,73 @@ enum Marcar {
     Backup(AlvoMarcacao),
     /// Marcação para Deleção: candidata a descarte (não apaga nada)
     Delecao(AlvoMarcacao),
+}
+
+/// Alvos da Lixeira: repita as flags para vários.
+#[derive(Args, Debug)]
+struct AlvosLixeira {
+    /// Arquivo: caminho catalogado ou id numérico
+    #[arg(long, value_name = "CAMINHO|ID")]
+    arquivo: Vec<String>,
+    /// Pasta catalogada: só vai se todo arquivo catalogado dentro dela tem Marcação para Deleção
+    #[arg(long, value_name = "PASTA")]
+    pasta: Vec<String>,
+    /// Grupo de Duplicados (id): as cópias dele com Marcação para Deleção
+    #[arg(long, value_name = "ID")]
+    grupo: Vec<i64>,
+}
+
+impl AlvosLixeira {
+    fn alvos(self) -> Vec<Alvo> {
+        let mut v: Vec<Alvo> = self
+            .arquivo
+            .iter()
+            .map(|a| Alvo::from_arquivo_arg(a))
+            .collect();
+        v.extend(self.pasta.iter().map(|p| Alvo::Pasta(absoluto(p))));
+        v.extend(self.grupo.into_iter().map(|g| Alvo::Grupo(GrupoId(g))));
+        v
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum Lixeira {
+    /// Move cópias com Marcação para Deleção para a DAG-Lixeira do próprio Volume (rename; nunca
+    /// apaga nem copia). Pede confirmação duas vezes
+    Mover {
+        #[command(flatten)]
+        alvos: AlvosLixeira,
+        /// Confirma que mover Única Cópia (sem outra cópia no Catálogo) é intencional
+        #[arg(long)]
+        ultima_copia: bool,
+        /// Passo explícito: marca para deleção o que falta numa pasta antes de movê-la
+        #[arg(long)]
+        marcar_tudo: bool,
+        /// Confirma sem perguntar; dado duas vezes (`--sim --sim`) dispensa as duas perguntas
+        #[arg(long, action = clap::ArgAction::Count)]
+        sim: u8,
+        /// Equivale a `--sim --sim`
+        #[arg(long)]
+        confirmar_duas_vezes: bool,
+        /// Só mostra o que seria movido
+        #[arg(long)]
+        simular: bool,
+    },
+    /// Devolve Na Lixeira para a origem (nome com sufixo se estiver ocupada)
+    Restaurar {
+        #[command(flatten)]
+        alvos: AlvosLixeira,
+        /// Restaura tudo o que está Na Lixeira de um Volume (id, rótulo ou ponto de montagem)
+        #[arg(long, value_name = "VOLUME")]
+        volume: Vec<String>,
+    },
+    /// Lista o que está Na Lixeira
+    Listar {
+        #[arg(long)]
+        limite: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -573,6 +644,26 @@ fn montar(sub: Sub) -> Option<Comando> {
         Sub::Marcar(Marcar::Backup(a)) => Comando::MarcarBackup { alvo: a.alvo() },
         Sub::Marcar(Marcar::Delecao(a)) => Comando::MarcarDelecao { alvo: a.alvo() },
         Sub::Desmarcar(a) => Comando::Desmarcar { alvo: a.alvo() },
+        Sub::Lixeira(Lixeira::Mover {
+            alvos,
+            ultima_copia,
+            marcar_tudo,
+            simular,
+            ..
+        }) => Comando::MoverParaLixeira {
+            alvos: alvos.alvos(),
+            confirmacao_unica_copia: ultima_copia,
+            marcar_tudo,
+            simular,
+        },
+        Sub::Lixeira(Lixeira::Restaurar { alvos, volume }) => {
+            let mut a = alvos.alvos();
+            a.extend(volume.into_iter().map(Alvo::Volume));
+            Comando::RestaurarDaLixeira { alvos: a }
+        }
+        Sub::Lixeira(Lixeira::Listar { limite, cursor }) => {
+            Comando::ListarLixeira { limite, cursor }
+        }
         Sub::Confirmar { marcacao } => Comando::ConfirmarMarcacao {
             marcacao: MarcacaoId(marcacao),
         },
@@ -659,6 +750,11 @@ fn codigo_de_saida(r: &Resposta) -> u8 {
         Resposta::Erro { codigo, .. } if codigo == "nao_implementado" => 2,
         Resposta::Erro { .. } => 1,
         Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada" => 130,
+        Resposta::Lixeira { resultado }
+            if resultado.total_arquivos == 0 && !resultado.recusados.is_empty() =>
+        {
+            1
+        }
         _ => 0,
     }
 }
@@ -677,6 +773,18 @@ fn executar(cli: Cli) -> Execucao {
         resposta,
         agente: None,
         jobs: None,
+    };
+    // Mover para a Lixeira confirma duas vezes (flags dispensam), depois da simulação.
+    let confirmacao = match &cli.comando {
+        Sub::Lixeira(Lixeira::Mover {
+            sim,
+            confirmar_duas_vezes,
+            ..
+        }) => Some(lixeira::Confirmacao {
+            sim: *sim,
+            duas_vezes: *confirmar_duas_vezes,
+        }),
+        _ => None,
     };
     let Some(comando) = montar(cli.comando) else {
         return sem(Resposta::Erro {
@@ -716,6 +824,46 @@ fn executar(cli: Cli) -> Execucao {
         Err(e) => return sem(e.para_resposta()),
     };
     instalar_ctrl_c(conexao.cancelador());
+    if let (
+        Some(conf),
+        Comando::MoverParaLixeira {
+            simular: false,
+            alvos,
+            confirmacao_unica_copia,
+            marcar_tudo,
+        },
+    ) = (confirmacao, &comando)
+    {
+        let previa = Comando::MoverParaLixeira {
+            alvos: alvos.clone(),
+            confirmacao_unica_copia: *confirmacao_unica_copia,
+            marcar_tudo: *marcar_tudo,
+            simular: true,
+        };
+        match conexao.enviar(
+            Pedido {
+                autor: Autor::Cli,
+                comando: previa,
+            },
+            &mut |_| {},
+        ) {
+            Ok(Resposta::Lixeira { resultado }) if resultado.total_arquivos > 0 => {
+                eprint!("{}", saida::lixeira(&resultado));
+                let stdin = std::io::stdin();
+                if let Err(m) =
+                    lixeira::confirmar(&resultado, conf, &mut stdin.lock(), &mut std::io::stderr())
+                {
+                    return sem(Resposta::Erro {
+                        codigo: "cancelado".into(),
+                        mensagem: m,
+                    });
+                }
+            }
+            // Nada a mover (tudo recusado) ou erro: mostra a resposta da simulação.
+            Ok(outra) => return sem(outra),
+            Err(e) => return sem(e.para_resposta()),
+        }
+    }
     let eh_status = matches!(comando, Comando::Status { .. });
     let mut exibidor = ExibidorStderr::novo();
     let resposta = match conexao.enviar(

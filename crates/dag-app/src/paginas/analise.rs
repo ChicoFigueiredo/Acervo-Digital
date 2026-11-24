@@ -276,11 +276,15 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
             ));
         }
     });
+    let mut menu = None;
     let destino_visao = match est.vista {
-        Vista::Tree => tree_view(ui, a, &bases, est.base, est.cor),
-        Vista::Treemap => treemap(ui, a, &bases, est.base, est.cor),
+        Vista::Tree => tree_view(ui, a, &bases, est.base, est.cor, &mut menu),
+        Vista::Treemap => treemap(ui, a, &bases, est.base, est.cor, &mut menu),
     };
     destino = destino.or(destino_visao);
+    if let Some(m) = menu {
+        app.tratar_escolha(ui.ctx(), m);
+    }
     if let Some(d) = destino {
         app.analise.alvo = d;
     }
@@ -384,6 +388,7 @@ fn tree_view(
     bases: &Bases,
     base: BasePercentual,
     modo_cor: ModoCor,
+    menu: &mut Option<crate::lixeira::Escolha>,
 ) -> Option<AlvoAnalise> {
     let agora = agora_s();
     let mut destino = None;
@@ -409,15 +414,19 @@ fn tree_view(
                 } else {
                     n.nome.clone()
                 };
-                if n.navegavel() {
-                    if l.selecionavel(false, rotulo)
-                        .on_hover_text("Clique para descer")
-                        .clicked()
-                    {
+                let r = if n.navegavel() {
+                    let r = l
+                        .selecionavel(false, rotulo)
+                        .on_hover_text("Clique para descer");
+                    if r.clicked() {
                         destino = alvo_do_no(n.chave);
                     }
+                    r
                 } else {
-                    l.texto(rotulo);
+                    l.texto(rotulo)
+                };
+                if let Some(alvo) = crate::lixeira::AlvoMenu::de_no(n) {
+                    super::lixeira::menu(&r, &alvo, menu);
                 }
                 let cor = cor_do_no(a, n, modo_cor, agora);
                 barra(l, bases.percentual(n.bytes, base), cor);
@@ -480,6 +489,7 @@ fn treemap(
     bases: &Bases,
     base: BasePercentual,
     modo_cor: ModoCor,
+    menu: &mut Option<crate::lixeira::Escolha>,
 ) -> Option<AlvoAnalise> {
     let agora = agora_s();
     let h = (super::altura_livre(ui) - 30.0).max(220.0);
@@ -545,6 +555,11 @@ fn treemap(
         resp.clone().on_hover_ui_at_pointer(|ui| {
             tooltip(ui, a, b, bases, base, agora);
         });
+    }
+    if let Some(f) = sob_ponteiro.and_then(|i| blocos[i].filho)
+        && let Some(alvo) = crate::lixeira::AlvoMenu::de_no(&a.filhos[f])
+    {
+        super::lixeira::menu(&resp, &alvo, menu);
     }
     let destino = if resp.clicked() {
         sob_ponteiro

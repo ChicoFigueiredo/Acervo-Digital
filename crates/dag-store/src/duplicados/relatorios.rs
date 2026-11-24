@@ -43,6 +43,7 @@ fn percorrer_cobertura(
          LEFT JOIN hashes h ON h.file_id = f.id AND {HASH_VALIDO}
          LEFT JOIN grupo_membros gm ON gm.file_id = f.id
          WHERE f.id > ?1 AND f.state = 'ativo' AND f.kind = 'arquivo' AND f.logical_bytes > 0
+           AND f.na_lixeira = 0
            AND (?2 IS NULL OR f.volume_id = ?2)
            AND (f.hardlink_group IS NULL OR f.id = {rep})
          ORDER BY f.id",

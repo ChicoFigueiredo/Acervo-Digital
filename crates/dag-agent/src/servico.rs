@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use dag_core::{AcaoServico, Resposta};
 use dag_platform_linux::elevacao::{ClienteHelper, EntradaElevada as EntradaHelper, TipoArquivo};
@@ -164,6 +165,120 @@ fn dirs_gravaveis(
     v
 }
 
+/// Quanto esperar o agente em execução terminar a parada limpa antes de desistir (nunca se mata
+/// à força: um hash em curso grava a fila de retomada ao parar).
+const ESPERA_ENTREGA: Duration = Duration::from_secs(180);
+
+/// Quem segura o Catálogo, para decidir a entrega ao serviço.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisaoEntrega {
+    /// Ninguém (ou o próprio serviço) escreve: pode iniciar.
+    Nada,
+    /// Há um agente `dag` de outro caminho (GUI, setsid, systemd-run): pedir parada limpa.
+    Encerrar(u32),
+    /// O escritor não é um agente (GUI antiga, `dag --sem-agente`): não mexemos nele.
+    Recusar(String),
+}
+
+/// Decisão pura da entrega. `dono`: pid gravado na trava de escritor; `vivo`/`eh_agente`: o que
+/// `/proc` diz dele; `pid_servico`: `MainPID` da unidade, se ativa.
+#[must_use]
+pub fn decidir_entrega(
+    dono: Option<u32>,
+    vivo: bool,
+    eh_agente: bool,
+    pid_servico: Option<u32>,
+) -> DecisaoEntrega {
+    match dono {
+        None => DecisaoEntrega::Nada,
+        Some(_) if !vivo => DecisaoEntrega::Nada,
+        Some(p) if Some(p) == pid_servico => DecisaoEntrega::Nada,
+        Some(p) if eh_agente => DecisaoEntrega::Encerrar(p),
+        Some(p) => DecisaoEntrega::Recusar(format!(
+            "o Catálogo tem outro escritor que não é um agente (pid {p}), provavelmente uma GUI antiga ou `dag --sem-agente`: feche-o e rode de novo"
+        )),
+    }
+}
+
+/// `/proc/<pid>/cmdline` é um `dag ... agente`?
+fn cmdline_de_agente(pid: u32) -> bool {
+    let Ok(b) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let mut partes = b.split(|c| *c == 0).filter(|p| !p.is_empty());
+    let Some(bin) = partes.next() else {
+        return false;
+    };
+    let bin = String::from_utf8_lossy(bin);
+    bin.rsplit('/').next().is_some_and(|n| n == "dag") && partes.any(|p| p == b"agente")
+}
+
+/// O processo existe e não é zumbi?
+fn processo_vivo(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|t| {
+        t.rfind(')')
+            .and_then(|i| t[i + 1..].split_whitespace().next().map(|s| s != "Z"))
+            .unwrap_or(false)
+    })
+}
+
+/// Espera `pid` sair até `espera`. `true` se saiu.
+fn esperar_saida(pid: u32, espera: Duration) -> bool {
+    let fim = std::time::Instant::now() + espera;
+    while processo_vivo(pid) {
+        if std::time::Instant::now() >= fim {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// Entrega do Catálogo ao serviço: se um agente lançado por GUI/setsid/systemd-run segura a
+/// trava de escritor, pede a ele a parada limpa (SIGTERM: o trabalho em curso vira `interrompida`
+/// e o serviço o retoma ao abrir) e espera. Nunca usa SIGKILL. `autorizado` permite a um
+/// chamador interativo recusar a entrega.
+///
+/// # Errors
+/// [`ErroServico::Invalido`] se o escritor não é um agente ou não saiu a tempo.
+pub fn entregar_catalogo(
+    catalogo: &Path,
+    espera: Duration,
+    autorizado: &dyn Fn() -> bool,
+) -> Result<Option<String>, ErroServico> {
+    let dono = std::fs::read_to_string(crate::caminho::caminho_do_lock(catalogo))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok());
+    let vivo = dono.is_some_and(processo_vivo);
+    let eh = dono.is_some_and(cmdline_de_agente);
+    match decidir_entrega(dono, vivo, eh, None) {
+        DecisaoEntrega::Nada => Ok(None),
+        DecisaoEntrega::Recusar(m) => Err(ErroServico::Invalido(m)),
+        DecisaoEntrega::Encerrar(pid) => {
+            if !autorizado() {
+                return Err(ErroServico::Invalido("entrega recusada".into()));
+            }
+            let alvo = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .ok_or_else(|| ErroServico::Invalido(format!("pid inválido: {pid}")))?;
+            rustix::process::kill_process(alvo, rustix::process::Signal::TERM).map_err(|e| {
+                ErroServico::Invalido(format!("não consegui avisar o agente (pid {pid}): {e}"))
+            })?;
+            if esperar_saida(pid, espera) {
+                Ok(Some(format!(
+                    "o agente em execução (pid {pid}) foi encerrado com limpeza; o trabalho em curso fica interrompido e o serviço o retoma ao abrir."
+                )))
+            } else {
+                Err(ErroServico::Invalido(format!(
+                    "o agente (pid {pid}) ainda está parando após {}s; nada foi morto à força. Tente de novo em instantes",
+                    espera.as_secs()
+                )))
+            }
+        }
+    }
+}
+
 /// Gerenciador do sistema real (binário atual, ambiente atual).
 ///
 /// # Errors
@@ -182,13 +297,6 @@ pub fn gerenciador_real(catalogo: &Path) -> Result<GerenciadorServico, ErroAgent
             "não foi possível achar o diretório de unidades de usuário (defina HOME)".into(),
         )
     })?;
-    let padrao = crate::resolver_caminho_catalogo(
-        None,
-        None,
-        std::env::var_os("XDG_DATA_HOME"),
-        std::env::var_os("HOME"),
-    )
-    .ok();
     let unidade = ConfigUnidade {
         binario,
         dirs_gravaveis: dirs_gravaveis(
@@ -197,8 +305,8 @@ pub fn gerenciador_real(catalogo: &Path) -> Result<GerenciadorServico, ErroAgent
             std::env::var_os("HOME"),
             std::env::var_os("XDG_RUNTIME_DIR"),
         ),
-        // Só fixa o Catálogo na unidade se não for o padrão.
-        catalogo: (padrao.as_deref() != Some(catalogo.as_path())).then_some(catalogo),
+        // Sempre explícito: o serviço serve exatamente o Catálogo que o cliente usa.
+        catalogo: Some(catalogo),
     };
     Ok(GerenciadorServico::novo(
         Arc::new(ExecutorReal),
@@ -233,8 +341,20 @@ pub fn executar_com(
     acao: AcaoServico,
     conn: Option<&Connection>,
 ) -> Resposta {
+    executar_com_entrega(g, acao, conn, &|| Ok(None))
+}
+
+/// [`executar_com`] com a `entrega` do Catálogo usada por `InstalarEAtivar` (veja
+/// [`entregar_catalogo`]).
+pub fn executar_com_entrega(
+    g: &GerenciadorServico,
+    acao: AcaoServico,
+    conn: Option<&Connection>,
+    entrega: &dyn Fn() -> Result<Option<String>, ErroServico>,
+) -> Resposta {
     let r = match acao {
         AcaoServico::Instalar => g.instalar(),
+        AcaoServico::InstalarEAtivar { boot } => g.instalar_e_ativar(boot, entrega),
         AcaoServico::Remover => g.remover(),
         AcaoServico::Iniciar => g.iniciar(),
         AcaoServico::Parar => g.parar(),
@@ -265,7 +385,9 @@ pub fn executar_com(
 #[must_use]
 pub fn executar(acao: AcaoServico, catalogo: &Path, conn: Option<&Connection>) -> Resposta {
     match gerenciador_real(catalogo) {
-        Ok(g) => executar_com(&g, acao, conn),
+        Ok(g) => executar_com_entrega(&g, acao, conn, &|| {
+            entregar_catalogo(catalogo, ESPERA_ENTREGA, &|| true)
+        }),
         Err(e) => e.para_resposta(),
     }
 }
@@ -274,7 +396,12 @@ pub fn executar(acao: AcaoServico, catalogo: &Path, conn: Option<&Connection>) -
 /// modo se o Catálogo já existir e a trava de escritor estiver livre; nunca cria nada.
 #[must_use]
 pub fn executar_avulso(acao: AcaoServico, catalogo: &Path) -> Resposta {
-    let agente = if catalogo.is_file() {
+    // Quem inicia o serviço não pode segurar a trava de escritor enquanto ele sobe.
+    let inicia = matches!(
+        acao,
+        AcaoServico::InstalarEAtivar { .. } | AcaoServico::Iniciar | AcaoServico::Reiniciar
+    );
+    let agente = if catalogo.is_file() && !inicia {
         crate::Agente::abrir(catalogo).ok()
     } else {
         None
@@ -428,5 +555,66 @@ mod testes {
             assert!(leitor_elevado::<&str>(&[]).is_none());
             habilitar_elevacao(false);
         }
+    }
+
+    #[test]
+    fn decisao_de_entrega() {
+        use DecisaoEntrega::*;
+        assert_eq!(decidir_entrega(None, false, false, None), Nada);
+        assert_eq!(decidir_entrega(Some(5), false, true, None), Nada);
+        assert_eq!(decidir_entrega(Some(5), true, true, Some(5)), Nada);
+        assert_eq!(decidir_entrega(Some(5), true, true, Some(9)), Encerrar(5));
+        assert!(matches!(
+            decidir_entrega(Some(5), true, false, None),
+            Recusar(_)
+        ));
+    }
+
+    #[test]
+    fn esperar_saida_de_processo_real() {
+        let mut f = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = f.id();
+        assert!(processo_vivo(pid));
+        assert!(!cmdline_de_agente(pid));
+        assert!(!esperar_saida(pid, Duration::from_millis(200)));
+        f.kill().unwrap();
+        f.wait().unwrap();
+        assert!(esperar_saida(pid, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn instalar_e_ativar_com_entrega_e_linger() {
+        use std::cell::Cell;
+        let t = tempfile::tempdir().unwrap();
+        let (g, falso) = montar(t.path());
+        let chamou = Cell::new(0);
+        let entrega = || {
+            chamou.set(chamou.get() + 1);
+            Ok(Some("entregue".to_string()))
+        };
+        let m = g.instalar_e_ativar(true, &entrega).unwrap();
+        assert_eq!(chamou.get(), 1);
+        assert!(m.starts_with("entregue"));
+        let c = falso.chamadas.lock().unwrap().clone();
+        let pos = |s: &str| c.iter().position(|x| x.contains(s)).unwrap();
+        assert!(pos("daemon-reload") < pos("enable --now dag-agente.service"));
+        assert!(c.iter().any(|x| x == "loginctl enable-linger"));
+        // idempotente
+        g.instalar_e_ativar(false, &entrega).unwrap();
+        // entrega que falha impede o início
+        let (g2, falso2) = montar(&t.path().join("b"));
+        let r = g2.instalar_e_ativar(false, &|| Err(ErroServico::Invalido("x".into())));
+        assert!(r.is_err());
+        assert!(
+            !falso2
+                .chamadas
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| x.contains("enable"))
+        );
     }
 }

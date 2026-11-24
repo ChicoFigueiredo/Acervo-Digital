@@ -4,17 +4,21 @@ Nada aqui é instalado automaticamente. O DAG roda sem nenhum destes itens.
 
 ## 1. Serviço opcional (`dag-agente.service`, systemd de usuário)
 
-O serviço é opcional: CLI, GUI e MCP lançam o agente sozinhos quando ele não existe (ADR 0004). Com a unidade instalada, eles tentam antes `systemctl --user start dag-agente.service` e só então lançam um processo destacado. Variáveis: `DAG_BIN`, `DAG_SEM_SYSTEMD`, `DAG_AGENTE_ARGS`, `DAG_SEM_AGENTE`.
+O serviço é opcional: CLI, GUI e MCP lançam o agente sozinhos quando ele não existe (ADR 0004). Fechar a janela da GUI nunca para os trabalhos: o agente sobe fora do processo e do cgroup do cliente. Ordem de lançamento: (1) unidade instalada: `systemctl --user start dag-agente.service`; (2) senão `systemd-run --user --unit=dag-agente-<hash do catálogo> --collect` (unidade transitória própria, log em `<catálogo>.agente.log`; exige systemd >= 240 e gerenciador de usuário ativo; se já estiver ativa, o cliente só conecta); (3) senão `setsid dag agente ...` (sessão nova, sem terminal); (4) por fim processo em grupo próprio. Isso importa quando a GUI sai de um escopo do KDE (`app-*.scope`) ou de um terminal. Para a melhor experiência (agente já no ar ao entrar na sessão), instale a unidade e ligue o autostart: `dag servico instalar && dag servico autostart on`. Variáveis: `DAG_BIN`, `DAG_SEM_SYSTEMD`, `DAG_AGENTE_ARGS`, `DAG_SEM_AGENTE`.
 
 ```
-dag servico estado          # instalado? autostart? ativo? PID, desde quando, linger
-dag servico instalar        # escreve ~/.config/systemd/user/dag-agente.service (NÃO habilita, NÃO inicia)
+dag servico instalar        # RECOMENDADO: escreve a unidade, daemon-reload, enable --now (sobe a cada login)
+dag servico instalar --iniciar-no-boot   # idem + loginctl enable-linger (sobe no boot, sem login)
+dag servico instalar --sem-iniciar       # só escreve ~/.config/systemd/user/dag-agente.service
+dag servico estado          # (ou `status`) instalado? autostart? ativo? PID, desde quando, linger
 dag servico iniciar         # sobe agora
 dag servico autostart on    # sobe a cada login (systemctl --user enable)
 dag servico linger on       # opcional: sobe no boot e sobrevive ao último logout
 dag servico parar | reiniciar | autostart off | linger off
 dag servico remover         # para, desabilita, apaga a unidade e recarrega o systemd
 ```
+
+**Entrega sem perder trabalho.** `dag servico instalar` é idempotente (reinstalar atualiza a unidade; se o serviço já roda, a unidade nova vale no próximo início, nunca se para um hash em curso). Se um agente lançado pela GUI, por `setsid` ou por `systemd-run` já serve o mesmo Catálogo, `instalar` o reconhece pela trava de escritor (só se for um `dag ... agente`), envia SIGTERM (parada limpa: o trabalho em curso vira `interrompida` com a fila de retomada gravada), espera sair (até 3 min; nunca usa SIGKILL) e só então inicia o serviço, que ao abrir retoma o hash de onde parou. Se o escritor não for um agente (GUI antiga, `dag --sem-agente`), nada é tocado e o erro pede para fechá-lo. O linger (`--iniciar-no-boot`) pode exigir autorização do Polkit; se for recusado, a instalação segue e o aviso diz para rodar `sudo loginctl enable-linger "$USER"`. A unidade usa `ExecStart=dag --catalogo <caminho> agente`, `Restart=on-failure`, `Nice=10`, `IOSchedulingClass=idle`, `TimeoutStopSec=120`; GUI, CLI e MCP procuram a mesma unidade (`dag-agente.service`) e o mesmo socket (`$XDG_RUNTIME_DIR/dag/agente.sock`). Na GUI: Configurações, "Serviço em segundo plano".
 
 Três modos: **não instalado** → **instalado sem autostart** (sob demanda) → **instalado com autostart**.
 

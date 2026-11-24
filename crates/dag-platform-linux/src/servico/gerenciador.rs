@@ -172,6 +172,54 @@ impl GerenciadorServico {
         ))
     }
 
+    /// Instala (ou atualiza) a unidade e a deixa ativa e habilitada (`enable --now`).
+    ///
+    /// `entrega` roda depois de a unidade estar escrita e antes de iniciar, e só se o serviço
+    /// ainda não estiver ativo: é o ponto em que um agente lançado por outro caminho (GUI, setsid,
+    /// systemd-run) entrega o Catálogo com encerramento limpo. Devolve uma nota para o usuário ou
+    /// um erro (nesse caso nada é iniciado). Reinstalar é idempotente; se o serviço já roda, a
+    /// unidade nova só vale no próximo início (`reiniciar`), para nunca parar um hash em curso.
+    /// `boot`: liga também o linger; se o loginctl recusar, a instalação segue e o aviso é
+    /// anexado à mensagem.
+    ///
+    /// # Errors
+    /// Falhas de E/S, do systemd ou da `entrega`.
+    pub fn instalar_e_ativar(
+        &self,
+        boot: bool,
+        entrega: &dyn Fn() -> Result<Option<String>, ErroServico>,
+    ) -> Result<String, ErroServico> {
+        let antes = fs::read(self.caminho_unidade()).ok();
+        self.instalar()?;
+        let mudou = antes.is_some_and(|a| Some(a) != fs::read(self.caminho_unidade()).ok());
+        let ja_ativo = self
+            .estado()
+            .map(|e| e.atividade == super::estado::Atividade::Ativo)
+            .unwrap_or(false);
+        let mut m = String::new();
+        if !ja_ativo && let Some(nota) = entrega()? {
+            m.push_str(&nota);
+            m.push('\n');
+        }
+        self.systemctl(&["enable", "--now", NOME_UNIDADE])?;
+        m.push_str("serviço instalado, habilitado (sobe a cada login) e iniciado.");
+        if ja_ativo && mudou {
+            m.push_str(" A unidade foi atualizada; vale no próximo início (`dag servico reiniciar`, que encerra o trabalho em curso com limpeza e o retoma).");
+        }
+        if boot {
+            match self.persistir_sem_sessao(true) {
+                Ok(t) => {
+                    m.push(' ');
+                    m.push_str(&t);
+                }
+                Err(e) => m.push_str(&format!(
+                    " Aviso: o linger não foi ligado ({e}); o serviço sobe no login, não no boot."
+                )),
+            }
+        }
+        Ok(m)
+    }
+
     /// Para, desabilita, apaga a unidade e recarrega. Idempotente. Não mexe no linger.
     ///
     /// # Errors

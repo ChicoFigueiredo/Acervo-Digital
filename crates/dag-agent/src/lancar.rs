@@ -1,8 +1,10 @@
 //! Sobe o agente em segundo plano quando nenhum atende (ADR 0004).
 //!
 //! GUI, CLI e MCP são clientes do agente. Se não há agente, o cliente o lança: pela unidade
-//! systemd de usuário, se instalada (`systemctl --user start dag-agente`), senão como processo
-//! destacado (`dag agente`). Dois clientes que lançam ao mesmo tempo não criam dois agentes: a
+//! systemd de usuário, se instalada (`systemctl --user start dag-agente`); senão numa unidade
+//! transitória (`systemd-run --user`), fora do escopo/cgroup do cliente (o KDE põe os aplicativos
+//! num escopo `app-*.scope` que cai junto com a janela); senão com `setsid` (sessão própria, sem
+//! terminal de controle); em último caso, como processo em grupo próprio (`dag agente`). Dois clientes que lançam ao mesmo tempo não criam dois agentes: a
 //! trava de lançamento deixa um só lançar e, de qualquer forma, a trava de escritor do agente
 //! decide (quem perde sai e o cliente apenas conecta ao vencedor).
 
@@ -164,35 +166,182 @@ fn cauda_do_log(catalogo: &Path) -> String {
     linhas.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
-/// Processo destacado: grupo próprio (Ctrl-C do terminal e fechamento da janela não o atingem),
-/// sem stdin, e a saída no log ao lado do Catálogo.
-fn lancar_processo(o: &OpcoesLancamento) -> Result<Child, ErroAgente> {
+/// Executável do agente a partir do `dag` e das opções: argumentos de `dag ... agente`.
+#[must_use]
+pub fn argumentos_do_agente(o: &OpcoesLancamento) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![
+        "--catalogo".into(),
+        o.catalogo.clone().into_os_string(),
+        "--socket".into(),
+        o.socket.clone().into_os_string(),
+        "agente".into(),
+    ];
+    a.extend(o.argumentos_agente.iter().cloned());
+    a
+}
+
+/// Hash estável (FNV-1a de 64 bits) do caminho do Catálogo, para nomear a unidade transitória.
+#[must_use]
+pub fn hash_do_catalogo(catalogo: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in catalogo.as_os_str().as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Nome (sem `.service`) da unidade transitória do agente deste Catálogo.
+#[must_use]
+pub fn nome_da_unidade_transitoria(catalogo: &Path) -> String {
+    format!("dag-agente-{}", hash_do_catalogo(catalogo))
+}
+
+/// Argumentos do `systemd-run` que lança o agente numa unidade de serviço de usuário própria.
+/// `log` = `Some` redireciona a saída com `append:` (systemd >= 240).
+#[must_use]
+pub fn argumentos_systemd_run(
+    unidade: &str,
+    log: Option<&Path>,
+    dag: &Path,
+    agente: &[OsString],
+) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![
+        "--user".into(),
+        format!("--unit={unidade}").into(),
+        "--collect".into(),
+        "--quiet".into(),
+        "--property=Type=exec".into(),
+    ];
+    if let Some(l) = log {
+        for fluxo in ["StandardOutput", "StandardError"] {
+            let mut p = OsString::from(format!("--property={fluxo}=append:"));
+            p.push(l.as_os_str());
+            a.push(p);
+        }
+    }
+    a.push("--".into());
+    a.push(dag.as_os_str().to_owned());
+    a.extend(agente.iter().cloned());
+    a
+}
+
+/// Argumentos do `setsid` (util-linux). Sem `-f`: o filho do cliente não é líder de grupo, então
+/// o `setsid` apenas chama `setsid(2)` e faz `exec`, e o cliente ainda vê o agente sair.
+#[must_use]
+pub fn argumentos_setsid(dag: &Path, agente: &[OsString]) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec![dag.as_os_str().to_owned()];
+    a.extend(agente.iter().cloned());
+    a
+}
+
+/// A versão do systemd (primeira linha de `systemd-run --version`, "systemd 255 (...)") aceita
+/// `StandardOutput=append:`?
+#[must_use]
+pub fn systemd_aceita_append(saida_version: &str) -> bool {
+    saida_version
+        .split_whitespace()
+        .nth(1)
+        .and_then(|n| n.parse::<u32>().ok())
+        .is_some_and(|n| n >= 240)
+}
+
+fn comando_mudo(prog: &str) -> Command {
+    let mut c = Command::new(prog);
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    c
+}
+
+/// Há um gerenciador de usuário do systemd ao alcance (socket privado em `$XDG_RUNTIME_DIR`)?
+fn gerenciador_de_usuario() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .is_some_and(|d| Path::new(&d).join("systemd/private").exists())
+}
+
+/// Lança numa unidade transitória (`systemd-run --user`), fora do cgroup do cliente. `true` se o
+/// agente subiu ou já havia a unidade ativa (o cliente apenas conecta); `false` para cair no
+/// próximo método.
+fn lancar_via_systemd_run(o: &OpcoesLancamento) -> bool {
+    if !gerenciador_de_usuario() {
+        return false;
+    }
+    let Ok(dag) = localizar_dag(o.executavel.as_deref()) else {
+        return false;
+    };
+    let versao = Command::new("systemd-run")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(versao) = versao else {
+        return false; // sem systemd-run
+    };
+    let versao = String::from_utf8_lossy(&versao.stdout).into_owned();
+    if !systemd_aceita_append(versao.lines().next().unwrap_or("")) {
+        return false;
+    }
+    let log = arquivo_de_log(&o.catalogo);
+    if preparar_diretorio(&log).is_err() {
+        return false;
+    }
+    let unidade = nome_da_unidade_transitoria(&o.catalogo);
+    let args = argumentos_systemd_run(&unidade, Some(&log), &dag, &argumentos_do_agente(o));
+    let ok = comando_mudo("systemd-run")
+        .args(&args)
+        .status()
+        .is_ok_and(|s| s.success());
+    ok || comando_mudo("systemctl")
+        .args([
+            "--user",
+            "is-active",
+            "--quiet",
+            &format!("{unidade}.service"),
+        ])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Processo destacado, sem stdin e com a saída no log ao lado do Catálogo. Preferência: `setsid`
+/// (sessão nova, sem terminal de controle: nem fechar o terminal nem desfazer a sessão da GUI o
+/// atingem); senão grupo de processos próprio. O `Child` devolvido só serve para observar a saída
+/// (descartá-lo não mata o agente).
+///
+/// # Errors
+/// [`ErroAgente::Invalido`] se o `dag` não for encontrado; [`ErroAgente::Es`]-like se não der para
+/// abrir o log ou executar.
+pub fn lancar_destacado(o: &OpcoesLancamento) -> Result<Child, ErroAgente> {
     let dag = localizar_dag(o.executavel.as_deref())?;
     let log = arquivo_de_log(&o.catalogo);
     preparar_diretorio(&log)?;
-    let saida = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&log)
-        .map_err(|e| ErroAgente::es(format!("abrir {}", log.display()), e))?;
-    let erro = saida
-        .try_clone()
-        .map_err(|e| ErroAgente::es(format!("abrir {}", log.display()), e))?;
-    let filho = Command::new(&dag)
-        .arg("--catalogo")
-        .arg(&o.catalogo)
-        .arg("--socket")
-        .arg(&o.socket)
-        .arg("agente")
-        .args(&o.argumentos_agente)
+    let abrir = || {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&log)
+            .map_err(|e| ErroAgente::es(format!("abrir {}", log.display()), e))
+    };
+    let agente = argumentos_do_agente(o);
+    let com_setsid = Command::new("setsid")
+        .args(argumentos_setsid(&dag, &agente))
         .stdin(Stdio::null())
-        .stdout(saida)
-        .stderr(erro)
+        .stdout(abrir()?)
+        .stderr(abrir()?)
+        .spawn();
+    if let Ok(f) = com_setsid {
+        return Ok(f);
+    }
+    Command::new(&dag)
+        .args(&agente)
+        .stdin(Stdio::null())
+        .stdout(abrir()?)
+        .stderr(abrir()?)
         .process_group(0)
         .spawn()
-        .map_err(|e| ErroAgente::es(format!("executar {}", dag.display()), e))?;
-    Ok(filho)
+        .map_err(|e| ErroAgente::es(format!("executar {}", dag.display()), e))
 }
 
 /// Quem detém a trava de escritor (pid gravado nela), para a mensagem de erro.
@@ -227,18 +376,16 @@ pub fn garantir_agente(o: &OpcoesLancamento) -> Result<Cliente, ErroAgente> {
         if trava.is_some() && !lancou {
             lancou = true;
             let systemctl = o.usar_systemd
-                && unidade_instalada()
-                && Command::new("systemctl")
-                    .args(["--user", "start", dag_platform_linux::servico::NOME_UNIDADE])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success());
+                && ((unidade_instalada()
+                    && comando_mudo("systemctl")
+                        .args(["--user", "start", dag_platform_linux::servico::NOME_UNIDADE])
+                        .status()
+                        .is_ok_and(|s| s.success()))
+                    || lancar_via_systemd_run(o));
             if systemctl {
                 systemd_ate = Some(agora + ESPERA_SYSTEMD);
             } else {
-                filho = Some(lancar_processo(o)?);
+                filho = Some(lancar_destacado(o)?);
             }
         }
         if trava.is_some()
@@ -248,7 +395,7 @@ pub fn garantir_agente(o: &OpcoesLancamento) -> Result<Cliente, ErroAgente> {
         {
             // A unidade subiu mas não serve este Catálogo/socket: sobe o processo.
             systemd_ate = None;
-            filho = Some(lancar_processo(o)?);
+            filho = Some(lancar_destacado(o)?);
         }
         if let Some(f) = filho.as_mut()
             && let Ok(Some(status)) = f.try_wait()
@@ -304,5 +451,90 @@ fn reaper(filho: Option<Child>) {
             .spawn(move || {
                 let _ = f.wait();
             });
+    }
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    fn opcoes() -> OpcoesLancamento {
+        OpcoesLancamento {
+            catalogo: "/d/c.sqlite".into(),
+            socket: "/run/s.sock".into(),
+            executavel: None,
+            usar_systemd: true,
+            espera: Duration::from_secs(1),
+            argumentos_agente: vec!["--sem-monitor".into()],
+        }
+    }
+
+    fn texto(v: &[OsString]) -> Vec<String> {
+        v.iter().map(|s| s.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn argumentos_do_agente_levam_catalogo_socket_e_extras() {
+        assert_eq!(
+            texto(&argumentos_do_agente(&opcoes())),
+            [
+                "--catalogo",
+                "/d/c.sqlite",
+                "--socket",
+                "/run/s.sock",
+                "agente",
+                "--sem-monitor"
+            ]
+        );
+    }
+
+    #[test]
+    fn unidade_transitoria_e_estavel_e_distinta_por_catalogo() {
+        let a = nome_da_unidade_transitoria(Path::new("/d/a.sqlite"));
+        assert_eq!(a, nome_da_unidade_transitoria(Path::new("/d/a.sqlite")));
+        assert_ne!(a, nome_da_unidade_transitoria(Path::new("/d/b.sqlite")));
+        assert!(a.starts_with("dag-agente-") && a.len() == "dag-agente-".len() + 16);
+    }
+
+    #[test]
+    fn systemd_run_com_log_append_e_sem_log() {
+        let ag = argumentos_do_agente(&opcoes());
+        let com = texto(&argumentos_systemd_run(
+            "dag-agente-x",
+            Some(Path::new("/d/c.sqlite.agente.log")),
+            Path::new("/bin/dag"),
+            &ag,
+        ));
+        assert_eq!(com[0], "--user");
+        assert!(com.contains(&"--unit=dag-agente-x".to_string()));
+        assert!(com.contains(&"--collect".to_string()));
+        assert!(com.contains(&"--property=StandardOutput=append:/d/c.sqlite.agente.log".into()));
+        assert!(com.contains(&"--property=StandardError=append:/d/c.sqlite.agente.log".into()));
+        let sep = com.iter().position(|a| a == "--").unwrap();
+        assert_eq!(com[sep + 1], "/bin/dag");
+        assert_eq!(com[sep + 2], "--catalogo");
+        let sem = texto(&argumentos_systemd_run(
+            "u",
+            None,
+            Path::new("/bin/dag"),
+            &ag,
+        ));
+        assert!(!sem.iter().any(|a| a.contains("append:")));
+    }
+
+    #[test]
+    fn setsid_executa_o_dag_com_os_argumentos_do_agente() {
+        let ag = argumentos_do_agente(&opcoes());
+        let a = texto(&argumentos_setsid(Path::new("/bin/dag"), &ag));
+        assert_eq!(a[0], "/bin/dag");
+        assert_eq!(a[1..], texto(&ag)[..]);
+    }
+
+    #[test]
+    fn versao_do_systemd_para_append() {
+        assert!(systemd_aceita_append("systemd 255 (255.4-1ubuntu8)"));
+        assert!(systemd_aceita_append("systemd 240"));
+        assert!(!systemd_aceita_append("systemd 239 (239-58.el8)"));
+        assert!(!systemd_aceita_append(""));
     }
 }

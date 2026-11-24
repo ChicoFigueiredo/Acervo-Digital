@@ -167,7 +167,8 @@ fn conteudo_da_unidade() {
     .unwrap();
     for esperado in [
         "[Service]",
-        "ExecStart=\"/usr/bin/dag\" agente\n",
+        "ExecStart=\"/usr/bin/dag\" --catalogo \"/home/u/cat%%.sqlite\" agente\n",
+        "TimeoutStopSec=120",
         "Restart=on-failure",
         "NoNewPrivileges=yes",
         "ProtectSystem=strict",
@@ -176,7 +177,6 @@ fn conteudo_da_unidade() {
         "Nice=10",
         "IOSchedulingClass=idle",
         "ReadWritePaths=\"/home/u/.local/share/dag\" \"/home/u/dir com espaço\" \"/run/user/1000/dag\"\n",
-        "Environment=\"DAG_CATALOGO=/home/u/cat%%.sqlite\"\n",
         "WantedBy=default.target",
     ] {
         assert!(u.contains(esperado), "falta `{esperado}` em:\n{u}");

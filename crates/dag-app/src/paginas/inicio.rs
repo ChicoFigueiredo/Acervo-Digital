@@ -46,6 +46,8 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     ui.label(format!("Catálogo: {}", app.caminho.display()));
     ui.label(app.worker.modo().texto_status());
     ui.add_space(8.0);
+    super::configuracoes::aviso_de_servico(ui, app);
+    ui.add_space(8.0);
     match app.totais.dado {
         Some(t) if t.volumes > 0 => {
             egui::Grid::new("inicio-totais")

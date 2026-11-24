@@ -41,7 +41,14 @@ pub enum Alvo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AcaoServico {
+    /// Só escreve a unidade e recarrega o systemd (não habilita nem inicia).
     Instalar,
+    /// Instala (ou atualiza) a unidade, entrega o Catálogo ao serviço sem interromper abruptamente
+    /// um agente já ativo (encerramento limpo: a execução fica `interrompida` e o serviço a
+    /// retoma) e executa `enable --now`. `boot`: liga também o linger (sobe no boot).
+    InstalarEAtivar {
+        boot: bool,
+    },
     Remover,
     Iniciar,
     Parar,
@@ -526,6 +533,9 @@ mod tests {
             },
             Comando::Servico {
                 acao: AcaoServico::Estado,
+            },
+            Comando::Servico {
+                acao: AcaoServico::InstalarEAtivar { boot: true },
             },
             Comando::Servico {
                 acao: AcaoServico::Reiniciar,

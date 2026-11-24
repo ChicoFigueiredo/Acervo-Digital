@@ -378,9 +378,18 @@ enum Marcar {
 #[derive(Subcommand, Debug)]
 enum Servico {
     /// Estado do serviço (instalado, autostart, ativo, PID, linger)
+    #[command(alias = "status")]
     Estado,
-    /// Instala a unidade systemd de usuário (não habilita nem inicia)
-    Instalar,
+    /// Instala (ou atualiza) a unidade systemd de usuário, habilita e inicia. Se um agente
+    /// lançado pela GUI já serve o Catálogo, ele é encerrado com limpeza e o serviço retoma
+    Instalar {
+        /// Só escreve a unidade (não habilita nem inicia)
+        #[arg(long)]
+        sem_iniciar: bool,
+        /// Liga também o linger (`loginctl enable-linger`): sobe no boot e sobrevive ao logout
+        #[arg(long)]
+        iniciar_no_boot: bool,
+    },
     /// Para, desabilita e remove a unidade
     Remover,
     Iniciar,
@@ -582,7 +591,14 @@ fn montar(sub: Sub) -> Option<Comando> {
                 Servico::Linger { estado } => AcaoServico::PersistirSemSessao {
                     ativo: estado == "on",
                 },
-                Servico::Instalar => AcaoServico::Instalar,
+                Servico::Instalar {
+                    sem_iniciar: true, ..
+                } => AcaoServico::Instalar,
+                Servico::Instalar {
+                    iniciar_no_boot, ..
+                } => AcaoServico::InstalarEAtivar {
+                    boot: iniciar_no_boot,
+                },
                 Servico::Remover => AcaoServico::Remover,
                 Servico::Iniciar => AcaoServico::Iniciar,
                 Servico::Parar => AcaoServico::Parar,
@@ -885,4 +901,36 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::from(codigo)
+}
+
+#[cfg(test)]
+mod testes_servico {
+    use super::*;
+
+    fn acao(args: &[&str]) -> AcaoServico {
+        let mut v = vec!["dag", "servico"];
+        v.extend_from_slice(args);
+        let cli = Cli::try_parse_from(v).expect("parse");
+        match montar(cli.comando) {
+            Some(Comando::Servico { acao }) => acao,
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn servico_instalar_e_status() {
+        assert_eq!(
+            acao(&["instalar"]),
+            AcaoServico::InstalarEAtivar { boot: false }
+        );
+        assert_eq!(
+            acao(&["instalar", "--iniciar-no-boot"]),
+            AcaoServico::InstalarEAtivar { boot: true }
+        );
+        assert_eq!(acao(&["instalar", "--sem-iniciar"]), AcaoServico::Instalar);
+        assert_eq!(acao(&["status"]), AcaoServico::Estado);
+        assert_eq!(acao(&["parar"]), AcaoServico::Parar);
+        assert_eq!(acao(&["iniciar"]), AcaoServico::Iniciar);
+        assert_eq!(acao(&["remover"]), AcaoServico::Remover);
+    }
 }

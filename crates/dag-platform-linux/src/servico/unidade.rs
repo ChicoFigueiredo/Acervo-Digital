@@ -14,7 +14,7 @@ pub struct ConfigUnidade {
     pub binario: PathBuf,
     /// Diretórios de dados/estado/runtime do DAG: únicos graváveis (`ReadWritePaths`).
     pub dirs_gravaveis: Vec<PathBuf>,
-    /// Catálogo escolhido explicitamente (vira `Environment=DAG_CATALOGO=`), se não for o padrão.
+    /// Catálogo servido (vira `--catalogo` no `ExecStart`); `None` = o padrão do ambiente.
     pub catalogo: Option<PathBuf>,
 }
 
@@ -78,16 +78,19 @@ pub fn gerar(c: &ConfigUnidade) -> Result<String, ErroServico> {
          [Service]\n\
          Type=simple\n",
     );
-    u.push_str(&format!("ExecStart={} agente\n", aspas(bin)));
-    if let Some(cat) = &c.catalogo {
-        u.push_str(&format!(
-            "Environment={}\n",
-            aspas(&format!("DAG_CATALOGO={}", sem_controle(cat)?))
-        ));
+    match &c.catalogo {
+        Some(cat) => u.push_str(&format!(
+            "ExecStart={} --catalogo {} agente\n",
+            aspas(bin),
+            aspas(sem_controle(cat)?)
+        )),
+        None => u.push_str(&format!("ExecStart={} agente\n", aspas(bin))),
     }
     u.push_str(
         "Restart=on-failure\n\
          RestartSec=5\n\
+         # Parada limpa (SIGTERM): dá tempo de gravar a fila de retomada do hash.\n\
+         TimeoutStopSec=120\n\
          # Prioridade conservadora (A-21): não disputa CPU/disco com o uso normal.\n\
          Nice=10\n\
          IOSchedulingClass=idle\n\

@@ -1,6 +1,6 @@
 # Regras para agentes neste repositório
 
 - **Limpeza após cada build:** ao terminar um build, teste ou clippy, rode `cargo clean` (ou apague `target/`). O diretório `target/` cresce vários GiB e consome espaço demais. Isso vale também para worktrees e `CARGO_TARGET_DIR` alternativos.
-- O DAG é somente leitura para os arquivos catalogados: nenhum código pode apagar, mover, renomear ou alterar arquivos varridos.
+- O DAG nunca apaga nem altera arquivos catalogados. A única escrita permitida é mover uma cópia com Marcação para Deleção para a `DAG-Lixeira` do próprio Volume e de volta (ADR 0005).
 - Vocabulário do domínio em `CONTEXT.md`; decisões em `docs/adr/`; requisitos e critérios de aceite em `docs/FASE-A-REQUISITOS.md`.
 - Antes de concluir: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, e então `cargo clean`.

@@ -537,3 +537,52 @@ fn dois_volumes_prioridade_backup_cobertura_e_offline() {
     assert_eq!(grupos(&mut so_ssd)[0].copias, 3);
     assert_eq!(grupos(&mut so_ssd)[0].copias_offline, 1);
 }
+
+/// CA-A18: a árvore e os tamanhos ficam navegáveis (leitor em outro "processo") antes de a etapa
+/// de hash começar, e o hash completa depois.
+#[test]
+fn ca_a18_arvore_navegavel_antes_do_fim_do_hash() {
+    use std::sync::{Arc, Mutex};
+    let t = arvore();
+    let visto: Arc<Mutex<Option<(usize, i64)>>> = Arc::new(Mutex::new(None));
+    let (v2, caminho, raiz) = (
+        Arc::clone(&visto),
+        t.catalogo.clone(),
+        t.raiz.to_str().unwrap().to_string(),
+    );
+    let mut a = agente(&t).com_progresso(move |p| {
+        let dag_core::Progresso::Mensagem { texto } = p else {
+            return;
+        };
+        let mut v = v2.lock().unwrap();
+        if texto.contains("classificando") && v.is_none() {
+            let mut leitor = Agente::abrir_leitura(&caminho).unwrap();
+            let Resposta::Explorar { entradas, .. } = leitor.executar(Comando::Explorar {
+                pasta: Some(raiz.clone()),
+                limite: None,
+                cursor: None,
+            }) else {
+                panic!("explorar falhou")
+            };
+            let hashes: i64 = leitor
+                .catalogo()
+                .armazem()
+                .conexao()
+                .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
+                .unwrap();
+            *v = Some((entradas.len(), hashes));
+        }
+    });
+    let r = a.executar(scan(&[&t.raiz], false));
+    assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    let (entradas, hashes_na_hora) = visto.lock().unwrap().expect("etapa de classificação vista");
+    assert!(entradas >= 4, "árvore navegável: {entradas} entradas");
+    assert_eq!(hashes_na_hora, 0, "o hash ainda não havia começado");
+    let depois: i64 = a
+        .catalogo()
+        .armazem()
+        .conexao()
+        .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
+        .unwrap();
+    assert_eq!(depois, 8, "todo arquivo regular recebeu Hash Completo");
+}

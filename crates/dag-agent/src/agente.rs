@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use dag_core::Plataforma as _;
 use dag_core::{
     Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId, FaseInventario,
     ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario, Resposta,
@@ -15,7 +16,7 @@ use dag_core::{
     TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
 };
 use dag_monitor::{ConfigMonitor, Monitor};
-use dag_platform_linux::descobrir_volumes;
+use dag_platform_linux::PlataformaLinux;
 use dag_scanner::{
     ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan,
     Progresso as ProgressoScanner, ProgressoHash as ProgressoHashScanner, ResultadoScan,
@@ -357,7 +358,7 @@ impl Agente {
     fn volumes_do_sistema(&self) -> Result<Vec<VolumeDescoberto>, ErroAgente> {
         match &self.volumes_fixos {
             Some(v) => Ok(v.clone()),
-            None => Ok(descobrir_volumes()?),
+            None => Ok(PlataformaLinux.descobrir_volumes()?),
         }
     }
 
@@ -523,7 +524,7 @@ impl Agente {
         let fixos = self.volumes_fixos.clone();
         let mut monitor = Monitor::novo(raizes, move || match &fixos {
             Some(v) => v.clone(),
-            None => descobrir_volumes().unwrap_or_default(),
+            None => PlataformaLinux.descobrir_volumes().unwrap_or_default(),
         })
         .com_config(cfg)
         .com_classificador(Arc::new(ClassificadorPorExtensao));

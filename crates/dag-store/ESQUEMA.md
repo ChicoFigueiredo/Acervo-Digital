@@ -1,6 +1,12 @@
 # Esquema do Catálogo (`dag-store`)
 
-Versão do esquema (`PRAGMA user_version`): **1** (`migrations/0001_inicial.sql`). Migração publicada nunca é editada; mudanças entram como novo degrau em `MIGRACOES`. SQLite em WAL, chaves estrangeiras ligadas, tabelas `STRICT`. O worker é o único escritor.
+Versão do esquema (`PRAGMA user_version`): **3**. Migração publicada nunca é editada; mudanças entram como novo degrau em `MIGRACOES` (`src/lib.rs`). SQLite em WAL, chaves estrangeiras ligadas, tabelas `STRICT`. O worker é o único escritor. Um Catálogo com versão diferente da build é recusado (`CatalogoDesatualizado`) em leitura; em escrita é migrado para a frente.
+
+| Versão | Arquivo | O que traz |
+| --- | --- | --- |
+| 1 | `0001_inicial.sql` | Esquema da Fase A rev. 2: inventário, varredura, hash, grupos, prioridades, marcações e histórico. |
+| 2 | `0002_inventario.sql` | `files.kind` (symlinks e especiais ficam em `files`, nunca em `folders`) e alvo bruto do symlink; `folder_stats.recursive_special_count`; `scan_errors.folder_id` + índice único de idempotência; tabela `volume_stats`; índices de paginação (`idx_files_folder_size`), de hard link (`idx_files_hardlink`) e de alias de diretório (`idx_folders_physical`). |
+| 3 | `0003_reconciliacao.sql` | Fast Scan, monitor e volumes offline: `first_run_id` em `files`/`folders` (itens novos e renomeação); `scan_events` ganha `old_path_raw`, `run_id`, `detail` e índices; tabela `monitor_saude` (linha única); visões `v_arquivos` e `v_pastas` com `estado_efetivo` (`indisponivel` = linha ativa de Volume desconectado, sem reescrever a linha). |
 
 Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_display` (TEXT seguro para exibir). Datas de eventos em segundos Unix; `mtime/ctime/birthtime` em nanossegundos Unix. **NULL = indisponível**, nunca zero inventado (`allocated_bytes`, `birthtime_ns`, `physical_unique_bytes`; hash ausente = sem linha em `hashes`). Enums são `CHECK`.
 
@@ -14,7 +20,9 @@ Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_
 | `folders` | Pastas. `parent_folder_id` NULL = raiz do volume. Único (volume, `path_raw`). | Árvore por volume; filhos em cascata. `state`: ativo/ausente/removido/indisponivel. |
 | `files` | Arquivos (tabela separada de pastas). `folder_id` obrigatório; único (volume, `path_raw`). | `hardlink_group`/`native_dev`/`native_file_id` identificam o Mesmo Arquivo Físico (inode não é identidade imutável). `allocated_bytes` e `birthtime_ns` anuláveis. |
 | `file_types`, `classifications` | Tipo/formato e classificação por regra, com confiança 0..1. | `files.mime_id`, `class_id` e `folders.class_id` são FKs SET NULL. |
-| `folder_stats` | Agregados recursivos por pasta (1:1 com `folders`). | `aggregate_state` indica se está pendente/parcial/completo/desatualizado; recalculável a partir de `files`. |
+| `folder_stats` | Agregados recursivos por pasta (1:1 com `folders`). | `aggregate_state` indica se está pendente/parcial/completo/desatualizado; recalculável a partir de `files`. Contagens de pastas filhas saem de `GROUP BY` + `LEFT JOIN` (subconsulta correlacionada por pasta degenerava em quadrático a ~50 mil pastas). |
+| `volume_stats` | Totais por Volume da última agregação (pastas, arquivos, especiais, bytes lógicos/alocados/físicos exclusivos). | 1:1 com `volumes`; é a base dos totais do `dag status`. |
+| `monitor_saude` | Saúde do monitor (estado, heartbeat, backlog, watches, overflows, última reconciliação). | Linha única (`id=1`), legível por qualquer processo. |
 
 ## Varredura e serviço
 
@@ -40,9 +48,13 @@ Convenções: caminhos e nomes em `*_raw` (BLOB, bytes exatos do Linux) mais `*_
 | `marcacoes` | Marcação de Backup/Deleção. `escopo`: `regra_volume`, `regra_pasta`, `manual_arquivo`, `manual_grupo`; `estado` ativa/pendente; `hash_na_marcacao`; `autor` gui/cli/mcp. | CHECK amarra colunas ao escopo. Manual exige hash. Índices únicos: no máximo uma marcação por arquivo (A-30) e uma regra por volume/pasta. Hash mudou ⇒ `pendente` (fora das contas). |
 | `marcacoes_historico` | Histórico de cada marcação e mudança de estado (evento, estados, alvo, hash, autor, `em`). | **Somente de acréscimo** (triggers do `bancada-armazem` recusam UPDATE/DELETE). Sem FK, para sobreviver à remoção da marcação ou do arquivo. A aplicação grava a linha na mesma transação da mudança. |
 
+## Consultas de duplicados em SQL
+
+A listagem paginada de grupos, o resumo e o espaço recuperável por Volume/pasta/grupo são calculados **em SQL** (`src/duplicados/agregado.rs`), sem carregar grupos no processo: CTEs agregam as cópias de cada grupo (Marcação efetiva = arquivo > regra da pasta mais específica > regra do Volume) e a página sai por keyset `(espaço recuperável desc, id)` ou `(tamanho desc, id)`. Os `CROSS JOIN` e o `INDEXED BY idx_grupo_membros_grupo` fixam a ordem de junção, porque sem `ANALYZE` o planejador varria `files` inteiro por grupo. As versões que carregam tudo na memória sobrevivem só como referência de teste (`*_referencia`).
+
 ## Índices principais
 
-`folders(parent_folder_id)`, `files(folder_id)`, `files(volume_id, state)`, `files(volume_id, native_dev, native_file_id)`, `files(logical_bytes)`, `seen_run_id` em pastas e arquivos, `hashes(size_bytes, hash)`, `fila_hash(state, priority)`, `marcacoes(tipo, estado)`.
+`folders(parent_folder_id)`, `files(folder_id)`, `files(folder_id, logical_bytes DESC, id)`, `files(volume_id, state)`, `files(volume_id, native_dev, native_file_id)`, `files(volume_id, hardlink_group)` parcial, `files(logical_bytes)`, `seen_run_id` e `first_run_id` em pastas e arquivos, `hashes(size_bytes, hash)`, `grupo_membros(grupo_id)`, `fila_hash(state, priority)`, `marcacoes(tipo, estado)`, `scan_events(observed_at DESC, id DESC)`.
 
 ## Backup
 

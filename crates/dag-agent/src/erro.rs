@@ -38,7 +38,7 @@ pub enum ErroAgente {
     #[error("{0}")]
     Duplicados(#[from] dag_store::duplicados::ErroDuplicados),
     #[error("descoberta de volumes: {0}")]
-    Plataforma(#[from] dag_platform_linux::Erro),
+    Plataforma(#[from] dag_core::ErroPlataforma),
     #[error("{0}")]
     Invalido(String),
     #[error("{0}")]

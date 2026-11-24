@@ -15,10 +15,12 @@ pub mod elevacao;
 mod erro;
 mod fonte;
 mod mountinfo;
+mod plataforma;
 pub mod servico;
 mod volumes;
 
 pub use erro::Erro;
 pub use fonte::{EstatisticasFs, FonteSistema, FonteSistemaReal};
 pub use mountinfo::{EntradaMontagem, parse_linha_mountinfo, parse_mountinfo};
+pub use plataforma::PlataformaLinux;
 pub use volumes::{descobrir_volumes, descobrir_volumes_com};

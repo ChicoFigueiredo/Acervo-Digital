@@ -16,6 +16,10 @@
 //!   subárvore durante a execução; `completo` caso contrário. Itens ignorados de propósito
 //!   (severidade `info`) não tornam o agregado parcial.
 //!
+//! Atenção ao plano: contagens por pasta saem de `GROUP BY` unidos por `LEFT JOIN`, nunca de
+//! subconsultas correlacionadas por pasta (o planejador sem estatísticas escolhia o índice de
+//! `seen_run_id` e a agregação virava quadrática a partir de ~50 mil pastas).
+//!
 //! Memória limitada: a árvore nunca é carregada; o cálculo usa uma tabela temporária e passes
 //! SQL por altura (folhas primeiro).
 
@@ -158,10 +162,9 @@ fn preparar_tabela_temporaria(tx: &Connection, run_id: i64) -> Resultado<()> {
     tx.execute(
         "INSERT INTO temp.agg (folder_id, parent, pend, st, nchild, nf, ns, nd, lb, ab, abnull, pp, ppnull, err)
          SELECT f.id, f.parent_folder_id,
-                (SELECT COUNT(*) FROM folders c WHERE c.parent_folder_id = f.id AND c.seen_run_id = ?1),
+                COALESCE(k.n, 0),
                 0,
-                (SELECT COUNT(*) FROM folders c WHERE c.parent_folder_id = f.id AND c.seen_run_id = ?1)
-                    + COALESCE(d.n, 0),
+                COALESCE(k.n, 0) + COALESCE(d.n, 0),
                 COALESCE(d.nf, 0), COALESCE(d.ns, 0), 0, COALESCE(d.lb, 0), COALESCE(d.ab, 0),
                 COALESCE(d.abnull, 0), COALESCE(d.pp, 0), COALESCE(d.ppnull, 0), COALESCE(e.n, 0)
          FROM folders f
@@ -171,6 +174,9 @@ fn preparar_tabela_temporaria(tx: &Connection, run_id: i64) -> Resultado<()> {
                            SUM(CASE WHEN hardlink_group IS NULL THEN allocated_bytes END) AS pp,
                            SUM(hardlink_group IS NULL AND allocated_bytes IS NULL) AS ppnull
                     FROM files WHERE seen_run_id = ?1 GROUP BY folder_id) d ON d.folder_id = f.id
+         LEFT JOIN (SELECT parent_folder_id AS pai, COUNT(*) AS n FROM folders
+                    WHERE seen_run_id = ?1 AND parent_folder_id IS NOT NULL
+                    GROUP BY parent_folder_id) k ON k.pai = f.id
          LEFT JOIN (SELECT folder_id, COUNT(*) AS n FROM scan_errors
                     WHERE run_id = ?1 AND severity <> 'info' AND folder_id IS NOT NULL
                     GROUP BY folder_id) e ON e.folder_id = f.id

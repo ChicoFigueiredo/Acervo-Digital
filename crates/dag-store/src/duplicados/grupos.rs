@@ -7,6 +7,7 @@ use dag_core::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::agregado;
 use super::cobertura::cobertura_do_grupo;
 use super::espaco::dividir;
 use super::marcacoes::converter_marcas_de_grupo;
@@ -64,6 +65,7 @@ pub fn reconstruir_grupos(
                  CREATE TEMP TABLE IF NOT EXISTS _escopo (
                      logical_bytes INTEGER NOT NULL, hash BLOB NOT NULL,
                      PRIMARY KEY (logical_bytes, hash));
+                 CREATE INDEX IF NOT EXISTS temp._alvo_chave ON _alvo(logical_bytes, hash);
                  DELETE FROM _alvo;
                  DELETE FROM _escopo;",
             )?;
@@ -383,6 +385,39 @@ pub fn listar_grupos(
     cursor: Option<&str>,
 ) -> Resultado<PaginaGrupos> {
     let depois = ler_cursor(cursor)?;
+    let limite = limite.max(1) as usize;
+    let f = agregado::Filtro {
+        volume: filtro.volume,
+        tamanho_minimo: filtro.tamanho_minimo,
+    };
+    let total = agregado::total(conn, &f)?;
+    let mut pagina = agregado::pagina(conn, &f, filtro.ordem, depois, limite + 1)?;
+    let proximo_cursor = if pagina.len() > limite {
+        pagina.truncate(limite);
+        pagina.last().map(|(k, g)| cursor_de(*k, g.id.0))
+    } else {
+        None
+    };
+    Ok(PaginaGrupos {
+        grupos: pagina.into_iter().map(|x| x.1).collect(),
+        total,
+        proximo_cursor,
+    })
+}
+
+/// Versão de referência de [`listar_grupos`]: carrega todos os grupos na memória. Só para
+/// testes de equivalência; não use em produção (memória proporcional ao número de grupos).
+///
+/// # Errors
+/// Como [`listar_grupos`].
+#[doc(hidden)]
+pub fn listar_grupos_referencia(
+    conn: &Connection,
+    filtro: &FiltroGrupos,
+    limite: u32,
+    cursor: Option<&str>,
+) -> Resultado<PaginaGrupos> {
+    let depois = ler_cursor(cursor)?;
     let mut todos: Vec<(u64, GrupoDuplicados)> = Vec::new();
     percorrer_grupos(conn, |g| {
         if g.tamanho < filtro.tamanho_minimo {
@@ -487,6 +522,27 @@ pub fn detalhar_grupo(conn: &Connection, grupo: GrupoId) -> Resultado<DetalheGru
 /// # Errors
 /// Falha do SQLite.
 pub fn resumo_duplicados(conn: &Connection) -> Resultado<ResumoDuplicados> {
+    let (grupos, copias, espaco) = agregado::totais(conn)?;
+    let mut r = ResumoDuplicados {
+        grupos,
+        copias,
+        espaco_recuperavel_bytes: espaco,
+        ..ResumoDuplicados::default()
+    };
+    r.marcacoes_pendentes = u(conn.query_row(
+        "SELECT COUNT(*) FROM marcacoes WHERE estado = 'pendente'",
+        [],
+        |l| l.get(0),
+    )?);
+    Ok(r)
+}
+
+/// Versão de referência de [`resumo_duplicados`] (carrega cada grupo na memória). Só testes.
+///
+/// # Errors
+/// Falha do SQLite.
+#[doc(hidden)]
+pub fn resumo_duplicados_referencia(conn: &Connection) -> Resultado<ResumoDuplicados> {
     let mut r = ResumoDuplicados::default();
     percorrer_grupos(conn, |g| {
         let s = resumo(&g);

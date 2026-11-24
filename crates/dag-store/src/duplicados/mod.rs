@@ -22,6 +22,7 @@
 //! Veja [`dag_core::LIMITACOES_ESPACO`]: a estimativa usa tamanho lógico e não sabe de reflink,
 //! COW, compressão ou deduplicação do sistema de arquivos.
 
+mod agregado;
 mod cobertura;
 mod espaco;
 mod exportar;
@@ -35,12 +36,14 @@ use dag_core::{Autor, EscopoMarcacao, EstadoMarcacao, HashCompleto, TipoMarcacao
 use rusqlite::{Connection, OptionalExtension};
 
 pub use cobertura::cobertura_do_arquivo;
-pub use espaco::{Acumulado, EspacoCatalogo, espaco_de_grupos, relatorio_espaco};
+pub use espaco::{
+    Acumulado, EspacoCatalogo, espaco_de_grupos, espaco_de_grupos_referencia, relatorio_espaco,
+};
 pub use exportar::{exportar_relatorio, formato_do_caminho};
 pub use grupos::{
     Escopo, FiltroGrupos, PaginaGrupos, ResumoReconstrucao, definir_copia_principal,
-    detalhar_grupo, filtro_por_volume, grupo_do_arquivo, listar_grupos, reconstruir_grupos,
-    resumo_duplicados,
+    detalhar_grupo, filtro_por_volume, grupo_do_arquivo, listar_grupos, listar_grupos_referencia,
+    reconstruir_grupos, resumo_duplicados, resumo_duplicados_referencia,
 };
 pub use marcacoes::{
     HistoricoMarcacao, confirmar, desmarcar, historico_da_marcacao, listar_marcacoes, marcar,

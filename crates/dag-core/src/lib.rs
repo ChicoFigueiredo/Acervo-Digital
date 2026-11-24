@@ -12,6 +12,7 @@ pub mod duplicados;
 pub mod formato;
 pub mod hash;
 pub mod ids;
+pub mod plataforma;
 pub mod progresso;
 pub mod reconciliacao;
 pub mod regras;
@@ -37,6 +38,7 @@ pub use duplicados::{
 };
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
+pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
 pub use progresso::{FaseInventario, Progresso, ProgressoHash, ProgressoInventario};
 pub use reconciliacao::{EventoInfo, ResumoMonitorInfo, ResumoReconciliacao, SaudeMonitorInfo};
 pub use tipos::{

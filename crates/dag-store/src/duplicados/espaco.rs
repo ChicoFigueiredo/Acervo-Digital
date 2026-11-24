@@ -6,8 +6,9 @@ use dag_core::regras::{CopiaMarcada, DivisaoEspaco, espaco_recuperavel};
 use dag_core::{
     ArquivoId, DadosRelatorio, DispositivoId, EspacoItem, LIMITACOES_ESPACO, NivelEspaco, VolumeId,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
+use super::agregado;
 use super::grupos::ler_cursor;
 use super::{GrupoCarregado, Resultado, percorrer_grupos, representante_sql, sob_sql};
 
@@ -63,11 +64,76 @@ pub struct EspacoCatalogo {
     pub por_grupo: Vec<(i64, String, Acumulado)>,
 }
 
-/// Percorre os grupos e acumula o espaço recuperável.
+/// Espaço recuperável de todo o Catálogo, calculado em SQL (memória proporcional ao número de
+/// Volumes, pastas e grupos **do resultado**, não ao Catálogo). Inclui a lista por grupo: para
+/// relatórios paginados use [`relatorio_espaco`], que só carrega o necessário.
 ///
 /// # Errors
 /// Falha do SQLite.
 pub fn espaco_de_grupos(conn: &Connection) -> Resultado<EspacoCatalogo> {
+    espaco(conn, true, true)
+}
+
+const PAGINA_GRUPOS: usize = 5000;
+
+fn espaco(conn: &Connection, com_pastas: bool, com_grupos: bool) -> Resultado<EspacoCatalogo> {
+    let mut r = EspacoCatalogo::default();
+    for (v, marcado, estimado, copias) in agregado::por_destino(conn, false)? {
+        let a = Acumulado {
+            marcado,
+            estimado,
+            copias,
+        };
+        r.computador.marcado += marcado;
+        r.computador.estimado += estimado;
+        r.computador.copias += copias;
+        r.por_volume.insert(v, a);
+    }
+    if com_pastas {
+        for (p, marcado, estimado, copias) in agregado::por_destino(conn, true)? {
+            r.por_pasta_direta.insert(
+                p,
+                Acumulado {
+                    marcado,
+                    estimado,
+                    copias,
+                },
+            );
+        }
+    }
+    if com_grupos {
+        let mut depois = None;
+        loop {
+            let pag = agregado::grupos_com_espaco(conn, depois, PAGINA_GRUPOS)?;
+            let fim = pag.len() < PAGINA_GRUPOS;
+            depois = pag.last().map(|(k, l)| (*k, l.0));
+            for (_, (g, nome, marcado, estimado, copias)) in pag {
+                r.por_grupo.push((
+                    g,
+                    nome,
+                    Acumulado {
+                        marcado,
+                        estimado,
+                        copias,
+                    },
+                ));
+            }
+            if fim {
+                break;
+            }
+        }
+        r.por_grupo.sort_by_key(|x| x.0);
+    }
+    marcadas_fora_de_grupo(conn, &mut r)?;
+    Ok(r)
+}
+
+/// Versão de referência de [`espaco_de_grupos`]: percorre todos os grupos na memória. Só testes.
+///
+/// # Errors
+/// Falha do SQLite.
+#[doc(hidden)]
+pub fn espaco_de_grupos_referencia(conn: &Connection) -> Resultado<EspacoCatalogo> {
     let mut r = EspacoCatalogo::default();
     percorrer_grupos(conn, |g| {
         let d = dividir(&g);
@@ -165,13 +231,23 @@ fn item(nivel: NivelEspaco, id: Option<i64>, nome: String, a: Acumulado) -> Espa
     }
 }
 
-/// Propaga o espaço de cada pasta para todas as ancestrais (soma recursiva).
+/// Propaga o espaço de cada pasta para todas as ancestrais (soma recursiva). Carrega o mapa
+/// pasta → pai numa só varredura (memória proporcional ao número de pastas, não de arquivos).
 fn recursivo_por_pasta(
     conn: &Connection,
     diretas: &BTreeMap<i64, Acumulado>,
 ) -> Resultado<BTreeMap<i64, Acumulado>> {
     let mut pai: HashMap<i64, Option<i64>> = HashMap::new();
-    let mut st = conn.prepare("SELECT parent_folder_id FROM folders WHERE id = ?1")?;
+    if !diretas.is_empty() {
+        let mut st = conn.prepare("SELECT id, parent_folder_id FROM folders")?;
+        let linhas = st.query_map([], |l| {
+            Ok((l.get::<_, i64>(0)?, l.get::<_, Option<i64>>(1)?))
+        })?;
+        for l in linhas {
+            let (id, p) = l?;
+            pai.insert(id, p);
+        }
+    }
     let mut r: BTreeMap<i64, Acumulado> = BTreeMap::new();
     for (pasta, acc) in diretas {
         let mut atual = Some(*pasta);
@@ -181,14 +257,7 @@ fn recursivo_por_pasta(
             e.marcado += acc.marcado;
             e.estimado += acc.estimado;
             e.copias += acc.copias;
-            atual = match pai.get(&p) {
-                Some(x) => *x,
-                None => {
-                    let x: Option<i64> = st.query_row([p], |l| l.get(0)).optional()?.flatten();
-                    pai.insert(p, x);
-                    x
-                }
-            };
+            atual = pai.get(&p).copied().flatten();
             passos += 1;
             if passos > 4096 {
                 break;
@@ -209,7 +278,7 @@ pub fn relatorio_espaco(
     limite: u32,
     cursor: Option<&str>,
 ) -> Resultado<(DadosRelatorio, Option<String>)> {
-    let e = espaco_de_grupos(conn)?;
+    let e = espaco(conn, nivel == NivelEspaco::Pasta, false)?;
     let total = item(
         NivelEspaco::Computador,
         None,
@@ -242,12 +311,16 @@ pub fn relatorio_espaco(
             }
         }
         NivelEspaco::Grupo => {
-            for (g, nome, a) in &e.por_grupo {
-                linhas.push((
-                    a.total(),
-                    *g,
-                    item(NivelEspaco::Grupo, Some(*g), nome.clone(), *a),
-                ));
+            // Só a página (e uma a mais, para saber se há próxima): memória limitada.
+            for (chave, (g, nome, marcado, estimado, copias)) in
+                agregado::grupos_com_espaco(conn, depois, limite + 1)?
+            {
+                let a = Acumulado {
+                    marcado,
+                    estimado,
+                    copias,
+                };
+                linhas.push((chave, g, item(NivelEspaco::Grupo, Some(g), nome, a)));
             }
         }
     }

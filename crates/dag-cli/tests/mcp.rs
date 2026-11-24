@@ -66,6 +66,35 @@ fn mcp_scan_full_e_listar_duplicados() {
     assert_eq!(sc["resposta"], "duplicados");
     assert_eq!(sc["total"], 1, "{sc}");
 
+    // CA-A28: marcação e relatório pelo MCP; o arquivo marcado não muda (conteúdo e mtime).
+    let alvo = arvore.join("b/y.bin");
+    let antes = (
+        std::fs::read(&alvo).unwrap(),
+        std::fs::metadata(&alvo).unwrap().modified().unwrap(),
+    );
+    let r = pedir(
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+        "name":"marcar_delecao","arguments":{"alvo":{"tipo":"caminho","valor":alvo.to_str().unwrap()}}}}),
+    );
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    assert_eq!(r["result"]["structuredContent"]["resposta"], "marcacao");
+    let r = pedir(
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+        "name":"relatorio","arguments":{"tipo":"marcacoes"}}}),
+    );
+    assert_eq!(r["result"]["isError"], false, "{r}");
+    let dados = &r["result"]["structuredContent"]["dados"];
+    let marcacoes = dados["marcacoes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(marcacoes.len(), 1, "{r}");
+    assert!(marcacoes[0].to_string().contains("y.bin"), "{r}");
+    let depois = (
+        std::fs::read(&alvo).unwrap(),
+        std::fs::metadata(&alvo).unwrap().modified().unwrap(),
+    );
+    assert_eq!(antes, depois, "o MCP só altera o Catálogo");
+
     drop(entrada);
     assert!(filho.wait().unwrap().success());
 }

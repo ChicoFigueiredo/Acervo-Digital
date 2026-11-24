@@ -1143,3 +1143,265 @@ fn arquivo_unico_marcado_para_delecao_entra_no_espaco_de_volume_pasta_e_computad
     let e = duplicados::espaco_de_grupos(f.conn()).unwrap();
     assert_eq!(e.computador.marcado, 50);
 }
+
+// ---------------------------------------------------------------------- consultas em SQL
+
+/// Cenário com todos os tipos de Marcação e de efeito (regra de Volume, regra de pasta, manual
+/// de arquivo e de grupo, Pendente, offline, Cópia Principal manual).
+fn cenario_misto() -> Fx {
+    let mut f = Fx::novo();
+    let (d1, d2, d3) = (
+        f.dispositivo("d1"),
+        f.dispositivo("d2"),
+        f.dispositivo("d3"),
+    );
+    let ssd = f.volume("SSD", Some(d1), true);
+    let hd = f.volume("HD", Some(d2), true);
+    let off = f.volume("OFF", Some(d3), false);
+    let sem_disp = f.volume("SEMDISP", None, true);
+    let ps = f.pasta(ssd, None, "/s");
+    let pss = f.pasta(ssd, Some(ps), "/s/sub");
+    let ph = f.pasta(hd, None, "/h");
+    let po = f.pasta(off, None, "/o");
+    let pq = f.pasta(sem_disp, None, "/q");
+    let mut inode = 100;
+    let mut novo_inode = || {
+        inode += 1;
+        inode
+    };
+    // 12 grupos de tamanhos variados, espalhados nos volumes.
+    for g in 1..=12u8 {
+        let tam = i64::from(g) * 7;
+        f.arq(ssd, ps, &format!("/s/g{g}"), tam, novo_inode(), Some(h(g)));
+        f.arq(
+            ssd,
+            pss,
+            &format!("/s/sub/g{g}"),
+            tam,
+            novo_inode(),
+            Some(h(g)),
+        );
+        if g % 2 == 0 {
+            f.arq(hd, ph, &format!("/h/g{g}"), tam, novo_inode(), Some(h(g)));
+        }
+        if g % 3 == 0 {
+            f.arq(off, po, &format!("/o/g{g}"), tam, novo_inode(), Some(h(g)));
+        }
+        if g % 4 == 0 {
+            f.arq(
+                sem_disp,
+                pq,
+                &format!("/q/g{g}"),
+                tam,
+                novo_inode(),
+                Some(h(g)),
+            );
+        }
+    }
+    // Hard links dentro de um grupo.
+    f.hardlinks(hd, ph, "/h/hl", 3, 21, 9000, h(3));
+    // Grupo cuja Cópia Principal será marcada para Deleção, sem Backup: poupa a de menor id.
+    let px = f.pasta(ssd, None, "/x");
+    for k in 1..=3 {
+        f.arq(ssd, px, &format!("/x/x{k}"), 11, 8000 + k, Some(h(50)));
+    }
+    f.reconstruir();
+    let x1: i64 = f.contar("SELECT id FROM files WHERE path_display = '/x/x1'");
+    f.marcar(TipoMarcacao::Delecao, arq_alvo(x1)).unwrap();
+    // Marcações de todos os tipos.
+    f.marcar(TipoMarcacao::Backup, Alvo::Volume("HD".into()))
+        .unwrap();
+    f.marcar(TipoMarcacao::Delecao, Alvo::Pasta("/s/sub".into()))
+        .unwrap();
+    let g5 = f.grupos().into_iter().find(|g| g.tamanho == 35).unwrap();
+    f.marcar(TipoMarcacao::Delecao, Alvo::Grupo(g5.id)).unwrap();
+    let sete: i64 = f.contar("SELECT id FROM files WHERE path_display = '/s/g7'");
+    f.marcar(TipoMarcacao::Backup, arq_alvo(sete)).unwrap();
+    let um: i64 = f.contar("SELECT id FROM files WHERE path_display = '/s/g1'");
+    f.marcar(TipoMarcacao::Delecao, arq_alvo(um)).unwrap();
+    let dois: i64 = f.contar("SELECT id FROM files WHERE path_display = '/s/g11'");
+    f.marcar(TipoMarcacao::Backup, arq_alvo(dois)).unwrap();
+    // Principal manual.
+    let g8 = f.grupos().into_iter().find(|g| g.tamanho == 56).unwrap();
+    let hd8: i64 = f.contar("SELECT id FROM files WHERE path_display = '/h/g8'");
+    definir_copia_principal(&mut f.c, g8.id, Some(&arq_alvo(hd8)), T).unwrap();
+    // Marcação Pendente: o conteúdo muda depois de marcado.
+    let tres: i64 = f.contar("SELECT id FROM files WHERE path_display = '/s/g9'");
+    f.marcar(TipoMarcacao::Delecao, arq_alvo(tres)).unwrap();
+    f.novo_conteudo(tres, h(99));
+    duplicados::reavaliar_marcacoes(&mut f.c, Autor::Cli, T + 2).unwrap();
+    f.reconstruir();
+    f
+}
+
+fn normaliza(e: &duplicados::EspacoCatalogo) -> String {
+    format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        e.computador, e.por_volume, e.por_pasta_direta, e.por_grupo
+    )
+}
+
+#[test]
+fn consultas_sql_equivalem_as_de_referencia_em_memoria() {
+    let f = cenario_misto();
+    let conn = f.conn();
+    let vol_hd = duplicados::resolver_volume(conn, "HD").unwrap();
+    let vol_ssd = duplicados::resolver_volume(conn, "SSD").unwrap();
+    for ordem in [
+        dag_core::OrdemDuplicados::Recuperavel,
+        dag_core::OrdemDuplicados::Tamanho,
+    ] {
+        for volume in [None, Some(vol_hd), Some(vol_ssd)] {
+            for tamanho_minimo in [0, 30, 70] {
+                let filtro = FiltroGrupos {
+                    volume,
+                    tamanho_minimo,
+                    ordem,
+                };
+                for limite in [1u32, 3, 1000] {
+                    let (mut a, mut b) = (None::<String>, None::<String>);
+                    loop {
+                        let novo = listar_grupos(conn, &filtro, limite, a.as_deref()).unwrap();
+                        let ref_ = duplicados::listar_grupos_referencia(
+                            conn,
+                            &filtro,
+                            limite,
+                            b.as_deref(),
+                        )
+                        .unwrap();
+                        assert_eq!(novo, ref_, "{filtro:?} limite {limite}");
+                        a = novo.proximo_cursor;
+                        b = ref_.proximo_cursor;
+                        if a.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        duplicados::resumo_duplicados(conn).unwrap(),
+        duplicados::resumo_duplicados_referencia(conn).unwrap()
+    );
+    assert!(duplicados::resumo_duplicados(conn).unwrap().grupos >= 12);
+    let novo = duplicados::espaco_de_grupos(conn).unwrap();
+    let ref_ = duplicados::espaco_de_grupos_referencia(conn).unwrap();
+    assert_eq!(normaliza(&novo), normaliza(&ref_));
+    assert!(novo.computador.marcado > 0 && novo.computador.estimado > 0);
+}
+
+#[test]
+fn relatorio_de_espaco_por_grupo_pagina_sem_pular_nem_repetir() {
+    let f = cenario_misto();
+    let conn = f.conn();
+    let ref_ = duplicados::espaco_de_grupos_referencia(conn).unwrap();
+    let mut esperado: Vec<(u64, i64)> = ref_
+        .por_grupo
+        .iter()
+        .map(|(g, _, a)| (a.total(), *g))
+        .collect();
+    esperado.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut vistos = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (d, prox) =
+            duplicados::relatorio_espaco(conn, NivelEspaco::Grupo, 2, cursor.as_deref()).unwrap();
+        let DadosRelatorio::Espaco { itens, total, .. } = d else {
+            panic!()
+        };
+        assert_eq!(
+            total.bytes_total,
+            ref_.computador.total(),
+            "o total do computador vem em toda página"
+        );
+        vistos.extend(itens.iter().map(|i| (i.bytes_total, i.id.unwrap())));
+        match prox {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    assert_eq!(vistos, esperado);
+    // Por volume: igual à referência.
+    let (d, _) = duplicados::relatorio_espaco(conn, NivelEspaco::Volume, 100, None).unwrap();
+    let DadosRelatorio::Espaco { itens, .. } = d else {
+        panic!()
+    };
+    for it in itens {
+        let r = ref_.por_volume[&it.id.unwrap()];
+        assert_eq!(
+            (
+                it.bytes_marcados_delecao,
+                it.bytes_redundantes_estimados,
+                it.copias
+            ),
+            (r.marcado, r.estimado, r.copias)
+        );
+    }
+}
+
+#[test]
+fn listagem_em_sql_aguenta_muitos_grupos_sem_alterar_a_semantica() {
+    // 6.000 grupos de 2 cópias inseridos direto: a página custa o mesmo que a de 5 grupos e o
+    // total/resumo batem com o cálculo manual.
+    let mut f = Fx::novo();
+    let (d1, d2) = (f.dispositivo("d1"), f.dispositivo("d2"));
+    let a = f.volume("A", Some(d1), true);
+    let b = f.volume("B", Some(d2), true);
+    let pa = f.pasta(a, None, "/a");
+    let pb = f.pasta(b, None, "/b");
+    let n = 6_000i64;
+    {
+        let conn = f.conn();
+        conn.execute_batch("BEGIN").unwrap();
+        for i in 0..n {
+            let mut hs = [0u8; 32];
+            hs[..8].copy_from_slice(&(i as u64 + 1).to_be_bytes());
+            let tam = 1 + (i % 50);
+            for (vol, pasta, pre) in [(a, pa, "/a"), (b, pb, "/b")] {
+                conn.execute(
+                    "INSERT INTO files (volume_id, folder_id, path_raw, path_display, name_raw, name_display,
+                                        native_dev, native_file_id, nlink, logical_bytes, mtime_ns, ctime_ns, seen_run_id)
+                     VALUES (?1, ?2, CAST(?3 AS BLOB), ?3, CAST(?3 AS BLOB), ?3, 1, ?4, 1, ?5, 1, 1, 1)",
+                    params![vol, pasta, format!("{pre}/{i}"), 10 * i + vol, tam],
+                )
+                .unwrap();
+                let id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO hashes (file_id, hash, hashed_at, size_bytes, mtime_ns, ctime_ns, native_file_id)
+                     SELECT id, ?2, 1, logical_bytes, mtime_ns, ctime_ns, native_file_id FROM files WHERE id = ?1",
+                    params![id, hs.as_slice()],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+    }
+    let r = f.reconstruir();
+    assert_eq!(r.grupos_criados as i64, n);
+    let p = listar_grupos(f.conn(), &FiltroGrupos::default(), 5, None).unwrap();
+    assert_eq!((p.total as i64, p.grupos.len()), (n, 5));
+    assert!(p.proximo_cursor.is_some());
+    // Cada grupo recupera uma cópia: soma = Σ tamanho.
+    let esperado: i64 = (0..n).map(|i| 1 + (i % 50)).sum();
+    let s = duplicados::resumo_duplicados(f.conn()).unwrap();
+    assert_eq!(
+        (
+            s.grupos as i64,
+            s.copias as i64,
+            s.espaco_recuperavel_bytes as i64
+        ),
+        (n, 2 * n, esperado)
+    );
+    let ref_ = duplicados::resumo_duplicados_referencia(f.conn()).unwrap();
+    assert_eq!(s, ref_);
+    // Filtro por volume e por tamanho mínimo.
+    let filtro = FiltroGrupos {
+        volume: Some(b),
+        tamanho_minimo: 50,
+        ..FiltroGrupos::default()
+    };
+    let p = listar_grupos(f.conn(), &filtro, 1000, None).unwrap();
+    assert_eq!(p.total as i64, n / 50);
+    assert!(p.grupos.iter().all(|g| g.tamanho == 50));
+}

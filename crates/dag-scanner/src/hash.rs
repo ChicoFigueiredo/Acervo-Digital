@@ -68,6 +68,10 @@ pub struct ConfigHash {
     pub tamanho_buffer: usize,
     /// Intervalo mínimo entre chamadas do callback de progresso.
     pub intervalo_de_progresso: Duration,
+    /// Itens reservados por disco ao mesmo tempo (0 = automático: 32 por thread, mínimo 64).
+    /// Lotes grandes evitam consultar a fila a cada poucos arquivos; testes usam valores
+    /// pequenos para observar pausa e cancelamento no meio do trabalho.
+    pub reserva_por_disco: usize,
 }
 
 impl Default for ConfigHash {
@@ -78,6 +82,7 @@ impl Default for ConfigHash {
             limite_bytes_por_seg: None,
             tamanho_buffer: 1 << 20,
             intervalo_de_progresso: Duration::from_millis(250),
+            reserva_por_disco: 0,
         }
     }
 }
@@ -724,6 +729,11 @@ fn agrupar_por_disco(volumes: Vec<hashes::VolumePendente>) -> Vec<Disco> {
     discos
 }
 
+/// Quanto o coordenador espera para juntar resultados antes de gravar.
+const JANELA_LOTE: Duration = Duration::from_millis(40);
+/// Máximo de resultados por transação de gravação.
+const LOTE_MAX: usize = 512;
+
 type SaidaItem = (usize, ItemFila, Saida);
 
 impl Motor {
@@ -731,7 +741,13 @@ impl Motor {
         let verificacao = self.tipo == TipoFila::Verificacao;
         let por_disco = self.config.threads_por_disco.max(1);
         let max_ativos = self.config.max_discos.max(1);
-        let alvo = por_disco * 4;
+        // Itens em voo por disco: o bastante para o leitor nunca esperar o coordenador, e lotes de
+        // reserva grandes para que a consulta ao Catálogo não seja feita a cada poucos arquivos.
+        let alvo = if self.config.reserva_por_disco > 0 {
+            self.config.reserva_por_disco
+        } else {
+            (por_disco * 32).max(64)
+        };
         let buffer = self.config.tamanho_buffer.max(4096);
         let parar = AtomicBool::new(false);
         let bytes_lidos = AtomicU64::new(0);
@@ -874,7 +890,17 @@ impl Motor {
                 match rx_saida.recv_timeout(Duration::from_millis(100)) {
                     Ok(primeiro) => {
                         let mut lote = vec![primeiro];
-                        while let Ok(m) = rx_saida.try_recv() {
+                        // Junta resultados por até JANELA_LOTE (ou LOTE_MAX itens) para gravar
+                        // numa só transação, em vez de uma por arquivo.
+                        let limite = Instant::now() + JANELA_LOTE;
+                        while lote.len() < LOTE_MAX && lote.len() < em_voo_total {
+                            let restante = limite.saturating_duration_since(Instant::now());
+                            let m = if restante.is_zero() {
+                                rx_saida.try_recv().ok()
+                            } else {
+                                rx_saida.recv_timeout(restante).ok()
+                            };
+                            let Some(m) = m else { break };
                             lote.push(m);
                         }
                         em_voo_total -= lote.len();

@@ -101,6 +101,8 @@ fn full(c: &Cenario, sem_hash: bool) -> Comando {
         sem_hash,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 
@@ -226,7 +228,14 @@ fn status_responde_durante_o_scan_e_cancelar_de_outro_cliente_para_a_varredura()
     esperar("scan pausado", || {
         estados(&mut b).first() == Some(&EstadoExecucao::Pausada)
     });
-    let r = enviar(&mut b, Comando::Retomar { execucao: None });
+    let r = enviar(
+        &mut b,
+        Comando::Retomar {
+            execucao: None,
+            threads_por_disco: None,
+            max_discos: None,
+        },
+    );
     assert!(matches!(r, Resposta::Ok { .. }), "{r:?}");
     esperar("scan retomado", || {
         estados(&mut b).first() != Some(&EstadoExecucao::Pausada)
@@ -280,6 +289,8 @@ fn retomar_com_id_de_execucao_gravada_vai_para_a_fila() {
         &mut a,
         Comando::Retomar {
             execucao: Some(execucao),
+            threads_por_disco: None,
+            max_discos: None,
         },
     );
     let Resposta::ScanConcluido { desfecho, .. } = r else {
@@ -509,7 +520,11 @@ fn sessao_executa_com_progresso_e_recusa_controle_sem_agente() {
     for cmd in [
         Comando::Pausar { execucao: None },
         Comando::Cancelar { execucao: None },
-        Comando::Retomar { execucao: None },
+        Comando::Retomar {
+            execucao: None,
+            threads_por_disco: None,
+            max_discos: None,
+        },
     ] {
         let r = con.enviar(pedido(cmd), &mut |_| {}).unwrap();
         assert_eq!(codigo(&r), "sem_agente");

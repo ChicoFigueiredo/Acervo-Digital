@@ -83,11 +83,27 @@ pub enum Comando {
         /// de novo, em vez de reaproveitar o hash dos que não mudaram (`--reler-tudo`).
         #[serde(default)]
         releitura_total: bool,
+        /// Leitores simultâneos por disco no Hash Completo (1..=8); vence a flag do agente e o
+        /// valor persistido.
+        #[serde(default)]
+        threads_por_disco: Option<u32>,
+        /// Discos lendo ao mesmo tempo no Hash Completo (1..=16).
+        #[serde(default)]
+        max_discos: Option<u32>,
     },
     /// Pausa a execução indicada (ou a única em andamento).
     Pausar { execucao: Option<ExecucaoId> },
     /// Retoma uma execução pausada.
-    Retomar { execucao: Option<ExecucaoId> },
+    ///
+    /// `threads_por_disco`/`max_discos` valem só para a retomada de execução gravada no
+    /// Catálogo (a pausada em memória continua com os valores com que começou).
+    Retomar {
+        execucao: Option<ExecucaoId>,
+        #[serde(default)]
+        threads_por_disco: Option<u32>,
+        #[serde(default)]
+        max_discos: Option<u32>,
+    },
     /// Cancela uma execução.
     Cancelar { execucao: Option<ExecucaoId> },
     /// Consulta progresso das execuções.
@@ -148,7 +164,21 @@ pub enum Comando {
     /// Saúde do monitor e pendências de reconciliação.
     SaudeMonitor,
     /// Verificação de Integridade sobre as Raízes (todas, se vazio).
-    VerificarIntegridade { raizes: Vec<String> },
+    VerificarIntegridade {
+        raizes: Vec<String>,
+        #[serde(default)]
+        threads_por_disco: Option<u32>,
+        #[serde(default)]
+        max_discos: Option<u32>,
+    },
+    /// Paralelismo padrão do Hash Completo, persistido no Catálogo. Sem campos só consulta;
+    /// com campos grava (1..=8 threads por disco, 1..=16 discos) para a próxima execução.
+    ConfigHash {
+        #[serde(default)]
+        threads_por_disco: Option<u32>,
+        #[serde(default)]
+        max_discos: Option<u32>,
+    },
     /// Gerencia o serviço em segundo plano.
     Servico { acao: AcaoServico },
     /// Backup consistente do Catálogo (SQLite) para `destino`.
@@ -396,6 +426,11 @@ pub enum Resposta {
     Verificacao {
         resumo: ResumoVerificacao,
     },
+    /// Paralelismo do Hash Completo persistido (já com os padrões aplicados).
+    ConfigHash {
+        threads_por_disco: u32,
+        max_discos: u32,
+    },
     /// Falha; `codigo` é estável para máquinas, `mensagem` é para humanos.
     Erro {
         codigo: String,
@@ -422,6 +457,17 @@ mod tests {
                 sem_hash: true,
                 elevar: false,
                 releitura_total: false,
+                threads_por_disco: Some(2),
+                max_discos: None,
+            },
+            Comando::ConfigHash {
+                threads_por_disco: Some(3),
+                max_discos: Some(4),
+            },
+            Comando::Retomar {
+                execucao: None,
+                threads_por_disco: None,
+                max_discos: Some(1),
             },
             Comando::ListarDuplicados {
                 volume: Some("SSD".into()),
@@ -493,6 +539,8 @@ mod tests {
             sem_hash: false,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         };
         let v: serde_json::Value = serde_json::to_value(&c).unwrap();
         assert_eq!(v["comando"], "iniciar_scan");

@@ -77,6 +77,8 @@ fn scan_cmd(raiz: &Path) -> Comando {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 
@@ -373,7 +375,11 @@ fn status_mostra_a_etapa_de_hash_e_retomar_a_conclui() {
     // Retomar uma execução que parou no hash roda só o hash que falta.
     let id = execucoes[0].id;
     let mut a = agente(&c);
-    let r = a.executar(Comando::Retomar { execucao: Some(id) });
+    let r = a.executar(Comando::Retomar {
+        execucao: Some(id),
+        threads_por_disco: None,
+        max_discos: None,
+    });
     let Resposta::ScanConcluido { desfecho, hash, .. } = r else {
         panic!("{r:?}")
     };
@@ -448,7 +454,11 @@ fn scan_cancelado_e_retomado_em_outro_processo() {
         execucao
     };
     let mut b = agente(&c);
-    let r = b.executar(Comando::Retomar { execucao: Some(id) });
+    let r = b.executar(Comando::Retomar {
+        execucao: Some(id),
+        threads_por_disco: None,
+        max_discos: None,
+    });
     let Resposta::ScanConcluido {
         desfecho,
         arquivos,
@@ -460,7 +470,11 @@ fn scan_cancelado_e_retomado_em_outro_processo() {
     };
     assert_eq!(desfecho, "concluida");
     assert_eq!((arquivos, bytes_logicos), (4, 14_100));
-    let r = b.executar(Comando::Retomar { execucao: None });
+    let r = b.executar(Comando::Retomar {
+        execucao: None,
+        threads_por_disco: None,
+        max_discos: None,
+    });
     assert_eq!(codigo(&r), "invalido");
 }
 

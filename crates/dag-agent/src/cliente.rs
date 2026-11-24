@@ -256,7 +256,9 @@ impl Conexao {
     ) -> Result<Conexao, ErroAgente> {
         if matches!(
             comando,
-            Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Retomar { execucao: None }
+            Comando::Pausar { .. }
+                | Comando::Cancelar { .. }
+                | Comando::Retomar { execucao: None, .. }
         ) {
             // Só atuam sobre um agente em segundo plano; nada a abrir (nem criar) sem ele.
             return tentar_agente(catalogo, socket)
@@ -350,7 +352,7 @@ fn executar_na_sessao(
 ) -> Resposta {
     if matches!(
         pedido.comando,
-        Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Retomar { execucao: None }
+        Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Retomar { execucao: None, .. }
     ) {
         return ErroAgente::SemAgente.para_resposta();
     }

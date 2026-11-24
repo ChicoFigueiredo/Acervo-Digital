@@ -1129,6 +1129,12 @@ pub fn imprimir(r: &Resposta, todos: bool) {
             linhas,
         } => print!("{}", exportado(*tipo, caminho, *formato, *linhas)),
         Resposta::Verificacao { resumo } => print!("{}", verificacao(resumo)),
+        Resposta::ConfigHash {
+            threads_por_disco,
+            max_discos,
+        } => println!(
+            "Hash Completo: {threads_por_disco} thread(s) por disco, até {max_discos} disco(s) em paralelo (vale na próxima execução ou retomada)"
+        ),
         Resposta::Explorar {
             pasta,
             entradas,

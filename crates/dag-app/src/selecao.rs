@@ -13,6 +13,9 @@ pub struct Classificacao {
     por_id: HashMap<i64, (ClasseVolume, bool)>,
     /// Volumes de imagem/virtuais detectados que não estão no Catálogo (sem id).
     ocultos_fora_do_catalogo: Vec<VolumeInfo>,
+    /// Classe por ponto de montagem, vinda da descoberta direta do sistema (sem passar pelo
+    /// worker): vale enquanto a resposta de `ListarVolumes` não chega.
+    por_montagem: HashMap<String, (ClasseVolume, bool)>,
     /// `true` depois da primeira resposta; antes, vale a classe presumida pelo filesystem.
     pub recebida: bool,
 }
@@ -34,22 +37,89 @@ impl Classificacao {
         c
     }
 
+    /// A partir da descoberta direta de volumes do sistema (somente leitura, sem Catálogo).
+    #[must_use]
+    pub fn de_descobertos(volumes: &[dag_core::VolumeDescoberto]) -> Self {
+        let mut c = Self::default();
+        for v in volumes {
+            for p in &v.pontos_de_montagem {
+                let ponto = String::from_utf8_lossy(p).into_owned();
+                c.por_montagem.insert(ponto, (v.classe, v.sistema));
+            }
+        }
+        c
+    }
+
+    /// Junta uma descoberta direta à classificação (o que já veio do worker prevalece).
+    pub fn aprender_descobertos(&mut self, volumes: &[dag_core::VolumeDescoberto]) {
+        let nova = Self::de_descobertos(volumes);
+        for (k, v) in nova.por_montagem {
+            self.por_montagem.entry(k).or_insert(v);
+        }
+    }
+
     fn de(&self, v: &LinhaVolume) -> (ClasseVolume, bool) {
-        self.por_id
-            .get(&v.id)
-            .copied()
-            .unwrap_or_else(|| (classe_presumida(v.fs_type.as_deref()), false))
+        if let Some(c) = self.por_id.get(&v.id) {
+            return *c;
+        }
+        if let Some(c) = v.montagem.as_ref().and_then(|m| self.por_montagem.get(m)) {
+            return *c;
+        }
+        (
+            classe_presumida(v.fs_type.as_deref(), v.montagem.as_deref()),
+            false,
+        )
     }
 }
 
-/// Sem classificação do sistema: filesystems de imagem contam como `Imagem`, o resto como
-/// `Fisico` (melhor mostrar a mais do que esconder um disco real).
+/// Sem classificação do sistema: presume pelo filesystem e pelo ponto de montagem.
+///
+/// * rede: `nfs*`, `cifs`, `smb*`, `sshfs`, `fuse.rclone`, `ceph`, `9p`...;
+/// * imagem: `squashfs`, `erofs`, `iso9660`, `udf`, AppImage (`/tmp/.mount_*`);
+/// * virtual: `overlay`, `tmpfs`, `fuse.*` locais, e tudo sob `/var/lib/docker`,
+///   `/var/lib/containers` ou `/run`;
+/// * o resto conta como `Fisico` (melhor mostrar a mais do que esconder um disco real).
 #[must_use]
-pub fn classe_presumida(fs_type: Option<&str>) -> ClasseVolume {
-    match fs_type {
-        Some("squashfs" | "erofs" | "iso9660") => ClasseVolume::Imagem,
-        _ => ClasseVolume::Fisico,
+pub fn classe_presumida(fs_type: Option<&str>, montagem: Option<&str>) -> ClasseVolume {
+    let fs = fs_type.unwrap_or("").to_ascii_lowercase();
+    let ponto = montagem.unwrap_or("");
+    let sob = |p: &str| ponto == p || ponto.starts_with(&format!("{p}/"));
+    if matches!(
+        fs.as_str(),
+        "nfs"
+            | "nfs4"
+            | "cifs"
+            | "smb3"
+            | "smbfs"
+            | "sshfs"
+            | "ceph"
+            | "9p"
+            | "afs"
+            | "glusterfs"
+            | "fuse.sshfs"
+            | "fuse.rclone"
+            | "fuse.glusterfs"
+    ) {
+        return ClasseVolume::Rede;
     }
+    if matches!(fs.as_str(), "squashfs" | "erofs" | "iso9660" | "udf")
+        || fs.contains("appimage")
+        || ponto.starts_with("/tmp/.mount_")
+    {
+        return ClasseVolume::Imagem;
+    }
+    if matches!(
+        fs.as_str(),
+        "overlay" | "tmpfs" | "devtmpfs" | "ramfs" | "proc" | "sysfs" | "cgroup2" | "efivarfs"
+    ) || fs.starts_with("fuse.")
+        || fs == "fuse"
+        || sob("/var/lib/docker")
+        || sob("/var/lib/containers")
+        || (sob("/run") && !sob("/run/media") && !sob("/run/mount"))
+    {
+        return ClasseVolume::Virtual;
+    }
+    ClasseVolume::Fisico
 }
 
 /// Uma linha da tabela de Discos, já classificada.
@@ -264,6 +334,59 @@ mod testes {
         let (todas, ocultos) = montar_linhas(&db, &c, true);
         assert_eq!((todas.len(), ocultos), (6, 0));
         assert!(todas.iter().any(|l| l.volume.id < 0), "oculto sem id");
+    }
+
+    #[test]
+    fn presuncao_sem_classificacao_do_sistema() {
+        use ClasseVolume::{Fisico, Imagem, Rede, Virtual};
+        let c = |fs: &str, p: &str| classe_presumida(Some(fs), Some(p));
+        assert_eq!(
+            c("overlay", "/var/lib/docker/rootfs/overlayfs/ab12"),
+            Virtual
+        );
+        assert_eq!(c("ext4", "/var/lib/docker/volumes/x"), Virtual);
+        assert_eq!(c("fuse.rclone", "/mnt/googledrive"), Rede);
+        assert_eq!(c("fuse.rclone", "/mnt/onedrive"), Rede);
+        assert_eq!(c("nfs4", "/mnt/nas"), Rede);
+        assert_eq!(c("cifs", "/mnt/smb"), Rede);
+        assert_eq!(c("fuse.sshfs", "/mnt/s"), Rede);
+        assert_eq!(c("fuse.AppImage-x", "/tmp/.mount_appXYZ"), Imagem);
+        assert_eq!(c("fuse", "/tmp/.mount_abc"), Imagem);
+        assert_eq!(c("squashfs", "/snap/x/1"), Imagem);
+        assert_eq!(c("tmpfs", "/run/user/1000"), Virtual);
+        assert_eq!(c("fuse.portal", "/run/user/1000/doc"), Virtual);
+        assert_eq!(c("ext4", "/run/media/u/PEN"), Fisico);
+        assert_eq!(c("ext4", "/mnt/dados"), Fisico);
+        assert_eq!(c("btrfs", "/"), Fisico);
+    }
+
+    #[test]
+    fn descoberta_direta_classifica_sem_o_worker() {
+        let linhas = vec![
+            linha(1, "/mnt/googledrive", "fuse.rclone", true),
+            linha(2, "/mnt/dados", "ext4", true),
+        ];
+        let mut d = dag_core::VolumeDescoberto {
+            platform_id: "a".into(),
+            st_dev: 1,
+            rotulo: None,
+            fs_type: "ext4".into(),
+            capacidade_bytes: None,
+            livre_bytes: None,
+            pontos_de_montagem: vec![b"/mnt/dados".to_vec()],
+            pseudo: false,
+            classe: ClasseVolume::Removivel,
+            sistema: false,
+            dispositivo: None,
+        };
+        let c = Classificacao::de_descobertos(std::slice::from_ref(&d));
+        let (l, ocultos) = montar_linhas(&linhas, &c, false);
+        assert_eq!(ocultos, 0);
+        assert_eq!(l[1].classe, ClasseVolume::Removivel);
+        assert_eq!(l[0].classe, ClasseVolume::Rede);
+        d.classe = ClasseVolume::Virtual;
+        let c = Classificacao::de_descobertos(&[d]);
+        assert_eq!(montar_linhas(&linhas, &c, false).1, 1);
     }
 
     #[test]

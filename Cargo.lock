@@ -849,6 +849,7 @@ dependencies = [
  "bancada-casca",
  "dag-agent",
  "dag-core",
+ "dag-platform-linux",
  "dag-scanner",
  "dag-store",
  "rusqlite",

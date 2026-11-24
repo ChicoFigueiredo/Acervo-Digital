@@ -20,7 +20,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use dag_core::{ExecucaoId, Resposta};
+use dag_core::{ExecucaoId, OpcoesHash, Resposta};
 use dag_store::inventario::{self, ExecucaoInterrompida};
 use dag_store::{confianca, reconciliacao};
 
@@ -203,7 +203,7 @@ impl Agente {
                 continue;
             }
             self.mensagem(format!(
-                "abertura: interrompida, retomando a execução {} ({})",
+                "abertura: etapa 1 de 2: retomando a execução #{} ({})",
                 e.id,
                 if e.no_inventario {
                     "inventário"
@@ -211,7 +211,7 @@ impl Agente {
                     "hash"
                 }
             ));
-            match self.retomar_scan(ExecucaoId(e.id)) {
+            match self.retomar_scan(ExecucaoId(e.id), OpcoesHash::default()) {
                 Ok(Resposta::ScanConcluido { desfecho, .. }) if desfecho == "cancelada" => {
                     rel.cancelada = true;
                     return Ok(rel);
@@ -284,9 +284,9 @@ impl Agente {
         let mut convergiu = false;
         for n in 1..=teto {
             self.mensagem(format!(
-                "abertura: passada {n}/{teto} de verificação (Fast Scan, hash só do que é novo ou mudou)"
+                "abertura: etapa 2 de 2: passada {n}/{teto} de verificação (Fast Scan, hash só do que é novo ou mudou)"
             ));
-            let r = self.fast_scan(&strs, false, false);
+            let r = self.fast_scan(&strs, false, false, OpcoesHash::default());
             match r {
                 Ok(Resposta::ScanConcluido {
                     execucao,

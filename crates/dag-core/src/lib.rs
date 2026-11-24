@@ -7,6 +7,7 @@
 
 pub mod classificacao;
 pub mod comando;
+pub mod config_hash;
 pub mod descoberta;
 pub mod duplicados;
 pub mod formato;
@@ -28,6 +29,10 @@ pub use comando::{
     AcaoServico, Alvo, Comando, EntradaExploracao, Pedido, Resposta, ResumoCatalogo,
     StatusConfianca, StatusDiscoHash, StatusExecucao, StatusHash, TipoEntradaExploracao,
     VolumeInfo,
+};
+pub use config_hash::{
+    MAX_DISCOS_MAX, MAX_DISCOS_PADRAO, OpcoesHash, ParamsHash, THREADS_POR_DISCO_MAX,
+    THREADS_POR_DISCO_PADRAO, resolver_precedencia,
 };
 pub use descoberta::{ClasseVolume, DispositivoDescoberto, TipoDispositivo, VolumeDescoberto};
 pub use duplicados::{

@@ -51,6 +51,9 @@ pub struct ConfigServidor {
     /// O que fazer ao abrir: retomar execuções interrompidas e verificar as Raízes (ADR 0003).
     /// `monitor_ativo` é ajustado de `monitor` ao iniciar.
     pub abertura: PoliticaAbertura,
+    /// Paralelismo do hash dado por flag (`dag agente --threads-por-disco/--max-discos`): vence
+    /// o persistido e perde para o pedido.
+    pub opcoes_hash: dag_core::OpcoesHash,
 }
 
 impl ConfigServidor {
@@ -63,6 +66,7 @@ impl ConfigServidor {
             volumes_fixos: None,
             uid_aceito: None,
             abertura: PoliticaAbertura::default(),
+            opcoes_hash: dag_core::OpcoesHash::default(),
         }
     }
 }
@@ -140,7 +144,9 @@ impl Servidor {
     /// [`ErroAgente::EscritorOcupado`] se outro processo já escreve; E/S do socket; se já há um
     /// agente respondendo no socket.
     pub fn iniciar(cfg: ConfigServidor) -> Result<Servidor, ErroAgente> {
-        let mut agente = Agente::abrir(&cfg.catalogo)?.silencioso();
+        let mut agente = Agente::abrir(&cfg.catalogo)?
+            .silencioso()
+            .com_opcoes_hash(cfg.opcoes_hash)?;
         if let Some(v) = &cfg.volumes_fixos {
             agente = agente.com_volumes_fixos(v.clone());
         }
@@ -474,10 +480,14 @@ impl Compartilhado {
         match &pedido.comando {
             Comando::Pausar { execucao } => Some(self.controlar(&Controle::Pausar, *execucao)),
             Comando::Cancelar { execucao } => Some(self.controlar(&Controle::Cancelar, *execucao)),
-            Comando::Retomar { execucao: None } => Some(self.controlar(&Controle::Continuar, None)),
+            Comando::Retomar { execucao: None, .. } => {
+                Some(self.controlar(&Controle::Continuar, None))
+            }
             // Com id: retoma o trabalho pausado em memória; senão é retomada de execução
             // gravada no Catálogo, que vai à fila como qualquer varredura.
-            Comando::Retomar { execucao: Some(id) } => {
+            Comando::Retomar {
+                execucao: Some(id), ..
+            } => {
                 let e = travar(&self.estado);
                 let pausado = e.ocupacao == Ocupacao::Trabalho
                     && self.controle.estado() == EstadoControle::Pausado

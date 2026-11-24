@@ -119,6 +119,12 @@ pub fn resumir(r: &Resposta) -> String {
         Resposta::RelatorioExportado {
             caminho, linhas, ..
         } => format!("Relatório gravado em {caminho} ({linhas} linha(s))."),
+        Resposta::ConfigHash {
+            threads_por_disco,
+            max_discos,
+        } => format!(
+            "Hash Completo: {threads_por_disco} thread(s) por disco, até {max_discos} disco(s) em paralelo."
+        ),
         Resposta::Verificacao { .. } => "Verificação de Integridade concluída.".into(),
         Resposta::Erro { codigo, mensagem } => format!("Erro ({codigo}): {mensagem}"),
     }

@@ -36,9 +36,9 @@ Com o serviço (daemon) ativo, o MCP conversa com ele pelo socket local. Sem dae
 | Ferramenta | O que faz | Argumentos |
 |---|---|---|
 | `listar_volumes` | Volumes conhecidos | — |
-| `scan_full` | Full Scan (inventário, hash, duplicados, reavaliação) | `raizes` (obrigatório), `sem_hash`, `releitura_total` (lê tudo de novo) |
-| `scan_fast` | Fast Scan (reconcilia) | `raizes`, `sem_hash` |
-| `retomar` / `pausar` / `cancelar` | Controle de execução | `execucao` |
+| `scan_full` | Full Scan (inventário, hash, duplicados, reavaliação) | `raizes` (obrigatório), `sem_hash`, `releitura_total` (lê tudo de novo), `threads_por_disco`, `max_discos` |
+| `scan_fast` | Fast Scan (reconcilia) | `raizes`, `sem_hash`, `threads_por_disco`, `max_discos` |
+| `retomar` / `pausar` / `cancelar` | Controle de execução (`retomar` também aceita `threads_por_disco`, `max_discos` para execução gravada) | `execucao` |
 | `status` | Progresso (com "interrompida, retomando"), totais, saúde do monitor e Ponto de Confiança por Raiz | `execucao` |
 | `explorar` | Filhos de uma pasta, do maior para o menor | `pasta`, `limite`, `cursor` |
 | `listar_duplicados` | Grupos de duplicados paginados | `volume`, `tamanho_minimo`, `ordem`, `limite`, `cursor` |
@@ -48,10 +48,14 @@ Com o serviço (daemon) ativo, o MCP conversa com ele pelo socket local. Sem dae
 | `confirmar_marcacao` | Reconfirma Marcação Pendente | `marcacao` |
 | `definir_prioridade` | Prioridade de Volume | `ordem` |
 | `relatorio` | Cobertura, sem cobertura, espaço, marcações | `tipo`, `nivel`, `saida`, `limite`, `cursor` |
-| `verificar_integridade` | Verificação de Integridade | `raizes` |
+| `verificar_integridade` | Verificação de Integridade | `raizes`, `threads_por_disco`, `max_discos` |
+| `config_hash_obter` | Paralelismo padrão do Hash Completo persistido (padrão 1 thread por disco, 16 discos) | — |
+| `config_hash_definir` | Grava o paralelismo padrão (vale na próxima execução ou retomada) | `threads_por_disco` (1..8), `max_discos` (1..16) |
 | `eventos` / `saude_monitor` | Eventos persistidos e saúde do monitor | `limite` |
 | `servico` | `instalar`, `remover`, `iniciar`, `parar`, `autostart` | `acao`, `ativo` |
 | `backup_catalogo` | Backup consistente do Catálogo | `destino` |
+
+Paralelismo do hash: valor do pedido > flag do agente (`dag agente --threads-por-disco/--max-discos`) > valor persistido (`config_hash_definir`) > padrão (1 por disco, 16 discos). Fora da faixa dá erro. HDD: 1 é o melhor; SSD/NVMe podem ganhar com 2 a 4. Uma execução em andamento mantém o valor com que começou; a mudança vale na próxima execução ou retomada.
 
 `alvo.tipo` é `caminho`, `arquivo` (id), `grupo` (id), `volume` ou `pasta`. O monitoramento contínuo (`dag monitorar`) fica só na CLI, pois roda em primeiro plano até Ctrl-C.
 

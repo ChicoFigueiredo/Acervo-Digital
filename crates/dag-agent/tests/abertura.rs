@@ -76,6 +76,8 @@ fn scan_full(t: &T) -> Comando {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 
@@ -286,6 +288,8 @@ fn retomada_automatica_desligada_so_marca_interrompida_com_a_flag_desligada() {
     // O usuário ainda retoma na mão.
     let r = a.executar(Comando::Retomar {
         execucao: Some(dag_core::ExecucaoId(id)),
+        threads_por_disco: None,
+        max_discos: None,
     });
     assert_eq!(bytes_lidos_do_hash(&r).0, 2);
 }
@@ -426,6 +430,8 @@ fn full_scan_explicito_com_hash_rele_tudo() {
         sem_hash,
         elevar,
         releitura_total: true,
+        threads_por_disco: None,
+        max_discos: None,
     });
     assert_eq!(bytes_lidos_do_hash(&total), (4, 26_000));
 }

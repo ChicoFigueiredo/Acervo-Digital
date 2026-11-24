@@ -5,6 +5,7 @@
 //! O worker é o único escritor; a GUI e a CLI leem pela conexão de leitura (WAL).
 
 pub mod confianca;
+pub mod configuracao;
 pub mod consulta_gui;
 pub mod duplicados;
 pub mod hashes;
@@ -34,6 +35,14 @@ pub const MIGRACOES: &[Migracao] = &[
     Migracao::sql(
         "retomada automática de execuções interrompidas e Ponto de Confiança por Raiz",
         include_str!("../migrations/0004_retomada_e_confianca.sql"),
+    ),
+    Migracao::sql(
+        "configurações do usuário (chave/valor), p. ex. paralelismo do Hash Completo",
+        include_str!("../migrations/0005_configuracoes.sql"),
+    ),
+    Migracao::sql(
+        "fila de hash com volume_id denormalizado e índice por volume",
+        include_str!("../migrations/0006_fila_hash_volume.sql"),
     ),
 ];
 

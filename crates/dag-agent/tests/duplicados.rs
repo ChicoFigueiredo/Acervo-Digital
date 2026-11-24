@@ -57,6 +57,8 @@ fn scan(raizes: &[&Path], sem_hash: bool) -> Comando {
         sem_hash,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 
@@ -423,7 +425,11 @@ fn verificar_integridade_pelo_agente() {
     let t = arvore();
     let mut a = agente(&t);
     a.executar(scan(&[&t.raiz], false));
-    let r = a.executar(Comando::VerificarIntegridade { raizes: vec![] });
+    let r = a.executar(Comando::VerificarIntegridade {
+        raizes: vec![],
+        threads_por_disco: None,
+        max_discos: None,
+    });
     let Resposta::Verificacao { resumo } = r else {
         panic!("{r:?}")
     };
@@ -444,6 +450,8 @@ fn verificar_integridade_pelo_agente() {
         .unwrap();
     let r = a.executar(Comando::VerificarIntegridade {
         raizes: vec![t.raiz.to_str().unwrap().into()],
+        threads_por_disco: None,
+        max_discos: None,
     });
     let Resposta::Verificacao { resumo } = r else {
         panic!("{r:?}")

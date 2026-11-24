@@ -10,6 +10,7 @@ publish.workspace = true
 bancada-casca.workspace = true
 dag-agent.workspace = true
 dag-core.workspace = true
+dag-platform-linux.workspace = true
 dag-scanner.workspace = true
 dag-store.workspace = true
 rusqlite.workspace = true

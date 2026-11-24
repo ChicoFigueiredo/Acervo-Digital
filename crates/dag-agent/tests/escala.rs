@@ -422,6 +422,8 @@ fn escala_full() {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     });
     relatar_scan(
         "Full Scan + hash + duplicados",
@@ -509,6 +511,8 @@ fn escala_fast() {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     });
     relatar_scan(
         "Fast Scan (~0,1% de mudanças)",

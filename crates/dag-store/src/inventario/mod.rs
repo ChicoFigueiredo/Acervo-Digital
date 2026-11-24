@@ -433,14 +433,12 @@ pub fn detectar_interrompidas(
         .into_iter()
         .map(|(i, m, r, f)| (i, m, r, f, true)),
     );
-    let tem_fila: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM fila_hash WHERE tipo = 'hash'
-                        AND state IN ('pendente','em_andamento','pausado'))",
-        [],
-        |l| l.get(0),
-    )?;
-    let hash_parado: Option<(i64, String, String, String)> = if tem_fila {
-        conn.query_row(
+    // Hash parado: a execução terminou o inventário mas a etapa de hash nunca chegou à fase
+    // final (`concluida`). Vale com ou sem linhas na fila persistente: a fila é reconstruída a
+    // partir dos arquivos sem hash válido (estado deixado pelo binário antigo, fila esvaziada,
+    // queda de energia). Parada deliberada (usuário cancelou o hash) não conta.
+    let hash_parado: Option<(i64, String, String, String)> = conn
+        .query_row(
             "SELECT id, mode, roots, phase FROM scan_runs
              WHERE phase = 'hash' AND status IN ('concluida','concluida_com_erros')
                AND mode IN ('full','fast') AND parada_deliberada = 0
@@ -448,10 +446,7 @@ pub fn detectar_interrompidas(
             [],
             |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?)),
         )
-        .optional()?
-    } else {
-        None
-    };
+        .optional()?;
     for (id, modo, raizes, fase, no_inventario) in candidatas {
         conn.execute(
             "UPDATE scan_runs SET status = 'interrompida', ended_at = COALESCE(ended_at, ?2)

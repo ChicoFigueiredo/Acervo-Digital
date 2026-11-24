@@ -11,21 +11,22 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use dag_core::Plataforma as _;
 use dag_core::{
     Alvo, Autor, ClasseVolume, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId,
-    FaseInventario, ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario,
-    Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
-    ResumoVerificacao, SaudeMonitorInfo, StatusConfianca, StatusDiscoHash, StatusExecucao,
-    StatusHash, TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId,
-    VolumeInfo,
+    FaseInventario, ModoVarredura, OpcoesHash, OrdemDuplicados, Pedido, Progresso,
+    ProgressoInventario, Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo,
+    ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo, StatusConfianca, StatusDiscoHash,
+    StatusExecucao, StatusHash, TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto,
+    VolumeId, VolumeInfo,
 };
 use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::PlataformaLinux;
 use dag_scanner::{
-    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan,
+    ConfigHash, ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan,
     Progresso as ProgressoScanner, ProgressoHash as ProgressoHashScanner, ResultadoScan,
     VerificacaoIntegridade,
 };
 use dag_store::Catalogo;
 use dag_store::confianca;
+use dag_store::configuracao;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
 use dag_store::hashes;
 use dag_store::inventario::{self, EstadoScan, FaseScan};
@@ -68,6 +69,10 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::Relatorio { .. }
             | Comando::Eventos { .. }
             | Comando::SaudeMonitor
+            | Comando::ConfigHash {
+                threads_por_disco: None,
+                max_discos: None
+            }
     )
 }
 
@@ -96,6 +101,8 @@ pub struct Agente {
     progresso: Option<CallbackProgresso>,
     volumes_fixos: Option<Vec<VolumeDescoberto>>,
     autor: Autor,
+    /// Paralelismo do hash dado por flag do agente (vence o persistido, perde para o pedido).
+    opcoes_hash: OpcoesHash,
 }
 
 impl fmt::Debug for Agente {
@@ -156,7 +163,24 @@ impl Agente {
             progresso: Some(progresso_stderr()),
             volumes_fixos: None,
             autor: Autor::Cli,
+            opcoes_hash: OpcoesHash::default(),
         }
+    }
+
+    /// Paralelismo do Hash Completo vindo de flag do agente (`--threads-por-disco`,
+    /// `--max-discos`). Precedência: pedido > flag do agente > persistido > padrão.
+    ///
+    /// # Errors
+    /// Valor fora da faixa (1..=8 threads, 1..=16 discos).
+    pub fn com_opcoes_hash(mut self, o: OpcoesHash) -> Result<Self, ErroAgente> {
+        o.validar().map_err(ErroAgente::Invalido)?;
+        self.opcoes_hash = o;
+        Ok(self)
+    }
+
+    /// Configuração efetiva do hash para uma execução: pedido > agente > persistido > padrão.
+    fn config_hash(&self, pedido: OpcoesHash) -> Result<ConfigHash, ErroAgente> {
+        config_hash_efetiva(self.catalogo.armazem().conexao(), pedido, self.opcoes_hash)
     }
 
     /// Quem originou os pedidos (gravado no histórico de Marcações). Padrão: CLI.
@@ -269,15 +293,36 @@ impl Agente {
                 raizes,
                 sem_hash,
                 elevar,
+                threads_por_disco,
+                max_discos,
                 ..
-            } => self.fast_scan(&raizes, sem_hash, elevar),
+            } => self.fast_scan(
+                &raizes,
+                sem_hash,
+                elevar,
+                OpcoesHash {
+                    threads_por_disco,
+                    max_discos,
+                },
+            ),
             Comando::IniciarScan {
                 raizes,
                 sem_hash,
                 elevar,
                 releitura_total,
+                threads_por_disco,
+                max_discos,
                 ..
-            } => self.full_scan(&raizes, sem_hash, elevar, releitura_total),
+            } => self.full_scan(
+                &raizes,
+                sem_hash,
+                elevar,
+                releitura_total,
+                OpcoesHash {
+                    threads_por_disco,
+                    max_discos,
+                },
+            ),
             Comando::Monitorar {
                 raizes,
                 reconciliar_a_cada_s,
@@ -288,9 +333,17 @@ impl Agente {
                 saude: self.saude_monitor()?,
             }),
             Comando::Retomar {
-                execucao: Some(id), ..
-            } => self.retomar_scan(id),
-            Comando::Retomar { execucao: None } => Err(ErroAgente::Invalido(
+                execucao: Some(id),
+                threads_por_disco,
+                max_discos,
+            } => self.retomar_scan(
+                id,
+                OpcoesHash {
+                    threads_por_disco,
+                    max_discos,
+                },
+            ),
+            Comando::Retomar { execucao: None, .. } => Err(ErroAgente::Invalido(
                 "informe a execução a retomar (ex.: `dag scan --retomar <id>`)".into(),
             )),
             Comando::Status { execucao } => self.status(execucao),
@@ -361,7 +414,24 @@ impl Agente {
                 cursor,
                 saida,
             } => self.relatorio(tipo, nivel, limite, cursor.as_deref(), saida.as_deref()),
-            Comando::VerificarIntegridade { raizes } => self.verificar(&raizes),
+            Comando::VerificarIntegridade {
+                raizes,
+                threads_por_disco,
+                max_discos,
+            } => self.verificar(
+                &raizes,
+                OpcoesHash {
+                    threads_por_disco,
+                    max_discos,
+                },
+            ),
+            Comando::ConfigHash {
+                threads_por_disco,
+                max_discos,
+            } => self.configurar_hash(OpcoesHash {
+                threads_por_disco,
+                max_discos,
+            }),
             // Controlam um trabalho em andamento: só fazem sentido num agente em segundo plano
             // (que os atende fora da fila). Em processo, nada roda concorrentemente.
             Comando::Pausar { .. } | Comando::Cancelar { .. } => Err(ErroAgente::SemAgente),
@@ -507,13 +577,15 @@ impl Agente {
         sem_hash: bool,
         elevar: bool,
         releitura_total: bool,
+        opcoes: OpcoesHash,
     ) -> Result<Resposta, ErroAgente> {
         if raizes.is_empty() {
             return Err(ErroAgente::Invalido("informe ao menos uma raiz".into()));
         }
+        self.config_hash(opcoes)?;
         let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect(), elevar)?;
         let r = scan.executar(&mut self.catalogo)?;
-        self.concluir_scan(r, sem_hash, releitura_total)
+        self.concluir_scan(r, sem_hash, releitura_total, opcoes)
     }
 
     /// Fast Scan (A-12): reconcilia o Catálogo com o disco reaproveitando metadados e hash do
@@ -523,7 +595,9 @@ impl Agente {
         raizes: &[String],
         sem_hash: bool,
         elevar: bool,
+        opcoes: OpcoesHash,
     ) -> Result<Resposta, ErroAgente> {
+        self.config_hash(opcoes)?;
         let raizes: Vec<PathBuf> = if raizes.is_empty() {
             self.raizes_padrao()?
         } else {
@@ -541,7 +615,7 @@ impl Agente {
             scan = scan.com_progresso(move |x| p(&Progresso::Reconciliacao(inventario_de(x))));
         }
         let r = scan.executar(&mut self.catalogo)?;
-        self.concluir_scan(r, sem_hash, false)
+        self.concluir_scan(r, sem_hash, false, opcoes)
     }
 
     /// Raízes já catalogadas cujo Volume está conectado e cujo caminho ainda pertence a ele
@@ -627,8 +701,9 @@ impl Agente {
         .com_classificador(Arc::new(ClassificadorPorExtensao));
         if !sem_hash {
             let autor = self.autor;
+            let agente = self.opcoes_hash;
             monitor = monitor.com_pos_reconciliacao(move |cat, execucoes| {
-                pos_reconciliacao(cat, execucoes, autor).map_err(|e| e.to_string())
+                pos_reconciliacao(cat, execucoes, autor, agente).map_err(|e| e.to_string())
             });
         }
         self.mensagem("monitorando (Ctrl-C para encerrar)...");
@@ -702,10 +777,17 @@ impl Agente {
         })
     }
 
-    pub(crate) fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
+    /// Retoma uma execução gravada; o paralelismo do hash é o vigente agora (pedido > agente >
+    /// persistido > padrão), não o da execução original.
+    pub(crate) fn retomar_scan(
+        &mut self,
+        id: ExecucaoId,
+        opcoes: OpcoesHash,
+    ) -> Result<Resposta, ErroAgente> {
+        self.config_hash(opcoes)?;
         let scan = self.novo_scan(Vec::new(), false)?;
         let r = scan.retomar(&mut self.catalogo, id.0)?;
-        self.concluir_scan(r, false, false)
+        self.concluir_scan(r, false, false, opcoes)
     }
 
     /// Pós-inventário: classificação por caminho, Hash Completo, reconstrução dos Grupos de
@@ -719,6 +801,7 @@ impl Agente {
         r: ResultadoScan,
         sem_hash: bool,
         releitura_total: bool,
+        opcoes: OpcoesHash,
     ) -> Result<Resposta, ErroAgente> {
         let mut desfecho = match r.desfecho {
             DesfechoScan::Concluida => "concluida",
@@ -735,8 +818,10 @@ impl Agente {
                 if releitura_total {
                     hashes::invalidar_evidencia(self.catalogo.armazem().conexao(), r.execucao_id)?;
                 }
-                let mut etapa =
-                    EtapaHash::nova(ExecucaoId(r.execucao_id)).com_controle(self.controle.clone());
+                let cfg = self.config_hash(opcoes)?;
+                let mut etapa = EtapaHash::nova(ExecucaoId(r.execucao_id))
+                    .com_config(cfg)
+                    .com_controle(self.controle.clone());
                 if let Some(p) = &self.progresso {
                     etapa = etapa.com_progresso(sink_hash(Arc::clone(p), false));
                 }
@@ -889,9 +974,29 @@ impl Agente {
         })
     }
 
+    /// Consulta (sem campos) ou grava o paralelismo padrão do hash no Catálogo. Vale a partir
+    /// da próxima execução ou retomada; a que está rodando mantém o valor com que começou.
+    fn configurar_hash(&mut self, novas: OpcoesHash) -> Result<Resposta, ErroAgente> {
+        novas.validar().map_err(ErroAgente::Invalido)?;
+        let con = self.catalogo.armazem().conexao();
+        if !novas.vazia() {
+            configuracao::gravar_hash(con, &novas)?;
+        }
+        let p = configuracao::ler_hash(con)?
+            .resolver()
+            .map_err(ErroAgente::Invalido)?;
+        Ok(Resposta::ConfigHash {
+            threads_por_disco: p.threads_por_disco,
+            max_discos: p.max_discos,
+        })
+    }
+
     /// Verificação de Integridade: relê arquivos já hasheados e compara com o hash guardado.
-    fn verificar(&mut self, raizes: &[String]) -> Result<Resposta, ErroAgente> {
-        let mut v = VerificacaoIntegridade::nova().com_controle(self.controle.clone());
+    fn verificar(&mut self, raizes: &[String], opcoes: OpcoesHash) -> Result<Resposta, ErroAgente> {
+        let cfg = self.config_hash(opcoes)?;
+        let mut v = VerificacaoIntegridade::nova()
+            .com_config(cfg)
+            .com_controle(self.controle.clone());
         if !raizes.is_empty() {
             v = v.raizes(raizes.iter().map(PathBuf::from));
         }
@@ -1038,14 +1143,35 @@ fn pos_reconciliacao(
     cat: &mut Catalogo,
     execucoes: &[i64],
     autor: Autor,
+    agente: OpcoesHash,
 ) -> Result<(), ErroAgente> {
     for id in execucoes {
-        EtapaHash::nova(ExecucaoId(*id)).executar(cat)?;
+        // Lê o persistido a cada passada: mudança de configuração vale na próxima.
+        let cfg = config_hash_efetiva(cat.armazem().conexao(), OpcoesHash::default(), agente)?;
+        EtapaHash::nova(ExecucaoId(*id))
+            .com_config(cfg)
+            .executar(cat)?;
     }
     let t = agora();
     duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
     duplicados::reavaliar_marcacoes(cat, autor, t)?;
     Ok(())
+}
+
+/// Precedência pedido > agente > persistido > padrão, já no formato do scanner.
+fn config_hash_efetiva(
+    conn: &Connection,
+    pedido: OpcoesHash,
+    agente: OpcoesHash,
+) -> Result<ConfigHash, ErroAgente> {
+    let persistido = configuracao::ler_hash(conn)?;
+    let p =
+        dag_core::resolver_precedencia(pedido, agente, persistido).map_err(ErroAgente::Invalido)?;
+    Ok(ConfigHash {
+        threads_por_disco: p.threads_por_disco as usize,
+        max_discos: p.max_discos as usize,
+        ..ConfigHash::default()
+    })
 }
 
 fn resumo_reconciliacao(r: &dag_scanner::ResumoFast) -> ResumoReconciliacao {

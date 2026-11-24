@@ -18,7 +18,9 @@ use dag_store::consulta_gui::{self, TotaisCatalogo};
 use crate::confirmacao::{AcaoMarcacao, AlvoAcao, planejar};
 use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::leitor::{Acordador, Carga, Leitor, erro};
-use crate::paginas::{self, DefPagina, analise, discos, duplicados, explorador, varredura};
+use crate::paginas::{
+    self, DefPagina, analise, configuracoes, discos, duplicados, explorador, varredura,
+};
 use crate::progresso::{AndamentoHash, FaseScan, ProgressoScan, restante_estimado, taxa_do_hash};
 use crate::selecao::Classificacao;
 use crate::worker::{ConfigWorker, Evento, ModoWorker, Worker};
@@ -74,9 +76,13 @@ pub struct Aviso {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Proposito {
     Volumes,
-    Scan { sem_hash: bool },
+    Scan {
+        sem_hash: bool,
+    },
     Marcacao(AcaoMarcacao),
     Exportar,
+    /// Salvar o paralelismo do hash em Configurações.
+    ConfigHash,
 }
 
 /// Varredura em andamento, vista pela GUI.
@@ -89,7 +95,13 @@ pub struct ScanAtivo {
     /// Último progresso do hash (arquivos e bytes), vindo do agente.
     pub bytes_hash: Option<dag_core::ProgressoHash>,
     pub amostras_hash: Vec<(AndamentoHash, Duration)>,
+    /// Etapa da recuperação ao abrir (retomada de execução interrompida, verificação); `Some`
+    /// só no pseudo-pedido [`PEDIDO_ABERTURA`].
+    pub abertura: Option<String>,
 }
+
+/// Id do pseudo-pedido que representa a recuperação ao abrir (os pedidos reais começam em 1).
+pub const PEDIDO_ABERTURA: u64 = 0;
 
 impl ScanAtivo {
     fn novo(pedido: u64, sem_hash: bool) -> Self {
@@ -100,6 +112,7 @@ impl ScanAtivo {
             progresso: None,
             bytes_hash: None,
             amostras_hash: Vec::new(),
+            abertura: None,
         }
     }
 
@@ -164,10 +177,13 @@ pub struct AppDag {
     /// Classe dos volumes (física, imagem...), vinda de `ListarVolumes`.
     pub classificacao: Classificacao,
     classificacao_pedida: bool,
+    /// Descoberta direta de volumes (thread própria, sem Catálogo nem worker).
+    descoberta: Option<std::sync::mpsc::Receiver<Vec<dag_core::VolumeDescoberto>>>,
     pub varredura: varredura::Estado,
     pub explorador: explorador::Estado,
     pub analise: analise::Estado,
     pub duplicados: duplicados::Estado,
+    pub configuracoes: configuracoes::Estado,
 }
 
 impl AppDag {
@@ -175,6 +191,28 @@ impl AppDag {
     #[must_use]
     pub fn novo(cfg: ConfigApp) -> Self {
         let acordador = Acordador::default();
+        // A classificação dos volumes não espera o worker (que pode estar horas numa retomada):
+        // vem da descoberta do sistema, somente leitura.
+        let mut classificacao = Classificacao::default();
+        let descoberta = match &cfg.volumes_fixos {
+            Some(v) => {
+                classificacao.aprender_descobertos(v);
+                None
+            }
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ac = acordador.clone();
+                let _ = std::thread::Builder::new()
+                    .name("dag-descoberta".into())
+                    .spawn(move || {
+                        if let Ok(v) = dag_platform_linux::descobrir_volumes() {
+                            let _ = tx.send(v);
+                            ac.acordar();
+                        }
+                    });
+                Some(rx)
+            }
+        };
         let worker = Worker::iniciar(
             ConfigWorker {
                 caminho: cfg.caminho.clone(),
@@ -198,12 +236,14 @@ impl AppDag {
             totais: Carga::default(),
             totais_geracao: 0,
             discos: discos::Estado::default(),
-            classificacao: Classificacao::default(),
+            classificacao,
             classificacao_pedida: false,
+            descoberta,
             varredura: varredura::Estado::default(),
             explorador: explorador::Estado::default(),
             analise: analise::Estado::default(),
             duplicados: duplicados::Estado::default(),
+            configuracoes: configuracoes::Estado::default(),
         }
     }
 
@@ -229,6 +269,28 @@ impl AppDag {
         } else {
             None
         }
+    }
+
+    /// Salvar configurações só exige ser o escritor (durante uma varredura o worker grava ao
+    /// terminar; o valor vale da próxima execução em diante).
+    #[must_use]
+    pub fn motivo_sem_escrita_config(&self) -> Option<&'static str> {
+        (!self.pode_escrever()).then_some(MOTIVO_SEM_ESCRITA)
+    }
+
+    /// Grava o paralelismo do hash (1..=8 threads por disco, 1..=16 discos).
+    pub fn salvar_config_hash(&mut self, threads_por_disco: u32, max_discos: u32) {
+        if let Some(m) = self.motivo_sem_escrita_config() {
+            self.aviso(Tom::Aviso, m);
+            return;
+        }
+        self.enviar(
+            Comando::ConfigHash {
+                threads_por_disco: Some(threads_por_disco),
+                max_discos: Some(max_discos),
+            },
+            Proposito::ConfigHash,
+        );
     }
 
     #[must_use]
@@ -289,6 +351,9 @@ impl AppDag {
                 sem_hash,
                 elevar: false,
                 releitura_total: false,
+                // Sem valor no pedido: vale o padrão persistido em Configurações.
+                threads_por_disco: None,
+                max_discos: None,
             },
             Proposito::Scan { sem_hash },
         );
@@ -304,6 +369,8 @@ impl AppDag {
         let id = self.enviar(
             Comando::Retomar {
                 execucao: Some(dag_core::ExecucaoId(execucao)),
+                threads_por_disco: None,
+                max_discos: None,
             },
             Proposito::Scan { sem_hash: false },
         );
@@ -356,6 +423,12 @@ impl AppDag {
 
     /// Processa o que chegou do worker e inicia leituras pendentes. Chamado todo quadro.
     pub fn processar_eventos(&mut self) {
+        if let Some(rx) = &self.descoberta
+            && let Ok(v) = rx.try_recv()
+        {
+            self.classificacao.aprender_descobertos(&v);
+            self.descoberta = None;
+        }
         for e in self.worker.drenar() {
             match e {
                 Evento::Modo(m) => {
@@ -373,6 +446,24 @@ impl AppDag {
                 }
                 Evento::Iniciado { .. } => {}
                 Evento::Abertura { texto, fim } => {
+                    // A recuperação ao abrir é uma execução em andamento para a GUI: aparece em
+                    // Varredura e na barra de status, e Pausar/Cancelar valem para ela.
+                    if fim {
+                        if self
+                            .scan
+                            .as_ref()
+                            .is_some_and(|s| s.pedido == PEDIDO_ABERTURA)
+                        {
+                            self.scan = None;
+                        }
+                    } else {
+                        let s = self
+                            .scan
+                            .get_or_insert_with(|| ScanAtivo::novo(PEDIDO_ABERTURA, false));
+                        if s.pedido == PEDIDO_ABERTURA {
+                            s.abertura = Some(texto.clone());
+                        }
+                    }
                     // Em andamento: faixa de aviso; o relatório final a substitui.
                     self.avisos
                         .retain(|a| !a.texto.starts_with(PREFIXO_ABERTURA));
@@ -519,6 +610,18 @@ impl AppDag {
                 if matches!(proposito, Some(Proposito::Marcacao(_))) {
                     self.aviso(Tom::Sucesso, "Cópia Principal definida.");
                 }
+                self.invalidar();
+            }
+            Resposta::ConfigHash {
+                threads_por_disco,
+                max_discos,
+            } => {
+                self.aviso(
+                    Tom::Sucesso,
+                    format!(
+                        "Hash: {threads_por_disco} thread(s) por disco, {max_discos} disco(s) em paralelo. Vale a partir da próxima varredura ou retomada."
+                    ),
+                );
                 self.invalidar();
             }
             Resposta::RelatorioExportado {
@@ -722,6 +825,20 @@ impl AppDag {
             return SegmentoStatus::novo("fase", "Varredura: ociosa");
         };
         let pausado = self.estado_do_scan() == Some(EstadoControle::Pausado);
+        if let Some(etapa) = &s.abertura {
+            let pct = s
+                .andamento_hash()
+                .filter(|h| h.total > 0)
+                .map(|h| format!(" ({}%)", h.concluidos * 100 / h.total))
+                .unwrap_or_default();
+            let t = format!(
+                "Varredura: {etapa}{pct}{}",
+                if pausado { " — pausada" } else { "" }
+            );
+            return SegmentoStatus::novo("fase", t)
+                .tom(if pausado { Tom::Aviso } else { Tom::Info })
+                .dica("Recuperação ao abrir o Catálogo; veja a página Varredura");
+        }
         let fase = crate::progresso::fase_texto(s.fase(), pausado, s.sem_hash);
         let detalhe = match (&s.progresso, s.andamento_hash()) {
             (_, Some(h)) if s.fase() == Some(FaseScan::Concluido) && !s.sem_hash => format!(
@@ -895,7 +1012,11 @@ mod testes {
     /// Processa eventos até o worker abrir o Catálogo.
     fn esperar_worker(app: &mut AppDag) {
         let fim = Instant::now() + Duration::from_secs(30);
-        while *app.worker.modo() == ModoWorker::Iniciando && Instant::now() < fim {
+        let abrindo = |a: &AppDag| {
+            *a.worker.modo() == ModoWorker::Iniciando
+                || a.scan.as_ref().is_some_and(|s| s.pedido == PEDIDO_ABERTURA)
+        };
+        while abrindo(app) && Instant::now() < fim {
             app.processar_eventos();
             std::thread::sleep(Duration::from_millis(10));
         }

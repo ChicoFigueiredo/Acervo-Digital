@@ -141,6 +141,24 @@ enum NivelArg {
     Grupo,
 }
 
+/// Paralelismo do Hash Completo (vence a flag do agente e o valor persistido).
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+struct ArgsHash {
+    /// Leitores simultâneos por disco no Hash Completo (1 a 8; padrão 1: o melhor para HDD)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=8))]
+    threads_por_disco: Option<u32>,
+    /// Discos lendo ao mesmo tempo no Hash Completo (1 a 16; padrão 16)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=16))]
+    max_discos: Option<u32>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Config {
+    /// Mostra ou define o paralelismo padrão do Hash Completo (persistido no Catálogo; vale a
+    /// partir da próxima execução ou retomada)
+    Hash(ArgsHash),
+}
+
 #[derive(Subcommand, Debug)]
 enum Sub {
     /// Lista Volumes (padrão: só os reais: físicos, removíveis e de rede)
@@ -171,6 +189,8 @@ enum Sub {
         /// Retoma a execução ID (cancelada, pausada ou interrompida)
         #[arg(long, value_name = "ID", conflicts_with_all = ["full", "fast", "raizes"])]
         retomar: Option<i64>,
+        #[command(flatten)]
+        hash: ArgsHash,
         /// Raízes da varredura
         /// (Fast Scan sem raízes: todas as raízes já varridas)
         #[arg(required_unless_present_any = ["retomar", "fast"])]
@@ -278,7 +298,12 @@ enum Sub {
     Verificar {
         /// Raízes (padrão: todas)
         raizes: Vec<String>,
+        #[command(flatten)]
+        hash: ArgsHash,
     },
+    /// Configurações persistidas no Catálogo
+    #[command(subcommand)]
+    Config(Config),
     /// Gerencia o serviço em segundo plano
     #[command(subcommand)]
     Servico(Servico),
@@ -304,6 +329,9 @@ enum Sub {
         /// Teto de passadas de verificação por abertura até uma passada sem mudanças
         #[arg(long, value_name = "N", default_value_t = 3)]
         max_passadas: u32,
+        /// Leitores por disco no hash deste agente (vence o persistido; o pedido vence este)
+        #[command(flatten)]
+        hash: ArgsHash,
     },
 }
 
@@ -375,9 +403,13 @@ fn montar(sub: Sub) -> Option<Comando> {
     Some(match sub {
         Sub::Volumes { .. } => Comando::ListarVolumes,
         Sub::Scan {
-            retomar: Some(id), ..
+            retomar: Some(id),
+            hash,
+            ..
         } => Comando::Retomar {
             execucao: Some(ExecucaoId(id)),
+            threads_por_disco: hash.threads_por_disco,
+            max_discos: hash.max_discos,
         },
         Sub::Scan {
             full,
@@ -385,6 +417,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             sem_hash,
             elevar,
             reler_tudo,
+            hash,
             ..
         } => Comando::IniciarScan {
             modo: if full {
@@ -396,6 +429,8 @@ fn montar(sub: Sub) -> Option<Comando> {
             sem_hash,
             elevar,
             releitura_total: reler_tudo,
+            threads_por_disco: hash.threads_por_disco,
+            max_discos: hash.max_discos,
         },
         Sub::Monitorar {
             raizes,
@@ -417,7 +452,11 @@ fn montar(sub: Sub) -> Option<Comando> {
             cursor,
         },
         Sub::Pausar(a) => Comando::Pausar { execucao: exec(&a) },
-        Sub::Retomar(a) => Comando::Retomar { execucao: exec(&a) },
+        Sub::Retomar(a) => Comando::Retomar {
+            execucao: exec(&a),
+            threads_por_disco: None,
+            max_discos: None,
+        },
         Sub::Cancelar(a) => Comando::Cancelar { execucao: exec(&a) },
         Sub::Status(a) => Comando::Status { execucao: exec(&a) },
         Sub::Duplicados {
@@ -479,8 +518,14 @@ fn montar(sub: Sub) -> Option<Comando> {
             cursor,
             saida: saida.map(|p| absoluto(&p.to_string_lossy())),
         },
-        Sub::Verificar { raizes } => Comando::VerificarIntegridade {
+        Sub::Verificar { raizes, hash } => Comando::VerificarIntegridade {
             raizes: raizes.iter().map(|r| absoluto(r)).collect(),
+            threads_por_disco: hash.threads_por_disco,
+            max_discos: hash.max_discos,
+        },
+        Sub::Config(Config::Hash(h)) => Comando::ConfigHash {
+            threads_por_disco: h.threads_por_disco,
+            max_discos: h.max_discos,
         },
         Sub::Servico(s) => Comando::Servico {
             acao: match s {
@@ -590,6 +635,7 @@ fn rodar_agente(
     socket: Option<PathBuf>,
     sem_monitor: bool,
     abertura: dag_agent::PoliticaAbertura,
+    hash: ArgsHash,
 ) -> ExitCode {
     let falha = |e: &dyn std::fmt::Display| {
         eprintln!("erro: {e}");
@@ -603,6 +649,10 @@ fn rodar_agente(
     let mut cfg = ConfigServidor::novo(caminho, socket);
     cfg.monitor = !sem_monitor;
     cfg.abertura = abertura;
+    cfg.opcoes_hash = dag_core::OpcoesHash {
+        threads_por_disco: hash.threads_por_disco,
+        max_discos: hash.max_discos,
+    };
     let servidor = match Servidor::iniciar(cfg) {
         Ok(s) => s,
         Err(e) => return falha(&e),
@@ -681,6 +731,7 @@ fn main() -> ExitCode {
         sem_retomar_automatico,
         verificar_ao_abrir,
         max_passadas,
+        hash,
     } = cli.comando
     {
         let abertura = dag_agent::PoliticaAbertura {
@@ -689,7 +740,13 @@ fn main() -> ExitCode {
             max_passadas,
             monitor_ativo: false,
         };
-        return rodar_agente(cli.catalogo.as_deref(), cli.socket, sem_monitor, abertura);
+        return rodar_agente(
+            cli.catalogo.as_deref(),
+            cli.socket,
+            sem_monitor,
+            abertura,
+            hash,
+        );
     }
     let json = cli.json;
     let todos = matches!(cli.comando, Sub::Volumes { todos: true });

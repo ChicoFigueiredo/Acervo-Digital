@@ -142,7 +142,9 @@ fn chamadas_montam_comando_com_autor_mcp() {
             raizes: vec!["/x".into()],
             sem_hash: true,
             elevar: false,
-            releitura_total: false
+            releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         }
     );
     let (c, _) = comando_de("scan_fast", json!({}));
@@ -153,7 +155,9 @@ fn chamadas_montam_comando_com_autor_mcp() {
             raizes: vec![],
             sem_hash: false,
             elevar: false,
-            releitura_total: false
+            releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         }
     );
     let (c, _) = comando_de("marcar_delecao", json!({"alvo":{"tipo":"grupo","valor":3}}));
@@ -227,7 +231,14 @@ fn chamadas_montam_comando_com_autor_mcp() {
         }
     );
     let (c, _) = comando_de("verificar_integridade", json!({}));
-    assert_eq!(c, Comando::VerificarIntegridade { raizes: vec![] });
+    assert_eq!(
+        c,
+        Comando::VerificarIntegridade {
+            raizes: vec![],
+            threads_por_disco: None,
+            max_discos: None
+        }
+    );
     let (c, _) = comando_de("status", json!({"execucao":4}));
     assert!(matches!(c, Comando::Status { execucao: Some(_) }));
     let (c, _) = comando_de("saude_monitor", json!({}));

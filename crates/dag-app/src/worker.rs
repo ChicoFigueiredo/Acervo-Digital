@@ -174,7 +174,11 @@ impl Alca {
     fn continuar(&self) {
         self.agir(
             ControleScan::continuar,
-            Comando::Retomar { execucao: None },
+            Comando::Retomar {
+                execucao: None,
+                threads_por_disco: None,
+                max_discos: None,
+            },
             EstadoControle::Executando,
         );
     }
@@ -436,7 +440,15 @@ impl Encaminhador {
                 g.ultimo_hash = Instant::now();
                 Evento::Hash(h.clone())
             }
-            Progresso::Mensagem { .. } => return,
+            // Passos da recuperação ao abrir (retomada, passadas de verificação) viram o texto da
+            // faixa/barra de status; as demais mensagens são só do terminal.
+            Progresso::Mensagem { texto } => match texto.strip_prefix("abertura: ") {
+                Some(t) => Evento::Abertura {
+                    texto: t.to_string(),
+                    fim: false,
+                },
+                None => return,
+            },
         };
         drop(g);
         let _ = self.tx.send(ev);
@@ -610,6 +622,8 @@ mod testes {
             sem_hash: false,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         });
         let (fim, antes) = esperar_ate(
             &mut w,
@@ -689,6 +703,8 @@ mod testes {
             sem_hash: true,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         });
         let (e, _) = esperar_ate(
             &mut w,
@@ -806,6 +822,8 @@ mod testes {
             sem_hash: true,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         });
         let (e, _) = esperar_ate(
             &mut w,
@@ -859,6 +877,8 @@ mod testes {
             sem_hash: false,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         });
         let (fim, antes) = esperar_ate(
             &mut w,
@@ -911,6 +931,8 @@ mod testes {
             sem_hash: false,
             elevar: false,
             releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
         });
         // Pausa assim que o scan começa a reportar.
         esperar_ate(&mut w, |e| matches!(e, Evento::Progresso(_)));
@@ -950,6 +972,8 @@ mod testes {
                 sem_hash: false,
                 elevar: false,
                 releitura_total: false,
+                threads_por_disco: None,
+                max_discos: None,
             });
             assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
         }

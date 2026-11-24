@@ -103,7 +103,7 @@ fn ambiente_populado() -> Ambiente {
         ctx: egui::Context::default(),
     };
     a.ate("worker abrir o Catálogo", |app| {
-        *app.worker.modo() == ModoWorker::Escritor
+        *app.worker.modo() == ModoWorker::Escritor && app.scan.is_none()
     });
     a
 }
@@ -411,4 +411,94 @@ fn discos_e_varredura_com_mistura_de_volumes_reais_e_de_imagem() {
     }
     a.abrir("discos");
     a.quadro();
+}
+
+#[test]
+fn configuracoes_desenha_edita_e_persiste_o_paralelismo_do_hash() {
+    let mut a = ambiente_populado();
+    a.abrir("configuracoes");
+    // Os campos recebem o valor gravado (padrão 1 thread por disco, 16 discos).
+    a.ate("config carregar", |app| {
+        app.configuracoes.gravado.dado.is_some()
+    });
+    a.quadro();
+    assert_eq!(
+        (
+            a.casca.app.configuracoes.threads_por_disco,
+            a.casca.app.configuracoes.max_discos
+        ),
+        (1, 16)
+    );
+    a.casca.app.salvar_config_hash(3, 5);
+    a.ate("config gravar e recarregar", |app| {
+        app.configuracoes
+            .gravado
+            .dado
+            .is_some_and(|o| o.threads_por_disco == Some(3) && o.max_discos == Some(5))
+    });
+    for _ in 0..3 {
+        a.quadro();
+    }
+    assert_eq!(
+        (
+            a.casca.app.configuracoes.threads_por_disco,
+            a.casca.app.configuracoes.max_discos
+        ),
+        (3, 5)
+    );
+}
+
+#[test]
+fn abertura_retoma_hash_do_binario_antigo_e_a_gui_termina_ociosa() {
+    use dag_agent::Agente;
+    use dag_core::{Comando, ModoVarredura, Resposta};
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = fs::canonicalize(tmp.path()).unwrap().join("arvore");
+    escrever(&raiz.join("a.bin"), &[1u8; 3000]);
+    escrever(&raiz.join("b.bin"), &[2u8; 4000]);
+    let caminho = tmp.path().join("dados/catalogo.sqlite");
+    {
+        let mut ag = Agente::abrir(&caminho)
+            .unwrap()
+            .silencioso()
+            .com_volumes_fixos(vec![volume_de(&raiz)]);
+        let r = ag.executar(Comando::IniciarScan {
+            modo: ModoVarredura::FullScan,
+            raizes: vec![raiz.display().to_string()],
+            sem_hash: false,
+            elevar: false,
+            releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
+        });
+        assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    }
+    {
+        let cat = dag_store::Catalogo::abrir(&caminho).unwrap();
+        cat.armazem()
+            .conexao()
+            .execute_batch(
+                "DELETE FROM hashes; DELETE FROM fila_hash;
+                 UPDATE scan_runs SET status='concluida_com_erros', phase='hash';",
+            )
+            .unwrap();
+    }
+    let mut cfg = ConfigApp::com_caminho(caminho.clone());
+    cfg.volumes_fixos = Some(vec![volume_de(&raiz)]);
+    let casca = montar(cfg).unwrap();
+    let mut a = Ambiente {
+        _tmp: tmp,
+        raiz,
+        casca,
+        ctx: egui::Context::default(),
+    };
+    a.ate("worker abrir", |app| {
+        *app.worker.modo() == ModoWorker::Escritor
+    });
+    a.ate("abertura terminar", |app| app.scan.is_none());
+    let con = dag_store::consulta_gui::abrir_leitura(&caminho).unwrap();
+    let n: i64 = con
+        .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
+        .unwrap();
+    assert_eq!(n, 2, "a abertura retomou o hash pendente");
 }

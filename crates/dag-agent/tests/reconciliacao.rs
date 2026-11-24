@@ -71,6 +71,8 @@ fn full(t: &T) -> Comando {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 
@@ -81,6 +83,8 @@ fn fast(raizes: Vec<String>) -> Comando {
         sem_hash: false,
         elevar: false,
         releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
     }
 }
 

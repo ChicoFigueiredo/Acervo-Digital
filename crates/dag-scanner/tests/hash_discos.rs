@@ -93,6 +93,7 @@ fn mapa(volumes: &[(&str, Option<&str>)]) -> BTreeMap<String, String> {
 fn cfg() -> ConfigHash {
     ConfigHash {
         tamanho_buffer: 4096,
+        reserva_por_disco: 4,
         intervalo_de_progresso: Duration::ZERO,
         ..ConfigHash::default()
     }

@@ -151,6 +151,14 @@ const FS_IMAGEM: &[&str] = &[
     "fuse.appimage",
 ];
 
+/// AppImage montada por FUSE: o tipo é `fuse.<nome>` (às vezes com `appimage`) e o ponto de
+/// montagem é `/tmp/.mount_<nome><sufixo>`; nenhum disco real por baixo.
+fn eh_imagem_fuse(fs_type: &str, ponto: &[u8]) -> bool {
+    let tipo = fs_type.to_ascii_lowercase();
+    (tipo.starts_with("fuse.") && tipo.contains("appimage"))
+        || (tipo.starts_with("fuse") && ponto.starts_with(b"/tmp/.mount_"))
+}
+
 /// Pontos de montagem de partições de sistema (inicialização) em discos reais.
 const PONTOS_SISTEMA: &[&str] = &["/boot", "/boot/efi", "/boot/firmware", "/efi"];
 
@@ -169,12 +177,16 @@ fn classificar(
     fs_type: &str,
     pseudo: bool,
     bloco: Option<(u32, u32)>,
+    ponto: &[u8],
 ) -> ClasseVolume {
     if eh_rede(fs_type) {
         return ClasseVolume::Rede;
     }
     if pseudo {
         return ClasseVolume::Virtual;
+    }
+    if eh_imagem_fuse(fs_type, ponto) {
+        return ClasseVolume::Imagem;
     }
     let discos = bloco
         .and_then(|(a, b)| caminho_sysfs(fonte, a, b))
@@ -296,7 +308,7 @@ pub fn descobrir_volumes_com(fonte: &dyn FonteSistema) -> Result<Vec<VolumeDesco
         } else {
             bloco.and_then(|(a, b)| resolver_dispositivo(fonte, a, b))
         };
-        let classe = classificar(fonte, &fs_type, pseudo, bloco);
+        let classe = classificar(fonte, &fs_type, pseudo, bloco, &primeira.ponto_de_montagem);
         let pontos: Vec<Vec<u8>> = g
             .entradas
             .iter()
@@ -454,6 +466,32 @@ mod testes {
         // statvfs indisponível => None, nunca zero inventado.
         assert_eq!(v[0].capacidade_bytes, None);
         assert_eq!(v[0].livre_bytes, None);
+    }
+
+    #[test]
+    fn overlay_do_docker_e_virtual_e_rclone_e_rede() {
+        let mut f = FonteFalsa::default();
+        let mut mi = String::from(
+            "70 27 0:80 / /var/lib/docker/rootfs/overlayfs/abc123 rw - overlay overlay rw,lowerdir=/x\n",
+        );
+        mi.push_str("71 27 0:81 / /mnt/googledrive rw - fuse.rclone gdrive: rw\n");
+        mi.push_str("72 27 0:82 / /mnt/onedrive rw - fuse.rclone onedrive: rw\n");
+        mi.push_str("73 27 0:83 / /tmp/.mount_appXYZ rw - fuse.AppImage-x AppImage rw\n");
+        mi.push_str("74 27 0:84 / /tmp/.mount_outro ro - fuse appimage rw\n");
+        mi.push_str("75 27 0:85 / /mnt/ssh rw - fuse.sshfs u@h:/ rw\n");
+        f.arquivo("/proc/self/mountinfo", mi);
+        let c: Vec<_> = classes(&f).iter().map(|c| c.0).collect();
+        assert_eq!(
+            c,
+            vec![
+                ClasseVolume::Virtual,
+                ClasseVolume::Rede,
+                ClasseVolume::Rede,
+                ClasseVolume::Imagem,
+                ClasseVolume::Imagem,
+                ClasseVolume::Rede,
+            ]
+        );
     }
 
     #[test]

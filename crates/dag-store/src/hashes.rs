@@ -93,8 +93,8 @@ pub fn preparar_fila_hash(conn: &Connection, run_id: i64, agora: i64) -> Resulta
     let precisa_f = sem_hash_valido("f");
     let precisa_m = sem_hash_valido("m");
     let sql = format!(
-        "INSERT INTO fila_hash (file_id, tipo, state, priority, enqueued_at, updated_at)
-         SELECT f.id, 'hash', 'pendente', 0, ?2, ?2 FROM files f
+        "INSERT INTO fila_hash (file_id, tipo, state, priority, enqueued_at, updated_at, volume_id)
+         SELECT f.id, 'hash', 'pendente', 0, ?2, ?2, f.volume_id FROM files f
          WHERE f.seen_run_id = ?1 AND f.kind = 'arquivo' AND f.state = 'ativo' AND {precisa_f}
            AND NOT EXISTS (
              SELECT 1 FROM files m
@@ -105,7 +105,8 @@ pub fn preparar_fila_hash(conn: &Connection, run_id: i64, agora: i64) -> Resulta
                AND m.logical_bytes = f.logical_bytes AND m.mtime_ns IS f.mtime_ns
                AND m.ctime_ns IS f.ctime_ns AND {precisa_m})
          ON CONFLICT(file_id) DO UPDATE SET tipo = 'hash', state = 'pendente', attempt_count = 0,
-             bytes_lidos = 0, last_error = NULL, enqueued_at = ?2, updated_at = ?2"
+             bytes_lidos = 0, last_error = NULL, enqueued_at = ?2, updated_at = ?2,
+             volume_id = excluded.volume_id"
     );
     conn.execute(&sql, params![run_id, agora])?;
     let (n, bytes): (i64, i64) = conn.query_row(
@@ -163,8 +164,8 @@ pub fn enfileirar_verificacao(
         }
     };
     let sql =
-        "INSERT INTO fila_hash (file_id, tipo, state, priority, enqueued_at, updated_at)
-         SELECT f.id, 'verificacao', 'pendente', 0, ?1, ?1 FROM files f
+        "INSERT INTO fila_hash (file_id, tipo, state, priority, enqueued_at, updated_at, volume_id)
+         SELECT f.id, 'verificacao', 'pendente', 0, ?1, ?1, f.volume_id FROM files f
          JOIN hashes h ON h.file_id = f.id
          WHERE f.kind = 'arquivo' AND f.state = 'ativo'
            AND (?2 IS NULL OR f.volume_id = ?2)
@@ -178,7 +179,8 @@ pub fn enfileirar_verificacao(
                AND hm.mtime_ns IS h.mtime_ns AND hm.ctime_ns IS h.ctime_ns
                AND hm.hash = h.hash)
          ON CONFLICT(file_id) DO UPDATE SET tipo = 'verificacao', state = 'pendente',
-             attempt_count = 0, bytes_lidos = 0, last_error = NULL, enqueued_at = ?1, updated_at = ?1";
+             attempt_count = 0, bytes_lidos = 0, last_error = NULL, enqueued_at = ?1, updated_at = ?1,
+             volume_id = excluded.volume_id";
     let mut st = conn.prepare(sql)?;
     let n = st.execute(params![agora, volume, exato, prefixo])?;
     Ok(n as u64)
@@ -235,12 +237,23 @@ pub fn reservar_volumes(
     agora: i64,
 ) -> Resultado<Vec<ItemFila>> {
     let mut itens = Vec::with_capacity(limite);
-    {
-        let filtro = if volumes.is_empty() {
-            String::new()
+    // Uma consulta por volume: `fila_hash(tipo, state, volume_id, priority DESC)` entrega os
+    // itens já na ordem pedida, sem varrer nem ordenar o resto da fila. Sem filtro, vale a fila
+    // toda (caminho legado/testes).
+    let alvos: Vec<Option<i64>> = if volumes.is_empty() {
+        vec![None]
+    } else {
+        volumes.iter().map(|v| Some(*v)).collect()
+    };
+    for alvo in alvos {
+        let faltam = limite - itens.len();
+        if faltam == 0 {
+            break;
+        }
+        let filtro = if alvo.is_some() {
+            " AND q.volume_id = ?"
         } else {
-            let ph = vec!["?"; volumes.len()].join(",");
-            format!(" AND f.volume_id IN ({ph})")
+            ""
         };
         let sql = format!(
             "SELECT q.id, f.id, f.folder_id, f.volume_id, f.path_raw,
@@ -256,8 +269,10 @@ pub fn reservar_volumes(
         );
         let mut st = conn.prepare_cached(&sql)?;
         let mut args: Vec<rusqlite::types::Value> = vec![tipo.como_str().to_owned().into()];
-        args.extend(volumes.iter().map(|v| rusqlite::types::Value::from(*v)));
-        args.push((limite as i64).into());
+        if let Some(v) = alvo {
+            args.push(v.into());
+        }
+        args.push((faltam as i64).into());
         let mut rows = st.query(rusqlite::params_from_iter(args))?;
         while let Some(l) = rows.next()? {
             itens.push(ItemFila {

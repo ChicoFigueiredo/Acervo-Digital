@@ -46,6 +46,21 @@ fn execucao() -> Value {
     json!({"execucao": {"type": "integer", "description": "Id da execução (padrão: a única em andamento)"}})
 }
 
+fn opcoes_hash() -> Value {
+    json!({
+        "threads_por_disco": {"type": "integer", "minimum": 1, "maximum": 8,
+            "description": "Leitores simultâneos por disco no Hash Completo (1..8). Vence a flag do agente e o valor persistido; padrão 1 (HDD: 1 é o melhor; SSD/NVMe podem ganhar com 2 a 4)"},
+        "max_discos": {"type": "integer", "minimum": 1, "maximum": 16,
+            "description": "Discos lendo ao mesmo tempo no Hash Completo (1..16; padrão 16)"}
+    })
+}
+
+fn com_hash(props: Value) -> Value {
+    let mut m = props.as_object().cloned().unwrap_or_default();
+    m.append(&mut opcoes_hash().as_object().cloned().unwrap_or_default());
+    Value::Object(m)
+}
+
 fn raizes(desc: &str) -> Value {
     json!({"type": "array", "items": {"type": "string"}, "description": desc})
 }
@@ -82,9 +97,9 @@ pub fn todas() -> Vec<Ferramenta> {
              sobre as raízes dadas. Pode demorar. {SEGURO}"
         ),
         objeto(
-            json!({"raizes": raizes("Pastas a varrer (caminhos absolutos)"),
+            com_hash(json!({"raizes": raizes("Pastas a varrer (caminhos absolutos)"),
                 "sem_hash": {"type": "boolean", "description": "Pula hash, duplicados e reavaliação (inventário rápido)"},
-                "releitura_total": {"type": "boolean", "description": "Lê o conteúdo de todos os arquivos de novo (Full Scan com hash de tudo), em vez de reaproveitar o hash dos que não mudaram"}}),
+                "releitura_total": {"type": "boolean", "description": "Lê o conteúdo de todos os arquivos de novo (Full Scan com hash de tudo), em vez de reaproveitar o hash dos que não mudaram"}})),
             &["raizes"],
         ),
     ));
@@ -96,16 +111,16 @@ pub fn todas() -> Vec<Ferramenta> {
              as raízes já catalogadas cujo Volume está conectado. {SEGURO}"
         ),
         objeto(
-            json!({"raizes": raizes("Pastas a reconciliar (opcional)"),
-                "sem_hash": {"type": "boolean", "description": "Pula hash, duplicados e reavaliação"}}),
+            com_hash(json!({"raizes": raizes("Pastas a reconciliar (opcional)"),
+                "sem_hash": {"type": "boolean", "description": "Pula hash, duplicados e reavaliação"}})),
             &[],
         ),
     ));
     v.push(f(
         "retomar",
         "retomar",
-        "Retoma uma execução de varredura pausada, cancelada ou interrompida.",
-        objeto(execucao(), &[]),
+        "Retoma uma execução de varredura pausada, cancelada ou interrompida. Para execução gravada no Catálogo, `threads_por_disco`/`max_discos` valem a partir desta retomada.",
+        objeto(com_hash(execucao()), &[]),
     ));
     v.push(f(
         "pausar",
@@ -241,7 +256,19 @@ pub fn todas() -> Vec<Ferramenta> {
         "verificar_integridade",
         "verificar_integridade",
         &format!("Verificação de Integridade (relê e confere hashes) sobre as raízes (todas, se omitido). {SEGURO}"),
-        objeto(json!({"raizes": raizes("Raízes a verificar")}), &[]),
+        objeto(com_hash(json!({"raizes": raizes("Raízes a verificar")})), &[]),
+    ));
+    v.push(f(
+        "config_hash_obter",
+        "config_hash",
+        "Paralelismo padrão do Hash Completo persistido no Catálogo (threads por disco e discos em paralelo). Somente leitura.",
+        objeto(json!({}), &[]),
+    ));
+    v.push(f(
+        "config_hash_definir",
+        "config_hash",
+        "Define o paralelismo padrão do Hash Completo, persistido no Catálogo (threads_por_disco 1..8, padrão 1; max_discos 1..16, padrão 16). Vale a partir da próxima execução ou retomada; a que está rodando mantém o valor com que começou. Só muda o Catálogo.",
+        objeto(opcoes_hash(), &[]),
     ));
     v.push(f(
         "eventos",
@@ -338,6 +365,9 @@ pub fn montar(nome: &str, args: &Value) -> Result<Comando, String> {
         }
         "verificar_integridade" => {
             obj.entry("raizes").or_insert_with(|| json!([]));
+        }
+        "config_hash_definir" if obj.is_empty() => {
+            return Err("informe `threads_por_disco` e/ou `max_discos`".into());
         }
         _ => {}
     }

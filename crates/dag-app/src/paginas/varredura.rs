@@ -375,7 +375,10 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
         return;
     };
     let pausado = app.estado_do_scan() == Some(EstadoControle::Pausado);
-    let fase = fase_texto(s.fase(), pausado, s.sem_hash);
+    let fase = match &s.abertura {
+        Some(etapa) => format!("Ao abrir: {etapa}"),
+        None => fase_texto(s.fase(), pausado, s.sem_hash).to_string(),
+    };
     ui.horizontal(|ui| {
         if !pausado {
             ui.spinner();

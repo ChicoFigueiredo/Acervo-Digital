@@ -469,3 +469,83 @@ fn volumes_padrao_mostra_so_reais_e_todos_traz_a_classe() {
         assert!(v["classe"].is_string() && v["sistema"].is_boolean(), "{v}");
     }
 }
+
+#[test]
+fn config_hash_mostra_define_e_persiste() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat = tmp.path().join("dados/c.sqlite");
+    let socket = tmp.path().join("sem-agente.sock");
+    let (cat, socket) = (cat.to_str().unwrap(), socket.to_str().unwrap());
+    let base = [
+        "--catalogo",
+        cat,
+        "--socket",
+        socket,
+        "--json",
+        "config",
+        "hash",
+    ];
+    let rodar = |extra: &[&str]| {
+        let mut a = base.to_vec();
+        a.extend_from_slice(extra);
+        dag(&a)
+    };
+    let v = json(&rodar(&["--threads-por-disco", "2", "--max-discos", "4"]));
+    assert_eq!(
+        (v["threads_por_disco"].as_u64(), v["max_discos"].as_u64()),
+        (Some(2), Some(4))
+    );
+    // (o padrão 1/16 vale enquanto nada foi gravado: ver testes do agente)
+    // Persistiu: nova invocação (novo processo) lê o mesmo.
+    let v = json(&rodar(&[]));
+    assert_eq!(
+        (v["threads_por_disco"].as_u64(), v["max_discos"].as_u64()),
+        (Some(2), Some(4))
+    );
+}
+
+#[test]
+fn flags_de_paralelismo_validam_a_faixa_no_parse() {
+    for args in [
+        &["config", "hash", "--threads-por-disco", "0"][..],
+        &["config", "hash", "--threads-por-disco", "9"][..],
+        &["config", "hash", "--max-discos", "17"][..],
+        &["scan", "--full", "--threads-por-disco", "9", "/tmp"][..],
+        &["agente", "--max-discos", "0"][..],
+        &["verificar", "--threads-por-disco", "99"][..],
+    ] {
+        let o = dag(args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("not in"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn scan_aceita_flags_de_paralelismo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = arvore(tmp.path());
+    let cat = tmp.path().join("dados/c.sqlite");
+    let (cat, r) = (cat.to_str().unwrap(), raiz.to_str().unwrap());
+    let o = dag(&[
+        "--catalogo",
+        cat,
+        "--json",
+        "scan",
+        "--full",
+        "--threads-por-disco",
+        "2",
+        "--max-discos",
+        "3",
+        r,
+    ]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(json(&o)["desfecho"], "concluida");
+}

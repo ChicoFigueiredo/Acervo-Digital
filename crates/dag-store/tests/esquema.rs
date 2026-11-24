@@ -48,7 +48,7 @@ fn contar(c: &Connection, tabela: &str) -> i64 {
 fn migracao_em_banco_vazio_cria_todas_as_tabelas() {
     let catalogo = cat();
     assert_eq!(catalogo.versao().expect("versão"), versao_do_esquema());
-    assert_eq!(versao_do_esquema(), 4);
+    assert_eq!(versao_do_esquema(), 6);
     let c = catalogo.armazem().conexao();
     for t in [
         "dispositivos",
@@ -315,4 +315,36 @@ fn copia_de_banco_wal_tem_mesmas_contagens_e_passa_na_integridade() {
         );
     }
     assert_eq!(contar(copia.armazem().conexao(), "files"), 50);
+}
+
+#[test]
+fn configuracao_de_hash_persiste_entre_aberturas() {
+    use dag_core::OpcoesHash;
+    use dag_store::configuracao;
+    let dir = tempfile::tempdir().expect("tmp");
+    let caminho = dir.path().join("catalogo.sqlite");
+    {
+        let c = Catalogo::abrir(&caminho).expect("abrir");
+        let con = c.armazem().conexao();
+        assert_eq!(configuracao::ler_hash(con).unwrap(), OpcoesHash::default());
+        configuracao::gravar_hash(
+            con,
+            &OpcoesHash {
+                threads_por_disco: Some(3),
+                max_discos: None,
+            },
+        )
+        .unwrap();
+        configuracao::gravar_hash(
+            con,
+            &OpcoesHash {
+                threads_por_disco: None,
+                max_discos: Some(5),
+            },
+        )
+        .unwrap();
+    }
+    let c = Catalogo::abrir(&caminho).expect("reabrir");
+    let o = configuracao::ler_hash(c.armazem().conexao()).unwrap();
+    assert_eq!((o.threads_por_disco, o.max_discos), (Some(3), Some(5)));
 }

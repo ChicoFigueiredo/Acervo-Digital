@@ -183,6 +183,15 @@ pub fn todas() -> Vec<Ferramenta> {
         objeto(Value::Object(dup), &[]),
     ));
     v.push(f(
+        "reconstruir_duplicados",
+        "reconstruir_duplicados",
+        &format!(
+            "Reconstrói os Grupos de Duplicados a partir dos hashes atuais e reavalia as Marcações \
+             (pode levar minutos em Catálogos grandes). Só muda o Catálogo. {SEGURO}"
+        ),
+        objeto(json!({}), &[]),
+    ));
+    v.push(f(
         "detalhar_grupo",
         "detalhar_grupo",
         "Um Grupo de Duplicados com todas as cópias, Marcações e Cobertura.",

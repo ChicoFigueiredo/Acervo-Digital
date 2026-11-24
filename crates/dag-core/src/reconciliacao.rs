@@ -73,6 +73,14 @@ pub struct EventoInfo {
 /// Saúde do monitor e pendências de reconciliação (A-15, A-19).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaudeMonitorInfo {
+    /// Situação do monitor, única fonte para todas as telas: `ativo`, `iniciando`,
+    /// `aguardando_abertura` (o agente ainda retoma/verifica; o monitor sobe depois),
+    /// `pausado_por_trabalho` (cedeu o escritor a um pedido), `parado` (com `situacao_motivo`) ou
+    /// `desligado` (agente iniciado sem monitor). Vazio = agente antigo (use `estado`).
+    #[serde(default)]
+    pub situacao: String,
+    #[serde(default)]
+    pub situacao_motivo: Option<String>,
     /// `parado`, `iniciando`, `ativo`, `reconciliando`, `encerrando`.
     pub estado: String,
     /// Há um monitor vivo agora (heartbeat recente e estado diferente de `parado`).
@@ -94,6 +102,31 @@ pub struct SaudeMonitorInfo {
     /// Lacunas (eventos perdidos) ainda sem correção: reconciliação pendente.
     pub lacunas_abertas: u64,
     pub eventos_nao_processados: u64,
+}
+
+impl SaudeMonitorInfo {
+    /// A situação do monitor em palavras (CLI, GUI e MCP mostram o mesmo texto).
+    #[must_use]
+    pub fn situacao_texto(&self) -> String {
+        let motivo = self
+            .situacao_motivo
+            .as_ref()
+            .map_or_else(String::new, |x| format!(": {x}"));
+        match self.situacao.as_str() {
+            "ativo" => format!("ativo ({})", self.estado),
+            "iniciando" => "iniciando".to_string(),
+            "aguardando_abertura" => {
+                "aguardando a abertura terminar (retomada/verificação em curso; sobe depois)".into()
+            }
+            "pausado_por_trabalho" => "pausado para atender um trabalho (volta ao terminar)".into(),
+            "desligado" => format!("desligado{motivo}"),
+            "parado" => format!("parado{motivo}"),
+            // Agente antigo, sem `situacao`.
+            _ if self.em_execucao => format!("ativo ({})", self.estado),
+            _ if self.estado == "parado" || self.heartbeat.is_none() => "parado".to_string(),
+            _ => format!("sem sinal (último estado: {})", self.estado),
+        }
+    }
 }
 
 /// Resumo de uma sessão de monitoramento encerrada.

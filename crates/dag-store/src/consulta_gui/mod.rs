@@ -131,13 +131,13 @@ pub fn totais_do_catalogo(conn: &Connection) -> Resultado<TotaisCatalogo> {
         [],
         |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
     )?;
-    let com_hash: i64 = conn.query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))?;
+    let com_hash = crate::hashes::total_com_hash(conn)?;
     Ok(TotaisCatalogo {
         volumes: n(volumes),
         pastas: n(pastas),
         arquivos: n(arquivos),
         bytes_logicos: n(bytes),
-        arquivos_com_hash: n(com_hash),
+        arquivos_com_hash: com_hash,
     })
 }
 

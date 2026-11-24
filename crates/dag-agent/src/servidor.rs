@@ -132,6 +132,9 @@ struct Compartilhado {
     pendentes: Mutex<HashMap<u64, Sender<Saida>>>,
     /// Trabalhos cancelados na fila: o trabalhador os pula.
     cancelados: Mutex<HashSet<u64>>,
+    /// O que o agente sabe do monitor agora (situação, motivo): a verdade viva que se sobrepõe ao
+    /// que o Catálogo guardou do monitor (que não sabe de "aguardando abertura").
+    monitor_vivo: Mutex<(&'static str, Option<String>)>,
 }
 
 fn travar<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -198,6 +201,14 @@ impl Servidor {
             registro: Registro::default(),
             pendentes: Mutex::new(HashMap::new()),
             cancelados: Mutex::new(HashSet::new()),
+            monitor_vivo: Mutex::new(if cfg.monitor {
+                ("aguardando_abertura", None)
+            } else {
+                (
+                    "desligado",
+                    Some("agente subiu com --sem-monitor".to_string()),
+                )
+            }),
         });
         // A rotina de abertura é o primeiro trabalho do agente; já consta no instantâneo de quem
         // assina antes mesmo de a thread de trabalho começar.
@@ -562,6 +573,7 @@ fn tipo_do_job(pedido: &Pedido) -> Option<(TipoJob, Vec<String>, Option<i64>)> {
         Comando::VerificarIntegridade { raizes, .. } => {
             Some((TipoJob::VerificacaoIntegridade, raizes.clone(), None))
         }
+        Comando::ReconstruirDuplicados => Some((TipoJob::Duplicados, Vec::new(), None)),
         _ => None,
     }
 }
@@ -607,6 +619,26 @@ impl Compartilhado {
                 )
                 .para_resposta()
             }),
+            // O estado em memória do agente (progresso vivo do hash) vale mais que a heurística
+            // do Catálogo: sobrepõe antes de responder.
+            Comando::Status { .. } => {
+                let mut r = self.ler(pedido.clone());
+                crate::agente::sobrepor_status_ao_vivo(&mut r, &self.registro.jobs());
+                if let Resposta::Status {
+                    monitor: Some(m), ..
+                } = &mut r
+                {
+                    self.sobrepor_monitor(m);
+                }
+                Some(r)
+            }
+            Comando::SaudeMonitor => {
+                let mut r = self.ler(pedido.clone());
+                if let Resposta::SaudeMonitor { saude } = &mut r {
+                    self.sobrepor_monitor(saude);
+                }
+                Some(r)
+            }
             c if somente_leitura(c) => Some(self.ler(pedido.clone())),
             _ => None,
         }
@@ -730,6 +762,32 @@ impl Compartilhado {
         }
     }
 
+    fn definir_monitor(&self, situacao: &'static str, motivo: Option<String>) {
+        *travar(&self.monitor_vivo) = (situacao, motivo);
+    }
+
+    /// Aplica a situação viva do monitor sobre a saúde lida do Catálogo. `ativo` só vale com o
+    /// batimento do próprio monitor; os demais estados vêm do agente.
+    fn sobrepor_monitor(&self, m: &mut dag_core::SaudeMonitorInfo) {
+        let (vivo, motivo) = travar(&self.monitor_vivo).clone();
+        match vivo {
+            "iniciando" | "ativo" => {
+                if m.em_execucao {
+                    m.situacao = "ativo".into();
+                    m.situacao_motivo = None;
+                } else {
+                    m.situacao = "iniciando".into();
+                    m.situacao_motivo = None;
+                }
+            }
+            outro => {
+                m.situacao = outro.into();
+                m.situacao_motivo = motivo;
+                m.em_execucao = false;
+            }
+        }
+    }
+
     /// Saúde do monitor e Ponto de Confiança, lidos agora (para o fluxo de eventos).
     fn ler_monitor(
         &self,
@@ -744,7 +802,10 @@ impl Compartilhado {
                 .map(Agente::silencioso);
         }
         match g.as_ref().map(Agente::monitor_e_confianca) {
-            Some(Ok((s, c))) => (Some(s), c),
+            Some(Ok((mut s, c))) => {
+                self.sobrepor_monitor(&mut s);
+                (Some(s), c)
+            }
             _ => (None, Vec::new()),
         }
     }
@@ -838,6 +899,9 @@ fn trabalhar(
     let mut pendente: Option<Trabalho> = None;
     let mut ultimo_erro_monitor: Option<String> = None;
     recuperar_ao_abrir(&mut agente, comp, job_abertura);
+    if comp.monitor {
+        comp.definir_monitor("iniciando", None);
+    }
     loop {
         let passo = {
             let mut e = travar(&comp.estado);
@@ -880,8 +944,17 @@ fn trabalhar(
             Passo::Sair => break,
             Passo::Pular => {}
             Passo::Trabalho(t) => {
+                if comp.monitor {
+                    comp.definir_monitor(
+                        "pausado_por_trabalho",
+                        Some("o escritor está ocupado com um trabalho do agente".into()),
+                    );
+                }
                 rodar(&mut agente, comp, t);
                 tentar_monitor = comp.monitor;
+                if comp.monitor {
+                    comp.definir_monitor("iniciando", None);
+                }
             }
             Passo::Monitor => {
                 rodar_monitor(&mut agente, comp, &mut ultimo_erro_monitor);
@@ -1021,6 +1094,7 @@ fn rodar_monitor(agente: &mut Agente, comp: &Arc<Compartilhado>, ultimo_erro: &m
         travar(&comp.estado).job = Some(j);
         j
     });
+    comp.definir_monitor("iniciando", None);
     agente.definir_progresso(Some(progresso_stderr()));
     let r = agente.executar(Comando::Monitorar {
         raizes: Vec::new(),
@@ -1033,6 +1107,7 @@ fn rodar_monitor(agente: &mut Agente, comp: &Arc<Compartilhado>, ultimo_erro: &m
     }
     match r {
         Resposta::Erro { mensagem, .. } => {
+            comp.definir_monitor("parado", Some(mensagem.clone()));
             if ultimo_erro.as_ref() != Some(&mensagem) {
                 eprintln!("agente: monitor não iniciado: {mensagem}");
                 *ultimo_erro = Some(mensagem);
@@ -1040,6 +1115,10 @@ fn rodar_monitor(agente: &mut Agente, comp: &Arc<Compartilhado>, ultimo_erro: &m
         }
         _ => {
             *ultimo_erro = None;
+            comp.definir_monitor(
+                "pausado_por_trabalho",
+                Some("cedeu o escritor a um pedido".into()),
+            );
             if !comp.parar.load(Ordering::SeqCst) {
                 eprintln!("agente: monitor pausado para atender um pedido");
             }

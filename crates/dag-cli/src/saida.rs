@@ -306,6 +306,16 @@ fn status_hash(id: i64, h: &dag_core::StatusHash) -> String {
         &[false, false, true, true, true, true],
         &linhas,
     ));
+    // Arquivos grandes em leitura: o contador de arquivos só anda quando um termina.
+    for d in &h.discos {
+        for l in &d.lendo {
+            s.push_str(&format!(
+                "  {}: {}\n",
+                d.disco,
+                dag_core::painel::lendo_texto(l)
+            ));
+        }
+    }
     s
 }
 
@@ -407,17 +417,18 @@ fn reconciliacao(r: &dag_core::ResumoReconciliacao) -> String {
     s
 }
 
+/// A situação do monitor em palavras (a mesma nas linhas "Agente:" e "Monitor:").
+#[must_use]
+pub fn situacao_monitor(m: &dag_core::SaudeMonitorInfo) -> String {
+    m.situacao_texto()
+}
+
 fn saude_monitor(m: &dag_core::SaudeMonitorInfo) -> String {
-    let estado = if m.em_execucao {
-        format!("ativo ({})", m.estado)
-    } else if m.estado == "parado" || m.heartbeat.is_none() {
-        "parado".to_string()
-    } else {
-        format!("sem sinal (último estado: {})", m.estado)
-    };
+    let estado = situacao_monitor(m);
     let opt = |t: Option<i64>| t.map_or_else(|| "nunca".to_string(), data_hora_utc);
     let mut s = format!(
-        "Monitor: {estado}\n  watches: {}/{}; backlog: {}; eventos processados: {}; overflows: {}\n  último evento: {}; última reconciliação: {}\n",
+        "Monitor: {estado}\n  raízes observadas: {}; watches: {}/{}; backlog: {}; eventos processados: {}; overflows: {}\n  último evento: {}; última reconciliação: {}\n",
+        inteiro_pt_br(m.raizes.len() as u64),
         inteiro_pt_br(m.watches),
         inteiro_pt_br(m.watches_limite),
         inteiro_pt_br(m.backlog),
@@ -1282,6 +1293,7 @@ mod testes_status_hash {
                     arquivos_com_erro: 0,
                     bytes_hasheados: 1 << 30,
                     bytes_pendentes: 1 << 30,
+                    lendo: Vec::new(),
                 },
                 StatusDiscoHash {
                     disco: "SEA-2".into(),
@@ -1291,6 +1303,11 @@ mod testes_status_hash {
                     arquivos_com_erro: 0,
                     bytes_hasheados: 0,
                     bytes_pendentes: 2 << 30,
+                    lendo: vec![dag_core::LeituraEmCurso {
+                        caminho: "/mnt/b/grande.img".into(),
+                        bytes_lidos: 3 << 30,
+                        bytes_total: 205 << 30,
+                    }],
                 },
             ],
         };
@@ -1298,6 +1315,10 @@ mod testes_status_hash {
         assert!(t.contains("etapa de hash (em andamento)"), "{t}");
         assert!(t.contains("25 de 100 arquivos (25%)"), "{t}");
         assert!(t.contains("WDC-1") && t.contains("SEA-2"), "{t}");
+        assert!(
+            t.contains("SEA-2: lendo /mnt/b/grande.img (3,0 GiB de 205,0 GiB)"),
+            "{t}"
+        );
         assert!(t.contains("1,2"), "{t}");
         assert!(t.contains("/s"), "{t}");
     }
@@ -1360,6 +1381,7 @@ mod testes_painel {
                     bytes_por_seg: 110.0 * 1048576.0,
                     ativo: true,
                     concluido: false,
+                    lendo: Vec::new(),
                 },
                 ProgressoDiscoHash {
                     disco: "Seagate Barracuda".into(),
@@ -1373,6 +1395,7 @@ mod testes_painel {
                     bytes_por_seg: 0.0,
                     ativo: false,
                     concluido: true,
+                    lendo: Vec::new(),
                 },
             ],
             ..ProgressoHash::default()

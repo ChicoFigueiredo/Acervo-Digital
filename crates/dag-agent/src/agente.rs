@@ -373,6 +373,18 @@ impl Agente {
                 limite,
                 cursor,
             } => self.listar_duplicados(volume.as_deref(), tamanho_minimo, ordem, limite, cursor),
+            Comando::ReconstruirDuplicados => {
+                let r = self.atualizar_duplicados()?;
+                Ok(Resposta::Ok {
+                    mensagem: Some(format!(
+                        "Grupos de Duplicados reconstruídos: {} grupo(s) com {} cópia(s) ({} recuperáveis); {} Marcação(ões) pendente(s)",
+                        r.grupos,
+                        r.copias,
+                        dag_core::formato::bytes_humanos(r.espaco_recuperavel_bytes),
+                        r.marcacoes_pendentes
+                    )),
+                })
+            }
             Comando::DetalharGrupo { grupo } => Ok(Resposta::Grupo {
                 detalhe: duplicados::detalhar_grupo(self.catalogo.armazem().conexao(), grupo)?,
             }),
@@ -772,6 +784,8 @@ impl Agente {
             && s.heartbeat
                 .is_some_and(|h| agora().saturating_sub(h) <= HEARTBEAT_VALIDO_S);
         Ok(SaudeMonitorInfo {
+            situacao: if vivo { "ativo" } else { "parado" }.into(),
+            situacao_motivo: s.erro.clone().filter(|_| !vivo),
             estado: s.estado,
             em_execucao: vivo,
             iniciado_em: s.iniciado_em,
@@ -858,13 +872,17 @@ impl Agente {
                         desfecho = "concluida_com_erros";
                     }
                     // Passada de verificação sem mudança e sem hash novo: os grupos continuam
-                    // valendo (evita reconstruí-los a cada abertura).
+                    // valendo (evita reconstruí-los a cada abertura). Mas hashes que mudaram
+                    // desde a última reconstrução completa (ou grupos nunca construídos) sempre
+                    // reconstroem: vale para a retomada do hash e para a abertura do agente.
                     let nada_mudou = h.hasheados == 0
                         && r.reconciliacao
                             .as_ref()
                             .map(resumo_reconciliacao)
                             .is_some_and(|x| x.sem_mudancas());
-                    if !nada_mudou {
+                    if !nada_mudou
+                        || hashes::grupos_desatualizados(self.catalogo.armazem().conexao())?
+                    {
                         dup = Some(self.atualizar_duplicados()?);
                     }
                 }
@@ -887,8 +905,10 @@ impl Agente {
     }
 
     /// Reconstrói os Grupos de Duplicados e reavalia as Marcações.
-    fn atualizar_duplicados(&mut self) -> Result<ResumoDuplicados, ErroAgente> {
-        self.mensagem("[duplicados] reconstruindo Grupos de Duplicados...");
+    pub(crate) fn atualizar_duplicados(&mut self) -> Result<ResumoDuplicados, ErroAgente> {
+        self.mensagem(
+            "[duplicados] Agrupando duplicados (pode levar minutos em Catálogos grandes)...",
+        );
         let t = agora();
         duplicados::reconstruir_grupos(&mut self.catalogo, Escopo::Tudo, self.autor, t)?;
         self.mensagem("[marcações] reavaliando Marcações contra o hash atual...");
@@ -1064,7 +1084,7 @@ impl Agente {
             |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
         )?;
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM volumes", [], |l| l.get(0))?;
-        let com_hash: i64 = conn.query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))?;
+        let com_hash = hashes::total_com_hash(conn)?;
         let volumes = total - i64::try_from(ruido.len()).unwrap_or(0);
         let n = |x: i64| u64::try_from(x).unwrap_or(0);
         Ok(Resposta::Status {
@@ -1074,7 +1094,7 @@ impl Agente {
                 pastas: n(pastas),
                 arquivos: n(arquivos),
                 bytes_logicos: n(bytes),
-                arquivos_com_hash: n(com_hash),
+                arquivos_com_hash: com_hash,
             },
             monitor: Some(self.saude_monitor()?),
             confianca: self.status_confianca()?,
@@ -1176,7 +1196,9 @@ fn pos_reconciliacao(
             .executar(cat)?;
     }
     let t = agora();
-    duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
+    if hashes::grupos_desatualizados(cat.armazem().conexao())? {
+        duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
+    }
     duplicados::reavaliar_marcacoes(cat, autor, t)?;
     Ok(())
 }
@@ -1272,14 +1294,30 @@ fn aplicar_status_hash(conn: &Connection, st: &mut StatusExecucao) -> Result<(),
             arquivos_com_erro: d.arquivos_com_erro,
             bytes_hasheados: d.bytes_feitos,
             bytes_pendentes: d.bytes_pendentes,
+            lendo: d
+                .lendo
+                .iter()
+                .map(|a| dag_core::LeituraEmCurso {
+                    caminho: a.caminho.clone(),
+                    bytes_lidos: a.bytes_lidos,
+                    bytes_total: a.bytes_total,
+                })
+                .collect(),
         });
     }
-    let recente = f
-        .ultima_atividade
-        .is_some_and(|t| agora - t <= HASH_INATIVO_SEG);
+    // Atividade = arquivo concluído, reserva de lote ou batimento de bytes de um arquivo grande
+    // em leitura (`updated_at` só avança quando algo mudou). Um único arquivo de centenas de GB
+    // levando mais que a janela não pode parecer parado.
+    let lendo_agora = h.discos.iter().any(|d| !d.lendo.is_empty());
+    let recente = lendo_agora
+        || f.ultima_atividade
+            .is_some_and(|t| agora - t <= HASH_INATIVO_SEG);
     h.em_andamento = h.arquivos_pendentes > 0 && recente;
     if h.em_andamento {
-        h.bytes_por_seg = Some(f.bytes_recentes / HASH_VAZAO_SEG as u64);
+        // Só os concluídos na janela são vazão medida; sem agente respondendo, o arquivo grande
+        // em leitura não tem vazão (o batimento guarda bytes acumulados, não uma taxa).
+        let por_seg = f.bytes_recentes / HASH_VAZAO_SEG as u64;
+        h.bytes_por_seg = (por_seg > 0 || !lendo_agora).then_some(por_seg);
     }
     if h.arquivos_pendentes > 0 {
         if h.em_andamento {
@@ -1295,6 +1333,48 @@ fn aplicar_status_hash(conn: &Connection, st: &mut StatusExecucao) -> Result<(),
     st.erros += h.arquivos_com_erro;
     st.hash = Some(h);
     Ok(())
+}
+
+/// Sobrepõe ao status do Catálogo o que o agente sabe de verdade em memória: com o trabalho de
+/// hash da execução rodando (ou pausado) aqui, o progresso vivo manda. A heurística do Catálogo
+/// (atividade recente na fila) só vale para quem não consegue perguntar ao agente.
+pub(crate) fn sobrepor_status_ao_vivo(resp: &mut Resposta, jobs: &[dag_core::JobInfo]) {
+    let Resposta::Status { execucoes, .. } = resp else {
+        return;
+    };
+    for e in execucoes {
+        let Some(h) = e.hash.as_mut() else { continue };
+        let vivo = jobs.iter().find_map(|j| {
+            let (p, verificacao) = j.hash_atual()?;
+            let ativo = matches!(
+                j.estado,
+                dag_core::EstadoJob::Executando
+                    | dag_core::EstadoJob::Pausado
+                    | dag_core::EstadoJob::Cancelando
+            );
+            (!verificacao && ativo && p.execucao.or(j.execucao) == Some(e.id.0)).then_some((j, p))
+        });
+        let Some((j, p)) = vivo else { continue };
+        let pausado = j.estado == dag_core::EstadoJob::Pausado;
+        h.em_andamento = !pausado;
+        if pausado {
+            h.bytes_por_seg = None;
+        } else {
+            h.bytes_por_seg = Some(p.bytes_por_seg.max(0.0) as u64);
+            if h.arquivos_pendentes > 0 {
+                e.estado = EstadoExecucao::EmAndamento;
+                e.estado_detalhe = "hash_em_andamento".into();
+            }
+        }
+        for d in &mut h.discos {
+            d.lendo = p
+                .discos
+                .iter()
+                .filter(|pd| pd.volumes.iter().any(|v| d.volumes.contains(v)))
+                .flat_map(|pd| pd.lendo.iter().cloned())
+                .collect();
+        }
+    }
 }
 
 fn status_de(e: &inventario::Execucao) -> StatusExecucao {
@@ -1406,6 +1486,7 @@ fn sink_hash(
                     bytes_por_seg: d.bytes_por_seg,
                     ativo: d.ativo,
                     concluido: d.concluido,
+                    lendo: d.lendo.clone(),
                 })
                 .collect(),
         };
@@ -1414,5 +1495,124 @@ fn sink_hash(
         } else {
             Progresso::Hash(ev)
         });
+    }
+}
+
+#[cfg(test)]
+mod testes_status_ao_vivo {
+    use super::*;
+    use dag_core::{
+        EstadoJob, JobInfo, LeituraEmCurso, OrigemJob, ProgressoDiscoHash, ProgressoHash as Ph,
+        TipoJob,
+    };
+
+    fn status(parado: bool) -> Resposta {
+        Resposta::Status {
+            execucoes: vec![StatusExecucao {
+                id: ExecucaoId(7),
+                modo: ModoVarredura::FullScan,
+                estado: EstadoExecucao::Pausada,
+                etapa: Some(EtapaVarredura::Hash),
+                itens_processados: 0,
+                erros: 0,
+                estado_detalhe: "hash_parado".into(),
+                raizes: vec![],
+                iniciada_em: 0,
+                encerrada_em: None,
+                pastas: 0,
+                arquivos: 0,
+                especiais: 0,
+                bytes_logicos: 0,
+                ignorados: 0,
+                hash: Some(StatusHash {
+                    em_andamento: !parado,
+                    arquivos_hasheados: 0,
+                    arquivos_pendentes: 1,
+                    arquivos_com_erro: 0,
+                    bytes_hasheados: 0,
+                    bytes_pendentes: 205 << 30,
+                    bytes_por_seg: None,
+                    discos: vec![StatusDiscoHash {
+                        disco: "Disco".into(),
+                        volumes: vec![3],
+                        arquivos_hasheados: 0,
+                        arquivos_pendentes: 1,
+                        arquivos_com_erro: 0,
+                        bytes_hasheados: 0,
+                        bytes_pendentes: 205 << 30,
+                        lendo: vec![],
+                    }],
+                }),
+                retomando: false,
+            }],
+            catalogo: ResumoCatalogo::default(),
+            monitor: None,
+            confianca: vec![],
+        }
+    }
+
+    fn job(estado: EstadoJob) -> JobInfo {
+        let mut j = JobInfo {
+            id: 1,
+            tipo: TipoJob::Retomada,
+            origem: OrigemJob::Cli,
+            raizes: vec![],
+            estado,
+            execucao: Some(7),
+            etapa: None,
+            progresso: vec![],
+            criado_em: 0,
+            passo: None,
+            agente_pid: None,
+        };
+        j.registrar_progresso(&Progresso::Hash(Ph {
+            execucao: Some(7),
+            bytes_por_seg: 220.0 * 1_048_576.0,
+            discos: vec![ProgressoDiscoHash {
+                disco: "Disco".into(),
+                volumes: vec![3],
+                lendo: vec![LeituraEmCurso {
+                    caminho: "/x/grande.img".into(),
+                    bytes_lidos: 30 << 30,
+                    bytes_total: 205 << 30,
+                }],
+                ..ProgressoDiscoHash::default()
+            }],
+            ..Ph::default()
+        }));
+        j
+    }
+
+    #[test]
+    fn agente_rodando_manda_mesmo_com_o_catalogo_parecendo_parado() {
+        let mut r = status(true);
+        sobrepor_status_ao_vivo(&mut r, &[job(EstadoJob::Executando)]);
+        let Resposta::Status { execucoes, .. } = r else {
+            panic!()
+        };
+        let e = &execucoes[0];
+        assert_eq!(e.estado, EstadoExecucao::EmAndamento);
+        assert_eq!(e.estado_detalhe, "hash_em_andamento");
+        let h = e.hash.as_ref().unwrap();
+        assert!(h.em_andamento);
+        assert_eq!(h.bytes_por_seg, Some(220 * 1_048_576));
+        assert_eq!(h.discos[0].lendo[0].bytes_lidos, 30 << 30);
+    }
+
+    #[test]
+    fn sem_job_vivo_ou_pausado_nao_inventa_andamento() {
+        let mut r = status(true);
+        sobrepor_status_ao_vivo(&mut r, &[]);
+        let Resposta::Status { execucoes, .. } = &r else {
+            panic!()
+        };
+        assert!(!execucoes[0].hash.as_ref().unwrap().em_andamento);
+        assert_eq!(execucoes[0].estado, EstadoExecucao::Pausada);
+        let mut r = status(false);
+        sobrepor_status_ao_vivo(&mut r, &[job(EstadoJob::Pausado)]);
+        let Resposta::Status { execucoes, .. } = &r else {
+            panic!()
+        };
+        assert!(!execucoes[0].hash.as_ref().unwrap().em_andamento);
     }
 }

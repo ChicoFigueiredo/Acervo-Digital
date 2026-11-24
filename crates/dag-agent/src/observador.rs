@@ -47,6 +47,7 @@ impl OpcoesObservador {
 }
 
 /// O que o observador entrega.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventoObservado {
     /// Conectado a um agente; segue o [`EventoAgente::Instantaneo`].

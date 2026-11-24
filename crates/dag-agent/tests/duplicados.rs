@@ -597,3 +597,95 @@ fn ca_a18_arvore_navegavel_antes_do_fim_do_hash() {
         .unwrap();
     assert_eq!(depois, 8, "todo arquivo regular recebeu Hash Completo");
 }
+
+fn n_grupos(t: &Arvore) -> i64 {
+    let c = dag_store::Catalogo::abrir(&t.catalogo).unwrap();
+    c.armazem()
+        .conexao()
+        .query_row("SELECT COUNT(*) FROM grupos_duplicados", [], |l| l.get(0))
+        .unwrap()
+}
+
+/// Hash que parou no meio (processo morto: execução `em_andamento` na fase `hash`) e é retomado:
+/// ao terminar, os Grupos de Duplicados aparecem.
+#[test]
+fn hash_retomado_reconstroi_os_grupos() {
+    let t = arvore();
+    let id = {
+        let mut a = agente(&t);
+        let r = a.executar(scan(&[&t.raiz], true));
+        let Resposta::ScanConcluido { execucao, .. } = r else {
+            panic!("{r:?}")
+        };
+        execucao
+    };
+    assert_eq!(n_grupos(&t), 0);
+    {
+        let c = dag_store::Catalogo::abrir(&t.catalogo).unwrap();
+        c.armazem()
+            .conexao()
+            .execute(
+                "UPDATE scan_runs SET status = 'em_andamento', phase = 'hash', ended_at = NULL",
+                [],
+            )
+            .unwrap();
+    }
+    let mut a = agente(&t);
+    let r = a.executar(Comando::Retomar {
+        execucao: Some(id),
+        threads_por_disco: None,
+        max_discos: None,
+    });
+    let Resposta::ScanConcluido { duplicados, .. } = r else {
+        panic!("{r:?}")
+    };
+    assert_eq!(duplicados.unwrap().grupos, 1);
+    assert_eq!(n_grupos(&t), 1);
+}
+
+/// Abertura do agente: há hashes mas os grupos nunca foram construídos (ou ficaram velhos) →
+/// reconstrói sozinha; o comando sob demanda também reconstrói. Sem mudança de hash, a abertura
+/// seguinte não refaz.
+#[test]
+fn abertura_reconstroi_grupos_desatualizados_e_comando_sob_demanda() {
+    let t = arvore();
+    {
+        let mut a = agente(&t);
+        a.executar(scan(&[&t.raiz], false));
+    }
+    assert_eq!(n_grupos(&t), 1);
+    // Estado de um Catálogo cujos grupos nunca foram construídos.
+    let apagar = |t: &Arvore| {
+        let c = dag_store::Catalogo::abrir(&t.catalogo).unwrap();
+        c.armazem()
+            .conexao()
+            .execute_batch(
+                "DELETE FROM grupos_duplicados; UPDATE contadores SET valor = -1 WHERE chave = 'grupos_em';",
+            )
+            .unwrap();
+    };
+    apagar(&t);
+    assert_eq!(n_grupos(&t), 0);
+    let pol = dag_agent::PoliticaAbertura {
+        verificar: dag_agent::VerificarAoAbrir::Nunca,
+        ..dag_agent::PoliticaAbertura::default()
+    };
+    {
+        let mut a = agente(&t);
+        let rel = a.recuperar_ao_abrir(&pol).unwrap();
+        assert!(rel.duplicados_reconstruidos);
+    }
+    assert_eq!(n_grupos(&t), 1);
+    {
+        let mut a = agente(&t);
+        let rel = a.recuperar_ao_abrir(&pol).unwrap();
+        assert!(!rel.duplicados_reconstruidos, "nada mudou: não refaz");
+    }
+    // Sob demanda.
+    apagar(&t);
+    let mut a = agente(&t);
+    let r = a.executar(Comando::ReconstruirDuplicados);
+    assert!(matches!(r, Resposta::Ok { .. }), "{r:?}");
+    assert_eq!(n_grupos(&t), 1);
+    assert_eq!(grupos(&mut a).len(), 1);
+}

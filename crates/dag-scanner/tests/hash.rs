@@ -539,3 +539,285 @@ fn verificacao_por_raiz_e_hard_link_uma_leitura() {
         .unwrap();
     assert_eq!(v2.verificados, 1);
 }
+
+// ------------------------------------------------------------------ andamento dentro do arquivo
+
+/// Um arquivo grande (esparso) lido devagar: os bytes do progresso e o batimento gravado na fila
+/// sobem ANTES de o arquivo terminar (nada de contador parado até o fim de 205 GB).
+#[test]
+fn bytes_e_batimento_sobem_durante_a_leitura_de_um_arquivo_grande() {
+    use std::sync::Mutex;
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("acervo");
+    fs::create_dir_all(&raiz).unwrap();
+    let total: u64 = 64 << 20;
+    let grande = raiz.join("grande.img");
+    fs::File::create(&grande).unwrap().set_len(total).unwrap();
+    let caminho_cat = tmp.path().join("catalogo.db");
+    let mut cat = Catalogo::abrir(&caminho_cat).unwrap();
+    let run = varrer(&raiz, &mut cat);
+
+    #[derive(Default)]
+    struct Visto {
+        /// Snapshots com o arquivo ainda em leitura (nenhum arquivo concluído).
+        no_meio: Vec<(u64, u64)>,
+        lendo_no_painel: Vec<(u64, u64)>,
+        batimento_no_catalogo: Vec<u64>,
+    }
+    let visto = Arc::new(Mutex::new(Visto::default()));
+    let v2 = Arc::clone(&visto);
+    let cam2 = caminho_cat.clone();
+    let cfg = ConfigHash {
+        tamanho_buffer: 1 << 20,
+        intervalo_de_progresso: Duration::from_millis(10),
+        intervalo_batimento: Duration::from_millis(50),
+        limiar_arquivo_grande: 1 << 20,
+        ..ConfigHash::default()
+    };
+    let r = EtapaHash::nova(ExecucaoId(run))
+        .com_config(cfg)
+        // Leitura lenta: 20 ms por pedaço de 1 MiB (~1,3 s para o arquivo todo).
+        .com_gancho_durante_leitura(|_, _| std::thread::sleep(Duration::from_millis(20)))
+        .com_progresso(move |p| {
+            // Só interessa o que se vê com o arquivo ainda em leitura (nada concluído).
+            if p.preparando || p.arquivos_feitos > 0 {
+                return;
+            }
+            let mut g = v2.lock().unwrap();
+            if p.bytes_lidos > 0 && p.bytes_lidos < p.bytes_total {
+                g.no_meio.push((p.bytes_lidos, p.bytes_total));
+            }
+            for d in &p.discos {
+                for l in &d.lendo {
+                    g.lendo_no_painel.push((l.bytes_lidos, l.bytes_total));
+                }
+            }
+            // Outro "processo": lê o Catálogo por uma segunda abertura.
+            if let Ok(outro) = Catalogo::abrir(&cam2)
+                && let Ok(f) = dag_store::hashes::andamento_fila(
+                    outro.armazem().conexao(),
+                    dag_store::hashes::TipoFila::Hash,
+                    0,
+                )
+            {
+                for d in &f.discos {
+                    for a in &d.lendo {
+                        g.batimento_no_catalogo.push(a.bytes_lidos);
+                    }
+                }
+            }
+        })
+        .executar(&mut cat)
+        .unwrap();
+    assert_eq!(r.desfecho, Desfecho::Concluida);
+    assert_eq!(r.bytes_lidos, total);
+    let v = visto.lock().unwrap();
+    assert!(
+        v.no_meio.len() >= 3,
+        "o progresso global não andou durante a leitura: {:?}",
+        v.no_meio
+    );
+    assert!(v.no_meio.windows(2).all(|w| w[0].0 <= w[1].0));
+    assert!(
+        v.lendo_no_painel
+            .iter()
+            .any(|(l, t)| *l > 0 && *l < *t && *t == total),
+        "o arquivo em leitura não apareceu com bytes parciais: {:?}",
+        v.lendo_no_painel
+    );
+    assert!(
+        v.batimento_no_catalogo.iter().any(|b| *b > 0 && *b < total),
+        "nenhum batimento parcial no Catálogo: {:?}",
+        v.batimento_no_catalogo
+    );
+    // Terminado: a fila não guarda mais batimento de item em andamento.
+    let em_andamento: i64 = cat
+        .armazem()
+        .conexao()
+        .query_row(
+            "SELECT COUNT(*) FROM fila_hash WHERE state = 'em_andamento'",
+            [],
+            |l| l.get(0),
+        )
+        .unwrap();
+    assert_eq!(em_andamento, 0);
+}
+
+/// Estado da execução durante e depois do hash: `em_andamento` enquanto roda (mesmo que o
+/// inventário tenha terminado `concluida_com_erros`), estado final ao terminar.
+#[test]
+fn execucao_volta_a_em_andamento_durante_o_hash_e_fecha_no_fim() {
+    use std::sync::Mutex;
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("acervo");
+    gravar(&raiz.join("a.bin"), &conteudo(1, 3 << 20));
+    let caminho_cat = tmp.path().join("catalogo.db");
+    let mut cat = Catalogo::abrir(&caminho_cat).unwrap();
+    let run = varrer(&raiz, &mut cat);
+    // Estado que o binário antigo deixava: inventário terminado com erros.
+    cat.armazem()
+        .conexao()
+        .execute(
+            "UPDATE scan_runs SET status = 'concluida_com_erros' WHERE id = ?1",
+            [run],
+        )
+        .unwrap();
+    let estados: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let e2 = Arc::clone(&estados);
+    let cam2 = caminho_cat.clone();
+    let r = EtapaHash::nova(ExecucaoId(run))
+        .com_gancho_durante_leitura(|_, _| std::thread::sleep(Duration::from_millis(5)))
+        .com_config(ConfigHash {
+            tamanho_buffer: 1 << 20,
+            intervalo_de_progresso: Duration::from_millis(5),
+            ..ConfigHash::default()
+        })
+        .com_progresso(move |p| {
+            // O aviso "montando a fila" sai antes de a etapa mexer na execução.
+            if p.preparando {
+                return;
+            }
+            if let Ok(o) = Catalogo::abrir(&cam2) {
+                let par: (String, String) = o
+                    .armazem()
+                    .conexao()
+                    .query_row(
+                        "SELECT status, phase FROM scan_runs WHERE id = 1",
+                        [],
+                        |l| Ok((l.get(0)?, l.get(1)?)),
+                    )
+                    .unwrap();
+                e2.lock().unwrap().push(par);
+            }
+        })
+        .executar(&mut cat)
+        .unwrap();
+    assert_eq!(r.desfecho, Desfecho::Concluida);
+    let vistos = estados.lock().unwrap();
+    assert!(
+        vistos
+            .iter()
+            .any(|(s, f)| s == "em_andamento" && f == "hash"),
+        "{vistos:?}"
+    );
+    assert!(
+        !vistos.iter().any(|(s, _)| s == "concluida_com_erros"),
+        "{vistos:?}"
+    );
+    let (status, fase, fim): (String, String, Option<i64>) = cat
+        .armazem()
+        .conexao()
+        .query_row(
+            "SELECT status, phase, ended_at FROM scan_runs WHERE id = ?1",
+            [run],
+            |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(fase, "concluida");
+    assert_eq!(status, "concluida");
+    assert!(fim.is_some());
+}
+
+/// Uma queda no meio do hash deixa `em_andamento`, que a abertura detecta (e a retomada continua
+/// só o hash, sem refazer o inventário).
+#[test]
+fn queda_no_hash_deixa_em_andamento_e_e_detectada_como_interrompida() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("acervo");
+    gravar(&raiz.join("a.bin"), &conteudo(2, 4096));
+    let mut cat = Catalogo::em_memoria().unwrap();
+    let run = varrer(&raiz, &mut cat);
+    cat.armazem()
+        .conexao()
+        .execute_batch(
+            "UPDATE scan_runs SET status = 'em_andamento', phase = 'hash', ended_at = NULL;",
+        )
+        .unwrap();
+    let achadas = cat
+        .armazem_mut()
+        .transacao_imediata(|tx| {
+            dag_store::inventario::detectar_interrompidas(tx, true, i64::MAX / 2)
+        })
+        .unwrap();
+    assert_eq!(achadas.len(), 1);
+    assert_eq!(achadas[0].id, run);
+    assert!(!achadas[0].no_inventario);
+    let r = scan(&raiz).retomar(&mut cat, run).unwrap();
+    assert_eq!(r.execucao_id, run);
+    // Sem refazer o inventário: a execução segue na fase hash, pronta para a etapa de hash.
+    let fase: String = cat
+        .armazem()
+        .conexao()
+        .query_row("SELECT phase FROM scan_runs WHERE id = ?1", [run], |l| {
+            l.get(0)
+        })
+        .unwrap();
+    assert_eq!(fase, "hash");
+    let h = EtapaHash::nova(ExecucaoId(run)).executar(&mut cat).unwrap();
+    assert_eq!(h.hasheados, 1);
+}
+
+// ------------------------------------------------------------------ contador de hashes
+
+fn contador(cat: &Catalogo) -> u64 {
+    dag_store::hashes::total_com_hash(cat.armazem().conexao()).unwrap()
+}
+
+fn contagem_real(cat: &Catalogo) -> u64 {
+    cat.armazem()
+        .conexao()
+        .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get::<_, i64>(0))
+        .unwrap() as u64
+}
+
+/// O contador mantido por gatilhos acompanha `COUNT(*)` em inserção, re-hash (upsert),
+/// DELETE direto e CASCADE da remoção do arquivo.
+#[test]
+fn contador_de_hashes_acompanha_a_tabela() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("acervo");
+    let arqs = arvore(&raiz);
+    let mut cat = Catalogo::em_memoria().unwrap();
+    assert_eq!(contador(&cat), 0);
+    let run = varrer(&raiz, &mut cat);
+    EtapaHash::nova(ExecucaoId(run)).executar(&mut cat).unwrap();
+    let n = arqs.len() as u64;
+    assert_eq!(contagem_real(&cat), n);
+    assert_eq!(contador(&cat), n);
+    // Re-hash de tudo (upsert sobre linhas existentes): não conta em dobro.
+    cat.armazem()
+        .conexao()
+        .execute_batch("UPDATE hashes SET size_bytes = size_bytes + 1; UPDATE files SET ctime_ns = ctime_ns + 1;")
+        .unwrap();
+    let run2 = varrer(&raiz, &mut cat);
+    EtapaHash::nova(ExecucaoId(run2))
+        .executar(&mut cat)
+        .unwrap();
+    assert_eq!(contagem_real(&cat), n);
+    assert_eq!(contador(&cat), n);
+    // DELETE direto.
+    cat.armazem()
+        .conexao()
+        .execute(
+            "DELETE FROM hashes WHERE file_id IN (SELECT file_id FROM hashes LIMIT 2)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(contador(&cat), contagem_real(&cat));
+    assert_eq!(contador(&cat), n - 2);
+    // CASCADE: apagar linhas de `files` leva os hashes junto.
+    cat.armazem()
+        .conexao()
+        .execute(
+            "DELETE FROM files WHERE id IN (SELECT file_id FROM hashes LIMIT 3)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(contador(&cat), contagem_real(&cat));
+    assert_eq!(contador(&cat), n - 5);
+    // Reparo manual: recontar dá o mesmo número.
+    assert_eq!(
+        dag_store::hashes::recontar_com_hash(cat.armazem().conexao()).unwrap(),
+        n - 5
+    );
+}

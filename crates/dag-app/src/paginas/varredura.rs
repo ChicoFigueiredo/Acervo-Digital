@@ -556,6 +556,12 @@ fn painel_hash(ui: &mut egui::Ui, h: &PainelHash) {
                 ui.end_row();
             }
         });
+    // Arquivos grandes em leitura: o contador de arquivos só anda quando um termina.
+    for d in &h.discos {
+        for l in &d.lendo {
+            ui.label(format!("{}: {}", d.nome, painel::lendo_texto(l)));
+        }
+    }
 }
 
 /// Todos os trabalhos do agente (qualquer cliente os pode ter iniciado), com Cancelar para os

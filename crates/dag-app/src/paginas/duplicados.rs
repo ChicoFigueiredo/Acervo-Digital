@@ -29,11 +29,18 @@ pub static PAGINA: DefPagina = DefPagina {
         DefGrupo {
             id: "duplicados.grupos",
             rotulo: "Grupos",
-            acoes: &[DefAcao {
-                id: "duplicados.grupos",
-                rotulo: "Grupos",
-                dica: "Grupos de arquivos idênticos",
-            }],
+            acoes: &[
+                DefAcao {
+                    id: "duplicados.grupos",
+                    rotulo: "Grupos",
+                    dica: "Grupos de arquivos idênticos",
+                },
+                DefAcao {
+                    id: "duplicados.reconstruir",
+                    rotulo: "Reconstruir grupos",
+                    dica: "Refaz os Grupos de Duplicados a partir dos hashes atuais (minutos em Catálogos grandes)",
+                },
+            ],
         },
         DefGrupo {
             id: "duplicados.marcacao",

@@ -26,6 +26,8 @@ pub enum TipoJob {
     Abertura,
     /// Monitoramento contínuo das Raízes (cede a qualquer pedido).
     Monitor,
+    /// Reconstrução dos Grupos de Duplicados (`dag duplicados reconstruir`).
+    Duplicados,
 }
 
 impl TipoJob {
@@ -38,6 +40,7 @@ impl TipoJob {
             Self::VerificacaoIntegridade => "Verificação de Integridade",
             Self::Abertura => "Abertura",
             Self::Monitor => "Monitor",
+            Self::Duplicados => "Agrupando duplicados",
         }
     }
 }

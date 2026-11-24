@@ -310,16 +310,22 @@ impl FullScan {
         // Fase `hash`: o inventário já terminou (estado `concluida`); o que falta é a etapa de
         // hash, que o chamador reexecuta (a fila persistente é reconstruída a partir dos hashes
         // já gravados, então nada é relido).
+        // A etapa de hash deixa a execução `em_andamento` (e, depois de uma queda ou de um
+        // encerramento, `interrompida`) na fase `hash`: o inventário também já terminou.
         let inventario_pronto = matches!(exec.fase, FaseScan::Concluida | FaseScan::Hash)
             && matches!(
                 exec.estado,
-                EstadoScan::Concluida | EstadoScan::ConcluidaComErros
+                EstadoScan::Concluida
+                    | EstadoScan::ConcluidaComErros
+                    | EstadoScan::EmAndamento
+                    | EstadoScan::Pausada
+                    | EstadoScan::Interrompida
             );
         if exec.fase == FaseScan::Concluida || inventario_pronto || !exec.estado.retomavel() {
             if exec.fase == FaseScan::Concluida || inventario_pronto {
                 let c =
                     inventario::contadores_da_execucao(catalogo.armazem().conexao(), execucao_id)?;
-                let desfecho = if exec.estado == EstadoScan::ConcluidaComErros {
+                let desfecho = if exec.estado == EstadoScan::ConcluidaComErros || c.erros > 0 {
                     DesfechoScan::ConcluidaComErros
                 } else {
                     DesfechoScan::Concluida

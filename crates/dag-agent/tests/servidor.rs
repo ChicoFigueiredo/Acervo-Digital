@@ -587,3 +587,68 @@ fn agente_retoma_sozinho_a_execucao_deixada_por_um_processo_morto() {
         .unwrap();
     assert_eq!(n, 4);
 }
+
+/// Agente subido como um cliente o sobe (monitor habilitado, Catálogo ainda sem raízes): a
+/// situação do monitor é a mesma em `Status` e `SaudeMonitor`, nunca "ligado" e "parado" ao mesmo
+/// tempo; depois da abertura e do primeiro scan o monitor fica ativo e um arquivo novo aparece
+/// no Catálogo.
+#[test]
+fn monitor_situacao_unica_e_arquivo_novo_chega_ao_catalogo() {
+    let c = cenario();
+    let srv = Servidor::iniciar(config(&c, true)).unwrap();
+    let mut cli = Cliente::conectar(&c.socket).unwrap();
+    let situacao = |cli: &mut Cliente| {
+        let Resposta::Status {
+            monitor: Some(a), ..
+        } = enviar(cli, Comando::Status { execucao: None })
+        else {
+            panic!()
+        };
+        let Resposta::SaudeMonitor { saude: b } = enviar(cli, Comando::SaudeMonitor) else {
+            panic!()
+        };
+        // Pode haver uma transição entre as duas leituras; fora dela, são idênticas.
+        (a, b)
+    };
+    // Sem raízes catalogadas: nunca "ativo"; diz por que (aguardando ou sem raízes).
+    let (a, _) = situacao(&mut cli);
+    assert!(
+        ["aguardando_abertura", "iniciando", "parado"].contains(&a.situacao.as_str()),
+        "{a:?}"
+    );
+    assert!(!a.em_execucao);
+    if a.situacao == "parado" {
+        assert!(
+            a.situacao_motivo
+                .as_deref()
+                .is_some_and(|m| m.contains("raiz")),
+            "{a:?}"
+        );
+    }
+    let r = enviar(&mut cli, full(&c, false));
+    assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    esperar("monitor ativo na situação única", || {
+        let (a, b) = situacao(&mut cli);
+        a.situacao == "ativo" && b.situacao == "ativo" && a.em_execucao && b.em_execucao
+    });
+    escrever(&c.raiz.join("sub/chegou.txt"), 33);
+    esperar("arquivo novo no Catálogo", || {
+        let cat = dag_store::Catalogo::abrir(&c.catalogo).unwrap();
+        cat.armazem()
+            .conexao()
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE CAST(path_raw AS TEXT) LIKE '%chegou.txt'",
+                [],
+                |l| l.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    });
+    // Um trabalho do agente pausa o monitor e a situação diz isso, com o mesmo texto em todo lugar.
+    let r = enviar(&mut cli, full(&c, true));
+    assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
+    esperar("monitor de volta", || {
+        situacao(&mut cli).0.situacao == "ativo"
+    });
+    srv.encerrar();
+}

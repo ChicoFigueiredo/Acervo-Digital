@@ -355,6 +355,17 @@ pub struct AndamentoDisco {
     pub arquivos_com_erro: u64,
     pub bytes_feitos: u64,
     pub bytes_pendentes: u64,
+    /// Arquivos grandes em leitura agora (batimento recente), do maior para o menor.
+    pub lendo: Vec<ArquivoLendo>,
+}
+
+/// Arquivo em leitura, conforme o último batimento gravado na fila.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArquivoLendo {
+    pub volume_id: i64,
+    pub caminho: String,
+    pub bytes_lidos: u64,
+    pub bytes_total: u64,
 }
 
 /// Fotografia da fila de hash para o `status`: por disco e o instante da última atividade.
@@ -423,6 +434,29 @@ pub fn andamento_fila(conn: &Connection, tipo: TipoFila, desde: i64) -> Resultad
             }
         }
     }
+    // Itens em leitura com batimento recente (`bytes_lidos > 0`: reservados à espera de leitor
+    // têm 0).
+    let mut em_leitura = conn.prepare(
+        "SELECT f.volume_id, f.path_raw, f.logical_bytes, q.bytes_lidos
+         FROM fila_hash q JOIN files f ON f.id = q.file_id
+         WHERE q.tipo = ?1 AND q.state = 'em_andamento' AND q.bytes_lidos > 0
+           AND q.updated_at >= ?2
+         ORDER BY f.logical_bytes DESC LIMIT 64",
+    )?;
+    let mut rows = em_leitura.query(params![tipo.como_str(), desde])?;
+    while let Some(l) = rows.next()? {
+        let vol: i64 = l.get(0)?;
+        let raw: Vec<u8> = l.get(1)?;
+        let a = ArquivoLendo {
+            volume_id: vol,
+            caminho: String::from_utf8_lossy(&raw).into_owned(),
+            bytes_total: l.get::<_, i64>(2)? as u64,
+            bytes_lidos: l.get::<_, i64>(3)? as u64,
+        };
+        if let Some(d) = discos.iter_mut().find(|d| d.volume_ids.contains(&vol)) {
+            d.lendo.push(a);
+        }
+    }
     let ultima: Option<i64> = conn.query_row(
         "SELECT MAX(updated_at) FROM fila_hash WHERE tipo = ?1",
         [tipo.como_str()],
@@ -435,13 +469,77 @@ pub fn andamento_fila(conn: &Connection, tipo: TipoFila, desde: i64) -> Resultad
     })
 }
 
+/// Total de arquivos com hash no Catálogo inteiro: leitura de uma linha do contador mantido por
+/// gatilhos (migração 0007), sem varrer `hashes`.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn total_com_hash(conn: &Connection) -> Resultado<u64> {
+    let n: i64 = conn.query_row(
+        "SELECT valor FROM contadores WHERE chave = 'hashes'",
+        [],
+        |l| l.get(0),
+    )?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// Os Grupos de Duplicados estão desatualizados em relação aos hashes (nunca construídos com
+/// hashes existentes, ou hashes mudaram desde a última reconstrução completa)? Leitura de duas
+/// linhas do contador; ver a migração 0007.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn grupos_desatualizados(conn: &Connection) -> Resultado<bool> {
+    let (mudancas, grupos_em, hashes): (i64, i64, i64) = conn.query_row(
+        "SELECT (SELECT valor FROM contadores WHERE chave = 'hashes_mudancas'),
+                (SELECT valor FROM contadores WHERE chave = 'grupos_em'),
+                (SELECT valor FROM contadores WHERE chave = 'hashes')",
+        [],
+        |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
+    )?;
+    Ok(hashes > 0 && mudancas != grupos_em)
+}
+
+/// Recalcula o contador a partir da tabela (varredura completa; só para reparo manual).
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn recontar_com_hash(conn: &Connection) -> Resultado<u64> {
+    conn.execute(
+        "UPDATE contadores SET valor = (SELECT COUNT(*) FROM hashes) WHERE chave = 'hashes'",
+        [],
+    )?;
+    total_com_hash(conn)
+}
+
+/// Batimento da leitura de arquivos grandes: grava os bytes já lidos dos itens em andamento, para
+/// quem observa o Catálogo de outro processo (`dag status` sem agente). Uma transação para o
+/// lote inteiro; só toca itens ainda `em_andamento`.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn registrar_batimento(conn: &Connection, itens: &[(i64, u64)], agora: i64) -> Resultado<()> {
+    let mut st = conn.prepare_cached(
+        "UPDATE fila_hash SET bytes_lidos = ?2, updated_at = ?3
+         WHERE id = ?1 AND state = 'em_andamento'",
+    )?;
+    for (id, bytes) in itens {
+        st.execute(params![
+            id,
+            i64::try_from(*bytes).unwrap_or(i64::MAX),
+            agora
+        ])?;
+    }
+    Ok(())
+}
+
 /// Devolve à fila (`pendente`) os itens reservados e não concluídos (retomada/cancelamento).
 ///
 /// # Errors
 /// Falha do SQLite.
 pub fn liberar_reservas(conn: &Connection, tipo: TipoFila, agora: i64) -> Resultado<usize> {
     Ok(conn.execute(
-        "UPDATE fila_hash SET state = 'pendente', updated_at = ?2
+        "UPDATE fila_hash SET state = 'pendente', bytes_lidos = 0, updated_at = ?2
          WHERE tipo = ?1 AND state IN ('em_andamento','pausado')",
         params![tipo.como_str(), agora],
     )?)
@@ -453,7 +551,7 @@ pub fn liberar_reservas(conn: &Connection, tipo: TipoFila, agora: i64) -> Result
 /// Falha do SQLite.
 pub fn devolver_item(conn: &Connection, fila_id: i64, agora: i64) -> Resultado<()> {
     conn.execute(
-        "UPDATE fila_hash SET state = 'pendente', updated_at = ?2 WHERE id = ?1",
+        "UPDATE fila_hash SET state = 'pendente', bytes_lidos = 0, updated_at = ?2 WHERE id = ?1",
         params![fila_id, agora],
     )?;
     Ok(())
@@ -516,10 +614,18 @@ pub fn gravar_hash(
 ) -> Resultado<u64> {
     let ids = irmaos(conn, item.file_id)?;
     let mut st = conn.prepare_cached(
-        "INSERT OR REPLACE INTO hashes
+        // Upsert (não `INSERT OR REPLACE`): o REPLACE apaga sem disparar o gatilho que mantém o
+        // contador `contadores.hashes` (migração 0007). A verificação anterior some junto, como
+        // no REPLACE.
+        "INSERT INTO hashes
             (file_id, algoritmo, hash, hashed_at, size_bytes, mtime_ns, ctime_ns, native_file_id)
          SELECT id, 'blake3', ?2, ?3, logical_bytes, mtime_ns, ctime_ns, native_file_id
-         FROM files WHERE id = ?1",
+         FROM files WHERE id = ?1
+         ON CONFLICT(file_id) DO UPDATE SET
+            algoritmo = excluded.algoritmo, hash = excluded.hash, hashed_at = excluded.hashed_at,
+            size_bytes = excluded.size_bytes, mtime_ns = excluded.mtime_ns,
+            ctime_ns = excluded.ctime_ns, native_file_id = excluded.native_file_id,
+            verified_at = NULL, verification_state = NULL",
     )?;
     let mut n = 0;
     for id in ids {

@@ -869,6 +869,12 @@ impl AppDag {
                     ),
                 );
             }
+            Resposta::Ok { mensagem } => {
+                if let Some(m) = mensagem {
+                    self.aviso(Tom::Sucesso, m);
+                }
+                self.invalidar();
+            }
             _ => {}
         }
     }
@@ -922,6 +928,7 @@ impl AppDag {
                 .selecionada
                 .is_none()
                 .then(|| "Selecione uma pasta".to_string()),
+            "duplicados.reconstruir" => m(self.motivo_sem_escrita()),
             "duplicados.copia_principal"
             | "duplicados.marcar_backup"
             | "duplicados.marcar_delecao"
@@ -979,6 +986,13 @@ impl AppDag {
             "duplicados.marcar_backup" => self.pedir_confirmacao(AcaoMarcacao::MarcarBackup),
             "duplicados.marcar_delecao" => self.pedir_confirmacao(AcaoMarcacao::MarcarDelecao),
             "duplicados.desmarcar" => self.pedir_confirmacao(AcaoMarcacao::Desmarcar),
+            "duplicados.reconstruir" => {
+                self.enviar(Comando::ReconstruirDuplicados, Proposito::Exportar);
+                self.aviso(
+                    Tom::Info,
+                    "Agrupando duplicados… (o agente avisa ao terminar)",
+                );
+            }
             "duplicados.relatorio" => {
                 self.duplicados.painel_relatorio = true;
                 abrir("duplicados");

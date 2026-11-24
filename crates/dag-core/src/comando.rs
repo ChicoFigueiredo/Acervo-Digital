@@ -133,6 +133,9 @@ pub enum Comando {
         limite: Option<u32>,
         cursor: Option<String>,
     },
+    /// Reconstrói os Grupos de Duplicados a partir dos hashes atuais e reavalia as Marcações
+    /// (trabalho longo em Catálogos grandes; acompanha-se pelo progresso "Agrupando duplicados").
+    ReconstruirDuplicados,
     /// Um Grupo de Duplicados com todas as cópias, Marcações e Cobertura.
     DetalharGrupo { grupo: GrupoId },
     /// Troca manual da Cópia Principal do grupo; `arquivo: None` volta à escolha automática
@@ -272,8 +275,9 @@ pub struct StatusConfianca {
 /// (um hard link com vários caminhos conta uma vez) e bytes, por disco e no total.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusHash {
-    /// A fila teve atividade recente (alguém está lendo). Falso: pausada, cancelada ou processo
-    /// morto; `dag scan --retomar <id>` continua de onde parou.
+    /// Há leitura de bytes recente (batimento de arquivo grande) ou arquivo concluído recente na
+    /// fila; com o agente respondendo, vale o trabalho em memória. Falso: pausada, cancelada ou
+    /// processo morto; `dag scan --retomar <id>` continua de onde parou.
     pub em_andamento: bool,
     pub arquivos_hasheados: u64,
     pub arquivos_pendentes: u64,
@@ -296,6 +300,10 @@ pub struct StatusDiscoHash {
     pub arquivos_com_erro: u64,
     pub bytes_hasheados: u64,
     pub bytes_pendentes: u64,
+    /// Arquivos grandes em leitura agora (batimento gravado na fila ou, com o agente respondendo,
+    /// o progresso em memória).
+    #[serde(default)]
+    pub lendo: Vec<crate::LeituraEmCurso>,
 }
 
 /// Totais do Catálogo (soma dos agregados por Volume da última varredura de cada um).

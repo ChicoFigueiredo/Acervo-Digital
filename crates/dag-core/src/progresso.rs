@@ -34,6 +34,16 @@ pub struct ProgressoInventario {
     pub entradas_por_segundo: f64,
 }
 
+/// Arquivo grande em leitura agora: `bytes_lidos` de `bytes_total` (sobe durante a leitura, não só
+/// quando o arquivo termina).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeituraEmCurso {
+    /// Caminho do arquivo (exibição).
+    pub caminho: String,
+    pub bytes_lidos: u64,
+    pub bytes_total: u64,
+}
+
 /// Andamento de um Dispositivo Físico na etapa de hash.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProgressoDiscoHash {
@@ -55,6 +65,9 @@ pub struct ProgressoDiscoHash {
     pub bytes_por_seg: f64,
     pub ativo: bool,
     pub concluido: bool,
+    /// Arquivos grandes em leitura neste disco agora (os pequenos não aparecem).
+    #[serde(default)]
+    pub lendo: Vec<LeituraEmCurso>,
 }
 
 /// Andamento da etapa de Hash Completo (ou da Verificação de Integridade), com bytes reais.

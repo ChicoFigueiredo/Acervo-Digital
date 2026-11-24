@@ -672,6 +672,7 @@ fn painel_da_varredura_mostra_a_retomada_do_hash_com_dados_por_disco() {
             bytes_por_seg: 110.0 * 1_048_576.0,
             ativo: true,
             concluido: false,
+            lendo: Vec::new(),
         }],
         ..ProgressoHash::default()
     });

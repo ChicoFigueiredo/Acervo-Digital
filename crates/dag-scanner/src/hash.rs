@@ -30,7 +30,7 @@
 //! * Abre com `O_RDONLY | O_NOATIME` (sem `NOATIME` se o kernel recusar com `EPERM`), nunca
 //!   escreve, não segue symlinks (`O_NOFOLLOW`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -42,7 +42,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dag_core::{ArquivoId, ExecucaoId};
+use dag_core::{ArquivoId, ExecucaoId, LeituraEmCurso};
 use dag_store::Catalogo;
 use dag_store::hashes::{self, FiltroVerificacao, ItemFila, TipoFila};
 use dag_store::inventario::{self, EstadoScan, NovoProblema, Severidade};
@@ -73,6 +73,12 @@ pub struct ConfigHash {
     /// Lotes grandes evitam consultar a fila a cada poucos arquivos; testes usam valores
     /// pequenos para observar pausa e cancelamento no meio do trabalho.
     pub reserva_por_disco: usize,
+    /// A partir deste tamanho o arquivo é "grande": aparece em `lendo` no progresso e tem o
+    /// andamento gravado na fila (batimento) enquanto é lido (padrão 256 MiB).
+    pub limiar_arquivo_grande: u64,
+    /// Intervalo mínimo entre batimentos gravados no Catálogo (padrão 3 s). Uma transação para
+    /// todos os arquivos grandes em leitura; só grava o que avançou.
+    pub intervalo_batimento: Duration,
 }
 
 impl Default for ConfigHash {
@@ -84,6 +90,8 @@ impl Default for ConfigHash {
             tamanho_buffer: 1 << 20,
             intervalo_de_progresso: Duration::from_millis(250),
             reserva_por_disco: 0,
+            limiar_arquivo_grande: 256 << 20,
+            intervalo_batimento: Duration::from_secs(3),
         }
     }
 }
@@ -109,6 +117,8 @@ pub struct ProgressoDisco {
     pub threads: u32,
     /// Leituras em curso agora (no máximo `threads`).
     pub leitores_ativos: u32,
+    /// Arquivos grandes em leitura agora, com os bytes já lidos de cada um.
+    pub lendo: Vec<LeituraEmCurso>,
 }
 
 /// Instantâneo de progresso da etapa.
@@ -176,6 +186,8 @@ pub struct ResultadoVerificacao {
 
 type CallbackProgresso = Box<dyn FnMut(&ProgressoHash) + Send>;
 type Gancho = Arc<dyn Fn(&Path) + Send + Sync>;
+/// Chamado depois de cada pedaço lido, com o caminho e os bytes lidos do arquivo até ali.
+type GanchoPedaco = Arc<dyn Fn(&Path, u64) + Send + Sync>;
 
 fn agora() -> i64 {
     SystemTime::now()
@@ -192,6 +204,7 @@ pub struct EtapaHash {
     controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     gancho: Option<Gancho>,
+    gancho_pedaco: Option<GanchoPedaco>,
 }
 
 impl std::fmt::Debug for EtapaHash {
@@ -213,6 +226,7 @@ impl EtapaHash {
             controle: ControleScan::novo(),
             progresso: None,
             gancho: None,
+            gancho_pedaco: None,
         }
     }
 
@@ -225,6 +239,18 @@ impl EtapaHash {
     #[must_use]
     pub fn com_controle(mut self, c: ControleScan) -> Self {
         self.controle = c;
+        self
+    }
+
+    /// Ponto de teste: chamado na thread leitora depois de cada pedaço lido (permite deixar a
+    /// leitura lenta e observar o andamento no meio do arquivo). Não faz parte da API estável.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn com_gancho_durante_leitura(
+        mut self,
+        f: impl Fn(&Path, u64) + Send + Sync + 'static,
+    ) -> Self {
+        self.gancho_pedaco = Some(Arc::new(f));
         self
     }
 
@@ -270,6 +296,10 @@ impl EtapaHash {
                 let fase = hashes::fase_da_execucao(tx, run_id)?
                     .ok_or(ErroScan::ExecucaoInexistente(run_id))?;
                 hashes::definir_fase(tx, run_id, "hash")?;
+                // A execução volta a `em_andamento` enquanto o hash roda (um status terminal
+                // do inventário, como `concluida_com_erros`, enganaria quem lê o Catálogo); uma
+                // queda agora deixa `em_andamento`, que a abertura detecta como interrompida.
+                inventario::definir_estado(tx, run_id, EstadoScan::EmAndamento, None, t)?;
                 hashes::definir_parada_deliberada(tx, run_id, false)?;
                 hashes::liberar_reservas(tx, TipoFila::Hash, t)?;
                 let resumo = hashes::preparar_fila_hash(tx, run_id, t)?;
@@ -286,13 +316,33 @@ impl EtapaHash {
             controle: self.controle,
             progresso: self.progresso,
             gancho: self.gancho,
+            gancho_pedaco: self.gancho_pedaco,
             arquivos_total: resumo.candidatos,
             bytes_total: resumo.bytes_total,
             reaproveitados: resumo.reaproveitados,
             erros: 0,
             amostras: VecDeque::new(),
         };
-        let r = motor.rodar(cat, inicio)?;
+        let r = match motor.rodar(cat, inicio) {
+            Ok(r) => r,
+            Err(e) => {
+                // Falha do Catálogo no meio: não deixa `em_andamento` num processo que segue
+                // vivo (a abertura retoma uma execução interrompida).
+                let _ = cat
+                    .armazem_mut()
+                    .transacao_imediata(|tx| -> Result<(), ErroScan> {
+                        inventario::definir_estado(
+                            tx,
+                            run_id,
+                            EstadoScan::Interrompida,
+                            None,
+                            agora(),
+                        )?;
+                        Ok(())
+                    });
+                return Err(e);
+            }
+        };
         let desfecho = if r.cancelado {
             Desfecho::Cancelada
         } else if r.erros > 0 {
@@ -314,20 +364,41 @@ impl EtapaHash {
         cat.armazem_mut()
             .transacao_imediata(|tx| -> Result<(), ErroScan> {
                 hashes::salvar_contadores_etapa(tx, run_id, "hash", &json)?;
+                // Estado final: `concluida_com_erros` se a execução tem problemas (inventário ou
+                // hash), senão `concluida`. A fase diz se ainda falta hash.
+                let com_erros: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM scan_errors WHERE run_id = ?1 AND severity <> 'info'",
+                    [run_id],
+                    |l| l.get(0),
+                )?;
+                let final_ = if com_erros > 0 || r.erros > 0 {
+                    EstadoScan::ConcluidaComErros
+                } else {
+                    EstadoScan::Concluida
+                };
                 if r.cancelado {
                     // Encerramento do programa continua sozinho na próxima abertura; cancelamento
                     // do usuário não.
                     hashes::definir_parada_deliberada(tx, run_id, !controle.encerrando())?;
                     if controle.encerrando() {
+                        inventario::definir_estado(
+                            tx,
+                            run_id,
+                            EstadoScan::Interrompida,
+                            None,
+                            agora(),
+                        )?;
                         tx.execute(
                             "UPDATE scan_runs SET retomada_automatica = 1 WHERE id = ?1",
                             [run_id],
                         )?;
                     } else {
+                        inventario::definir_estado(tx, run_id, final_, None, agora())?;
                         inventario::limpar_retomada_automatica(tx, run_id)?;
                     }
                 } else {
                     hashes::definir_fase(tx, run_id, &fase_final)?;
+                    inventario::definir_estado(tx, run_id, final_, None, agora())?;
                     inventario::limpar_retomada_automatica(tx, run_id)?;
                 }
                 Ok(())
@@ -454,6 +525,7 @@ impl VerificacaoIntegridade {
             controle: self.controle,
             progresso: self.progresso,
             gancho: None,
+            gancho_pedaco: None,
             arquivos_total: total.0,
             bytes_total: total.1,
             reaproveitados: 0,
@@ -609,17 +681,69 @@ fn falha_io(e: &std::io::Error) -> Saida {
     }
 }
 
+/// O que um leitor está lendo agora (para o progresso e o batimento).
+struct EmLeitura {
+    fila_id: i64,
+    caminho: String,
+    total: u64,
+}
+
+/// Estado de uma thread leitora, lido pelo coordenador: bytes do arquivo atual sobem a cada
+/// pedaço lido, sem esperar o arquivo terminar.
+#[derive(Default)]
+struct Vaga {
+    atual: Mutex<Option<EmLeitura>>,
+    lidos: AtomicU64,
+}
+
+impl Vaga {
+    fn iniciar(&self, item: &ItemFila, caminho: &Path) {
+        self.lidos.store(0, Ordering::Relaxed);
+        *self.atual.lock().unwrap_or_else(PoisonError::into_inner) = Some(EmLeitura {
+            fila_id: item.fila_id,
+            caminho: caminho.to_string_lossy().into_owned(),
+            total: u64::try_from(item.tamanho).unwrap_or(0),
+        });
+    }
+
+    fn limpar(&self) {
+        *self.atual.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// `(fila_id, leitura)` se há arquivo de pelo menos `minimo` bytes em leitura.
+    fn ver(&self, minimo: u64) -> Option<(i64, LeituraEmCurso)> {
+        let g = self.atual.lock().unwrap_or_else(PoisonError::into_inner);
+        let e = g.as_ref().filter(|e| e.total >= minimo)?;
+        Some((
+            e.fila_id,
+            LeituraEmCurso {
+                caminho: e.caminho.clone(),
+                bytes_lidos: self.lidos.load(Ordering::Relaxed).min(e.total),
+                bytes_total: e.total,
+            },
+        ))
+    }
+}
+
 struct Leitor<'a> {
     verificacao: bool,
     abortar: &'a (dyn Fn() -> bool + Sync),
     limitador: Option<&'a Limitador>,
     gancho: Option<&'a Gancho>,
+    gancho_pedaco: Option<&'a GanchoPedaco>,
     bytes_lidos: &'a AtomicU64,
     bytes_disco: &'a AtomicU64,
+    vaga: &'a Vaga,
 }
 
 impl Leitor<'_> {
     fn ler(&self, item: &ItemFila, buf: &mut [u8]) -> Saida {
+        let saida = self.ler_arquivo(item, buf);
+        self.vaga.limpar();
+        saida
+    }
+
+    fn ler_arquivo(&self, item: &ItemFila, buf: &mut [u8]) -> Saida {
         if (self.abortar)() {
             return Saida::Abortado;
         }
@@ -645,6 +769,7 @@ impl Leitor<'_> {
             };
         }
         let _ = rustix::fs::fadvise(&f, 0, None, Advice::Sequential);
+        self.vaga.iniciar(item, caminho);
         let mut hasher = blake3::Hasher::new();
         let mut lidos: u64 = 0;
         loop {
@@ -661,6 +786,10 @@ impl Leitor<'_> {
             lidos += n as u64;
             self.bytes_lidos.fetch_add(n as u64, Ordering::Relaxed);
             self.bytes_disco.fetch_add(n as u64, Ordering::Relaxed);
+            self.vaga.lidos.store(lidos, Ordering::Relaxed);
+            if let Some(g) = self.gancho_pedaco {
+                g(caminho, lidos);
+            }
             if let Some(l) = self.limitador {
                 l.consumir(n as u64, self.abortar);
             }
@@ -700,6 +829,7 @@ struct Motor {
     controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     gancho: Option<Gancho>,
+    gancho_pedaco: Option<GanchoPedaco>,
     arquivos_total: u64,
     bytes_total: u64,
     reaproveitados: u64,
@@ -707,6 +837,21 @@ struct Motor {
     erros: u64,
     /// Amostras recentes para as vazões de janela móvel.
     amostras: VecDeque<Amostra>,
+}
+
+/// Controle do batimento: quando foi o último e o que ele gravou (por item da fila).
+struct Batimento {
+    ultimo: Instant,
+    gravados: HashMap<i64, u64>,
+}
+
+impl Batimento {
+    fn novo() -> Self {
+        Self {
+            ultimo: Instant::now(),
+            gravados: HashMap::new(),
+        }
+    }
 }
 
 /// Largura da janela móvel das vazões.
@@ -885,8 +1030,14 @@ impl Motor {
             rxs.push(Mutex::new(rx));
         }
         let bytes_disco: Vec<AtomicU64> = discos.iter().map(|_| AtomicU64::new(0)).collect();
+        let vagas: Vec<Vec<Vaga>> = discos
+            .iter()
+            .map(|_| (0..por_disco).map(|_| Vaga::default()).collect())
+            .collect();
+        let mut batimento = Batimento::novo();
         let (tx_saida, rx_saida) = mpsc::channel::<SaidaItem>();
         let gancho = self.gancho.take();
+        let gancho_pedaco = self.gancho_pedaco.take();
         let mut conta = Contagem::default();
         let mut feitos_linhas: u64 = self.reaproveitados;
         let mut ultimo = Instant::now()
@@ -896,6 +1047,7 @@ impl Motor {
         self.emitir(
             &discos,
             &bytes_disco,
+            &vagas,
             feitos_linhas,
             &bytes_lidos,
             inicio,
@@ -922,7 +1074,7 @@ impl Motor {
                         }
                         discos[g].iniciado = Some(Instant::now());
                         ativos += 1;
-                        for _ in 0..por_disco {
+                        for vaga in &vagas[g] {
                             let tx = tx_saida.clone();
                             let rx = &rxs[g];
                             let leitor = Leitor {
@@ -930,8 +1082,10 @@ impl Motor {
                                 abortar: &abortar,
                                 limitador: limitador.as_ref(),
                                 gancho: gancho.as_ref(),
+                                gancho_pedaco: gancho_pedaco.as_ref(),
                                 bytes_lidos: &bytes_lidos,
                                 bytes_disco: &bytes_disco[g],
+                                vaga,
                             };
                             s.spawn(move || {
                                 let mut buf = vec![0u8; buffer];
@@ -998,6 +1152,7 @@ impl Motor {
                         self.emitir(
                             &discos,
                             &bytes_disco,
+                            &vagas,
                             feitos_linhas,
                             &bytes_lidos,
                             inicio,
@@ -1040,9 +1195,11 @@ impl Motor {
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break Ok(()),
                 }
+                self.bater(cat, &vagas, &mut batimento);
                 self.emitir(
                     &discos,
                     &bytes_disco,
+                    &vagas,
                     feitos_linhas,
                     &bytes_lidos,
                     inicio,
@@ -1091,6 +1248,7 @@ impl Motor {
         self.emitir(
             &discos,
             &bytes_disco,
+            &vagas,
             feitos_linhas,
             &bytes_lidos,
             inicio,
@@ -1100,11 +1258,49 @@ impl Motor {
         Ok(conta)
     }
 
+    /// Batimento: grava no Catálogo os bytes já lidos dos arquivos grandes em leitura, para quem
+    /// observa de outro processo. No máximo a cada `intervalo_batimento`, uma só transação para
+    /// todos, e só o que avançou desde o último batimento; erro de gravação não derruba a etapa
+    /// (o batimento é informativo).
+    fn bater(&self, cat: &mut Catalogo, vagas: &[Vec<Vaga>], b: &mut Batimento) {
+        if b.ultimo.elapsed() < self.config.intervalo_batimento {
+            return;
+        }
+        b.ultimo = Instant::now();
+        let mut avancou: Vec<(i64, u64)> = Vec::new();
+        let mut ativos: HashMap<i64, u64> = HashMap::new();
+        for v in vagas.iter().flatten() {
+            if let Some((id, l)) = v.ver(self.config.limiar_arquivo_grande) {
+                ativos.insert(id, l.bytes_lidos);
+                if l.bytes_lidos > 0 && b.gravados.get(&id) != Some(&l.bytes_lidos) {
+                    avancou.push((id, l.bytes_lidos));
+                }
+            }
+        }
+        b.gravados = ativos;
+        if avancou.is_empty() {
+            return;
+        }
+        let t = agora();
+        if cat
+            .armazem_mut()
+            .transacao_imediata(|tx| -> Result<(), ErroScan> {
+                hashes::registrar_batimento(tx, &avancou, t)?;
+                Ok(())
+            })
+            .is_err()
+        {
+            // Tenta de novo no próximo intervalo.
+            b.gravados.clear();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emitir(
         &mut self,
         discos: &[Disco],
         bytes_disco: &[AtomicU64],
+        vagas: &[Vec<Vaga>],
         feitos: u64,
         bytes: &AtomicU64,
         inicio: Instant,
@@ -1128,7 +1324,8 @@ impl Motor {
             .iter()
             .zip(por_disco_bytes)
             .zip(&v.por_disco)
-            .map(|((d, lidos_d), bps)| ProgressoDisco {
+            .enumerate()
+            .map(|(i, ((d, lidos_d), bps))| ProgressoDisco {
                 disco: d.nome.clone(),
                 volumes: d.volumes.clone(),
                 arquivos_feitos: d.feitos,
@@ -1139,6 +1336,10 @@ impl Motor {
                 ativo: d.iniciado.is_some() && !d.encerrado,
                 concluido: d.encerrado,
                 threads: u32::try_from(self.config.threads_por_disco.max(1)).unwrap_or(u32::MAX),
+                lendo: vagas[i]
+                    .iter()
+                    .filter_map(|v| v.ver(self.config.limiar_arquivo_grande).map(|(_, l)| l))
+                    .collect(),
                 leitores_ativos: if d.iniciado.is_some() && !d.encerrado {
                     u32::try_from(d.em_voo.min(self.config.threads_por_disco.max(1)))
                         .unwrap_or(u32::MAX)

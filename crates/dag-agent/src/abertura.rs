@@ -132,6 +132,8 @@ pub struct RelatorioAbertura {
     /// A rotina foi interrompida (cancelamento ou encerramento); o que sobrou continua retomável.
     pub cancelada: bool,
     pub avisos: Vec<String>,
+    /// Os Grupos de Duplicados estavam desatualizados e foram reconstruídos pela abertura.
+    pub duplicados_reconstruidos: bool,
 }
 
 impl RelatorioAbertura {
@@ -141,6 +143,7 @@ impl RelatorioAbertura {
         self.encerramento_nao_limpo
             || !self.interrompidas.is_empty()
             || !self.passadas.is_empty()
+            || self.duplicados_reconstruidos
             || !self.avisos.is_empty()
     }
 }
@@ -174,6 +177,28 @@ impl Agente {
     /// # Errors
     /// [`ErroAgente::Invalido`] se esta instância não é a escritora; falhas do Catálogo.
     pub fn recuperar_ao_abrir(
+        &mut self,
+        politica: &PoliticaAbertura,
+    ) -> Result<RelatorioAbertura, ErroAgente> {
+        let mut rel = self.recuperar_etapas(politica)?;
+        // Hashes existem mas os Grupos de Duplicados nunca foram construídos (ou são mais antigos
+        // que a última mudança de hash): reconstrói agora, no escritor.
+        if !rel.cancelada
+            && !self.controle.cancelado()
+            && dag_store::hashes::grupos_desatualizados(self.catalogo.armazem().conexao())?
+        {
+            self.mensagem("abertura: Grupos de Duplicados desatualizados; reconstruindo...");
+            match self.atualizar_duplicados() {
+                Ok(_) => rel.duplicados_reconstruidos = true,
+                Err(e) => rel
+                    .avisos
+                    .push(format!("Grupos de Duplicados não foram reconstruídos: {e}")),
+            }
+        }
+        Ok(rel)
+    }
+
+    fn recuperar_etapas(
         &mut self,
         politica: &PoliticaAbertura,
     ) -> Result<RelatorioAbertura, ErroAgente> {

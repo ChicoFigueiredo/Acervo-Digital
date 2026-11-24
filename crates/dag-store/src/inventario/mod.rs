@@ -391,7 +391,7 @@ pub struct ExecucaoInterrompida {
     pub modo: String,
     pub raizes: Vec<String>,
     pub fase: FaseScan,
-    /// Estava no meio do inventário (`em_andamento`/`pausada`) e passou a `interrompida`.
+    /// Estava no meio do inventário (fase `inventario`/`estatisticas`), não no hash.
     pub no_inventario: bool,
 }
 
@@ -447,7 +447,10 @@ pub fn detectar_interrompidas(
             |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?)),
         )
         .optional()?;
-    for (id, modo, raizes, fase, no_inventario) in candidatas {
+    for (id, modo, raizes, fase, _) in candidatas {
+        // Na fase `hash` (a etapa de hash deixa a execução `em_andamento`) o inventário já
+        // terminou: a retomada continua só o hash.
+        let no_inventario = !matches!(fase.as_str(), "hash" | "verificacao" | "concluida");
         conn.execute(
             "UPDATE scan_runs SET status = 'interrompida', ended_at = COALESCE(ended_at, ?2)
              WHERE id = ?1",

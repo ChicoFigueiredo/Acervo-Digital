@@ -86,6 +86,7 @@ fn lista_todas_as_ferramentas_com_schema_valido() {
         "status",
         "explorar",
         "listar_duplicados",
+        "reconstruir_duplicados",
         "detalhar_grupo",
         "definir_copia_principal",
         "marcar_backup",

@@ -44,6 +44,10 @@ pub const MIGRACOES: &[Migracao] = &[
         "fila de hash com volume_id denormalizado e índice por volume",
         include_str!("../migrations/0006_fila_hash_volume.sql"),
     ),
+    Migracao::sql(
+        "contador mantido de arquivos com hash (evita COUNT(*) em dezenas de milhões de linhas)",
+        include_str!("../migrations/0007_contador_hashes.sql"),
+    ),
 ];
 
 /// Versão do esquema desta build (`PRAGMA user_version` esperado).

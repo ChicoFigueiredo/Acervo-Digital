@@ -147,6 +147,11 @@ fn parse_tamanho(s: &str) -> Result<u64, String> {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
+enum AcaoDuplicados {
+    Reconstruir,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
 enum OrdemArg {
     Recuperavel,
     Tamanho,
@@ -266,6 +271,10 @@ enum Sub {
     Jobs,
     /// Lista Grupos de Duplicados (maior espaço recuperável primeiro)
     Duplicados {
+        /// `reconstruir`: refaz os Grupos de Duplicados a partir dos hashes atuais (minutos em
+        /// Catálogos grandes; roda no agente com progresso) em vez de listar
+        #[arg(value_enum)]
+        acao: Option<AcaoDuplicados>,
         /// Só grupos com cópia neste Volume (id, rótulo ou ponto de montagem)
         #[arg(long)]
         volume: Option<String>,
@@ -517,6 +526,11 @@ fn montar(sub: Sub) -> Option<Comando> {
         },
         Sub::Jobs => Comando::ListarJobs,
         Sub::Duplicados {
+            acao: Some(AcaoDuplicados::Reconstruir),
+            ..
+        } => Comando::ReconstruirDuplicados,
+        Sub::Duplicados {
+            acao: None,
             volume,
             min_tamanho,
             ordem,
@@ -819,12 +833,19 @@ fn agente_json(info: Option<&dag_agent::InfoServidor>) -> serde_json::Value {
     }
 }
 
-fn agente_texto(info: Option<&dag_agent::InfoServidor>) -> String {
+fn agente_texto(
+    info: Option<&dag_agent::InfoServidor>,
+    monitor: Option<&dag_core::SaudeMonitorInfo>,
+) -> String {
     match info {
+        // A situação do monitor vem da mesma fonte da linha "Monitor:" (a resposta do agente).
         Some(i) => format!(
             "Agente: servindo (pid {}, monitor {})\n",
             i.pid,
-            if i.monitor { "ligado" } else { "desligado" }
+            monitor.map_or_else(
+                || if i.monitor { "habilitado" } else { "desligado" }.to_string(),
+                saida::situacao_monitor
+            )
         ),
         None => "Agente: nenhum em execução (este comando rodou numa sessão em processo)\n".into(),
     }
@@ -893,7 +914,11 @@ fn main() -> ExitCode {
         }
     } else {
         if let Some(info) = &agente {
-            println!("{}", agente_texto(info.as_ref()));
+            let monitor = match &resposta {
+                Resposta::Status { monitor, .. } => monitor.as_ref(),
+                _ => None,
+            };
+            print!("{}", agente_texto(info.as_ref(), monitor));
         }
         saida::imprimir(&resposta, todos);
         if let Some(j) = &jobs {

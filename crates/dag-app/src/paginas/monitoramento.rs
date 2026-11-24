@@ -58,11 +58,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
                 .num_columns(2)
                 .show(ui, |ui| {
                     ui.label("Estado");
-                    ui.label(if m.em_execucao {
-                        format!("{} (ativo)", m.estado)
-                    } else {
-                        format!("{} (parado)", m.estado)
-                    });
+                    ui.label(m.situacao_texto());
                     ui.end_row();
                     ui.label("Backlog");
                     ui.label(inteiro_pt_br(m.backlog));

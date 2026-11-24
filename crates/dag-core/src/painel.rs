@@ -8,7 +8,8 @@
 
 use crate::formato::{bytes_humanos, inteiro_pt_br};
 use crate::{
-    EstadoJob, OrigemJob, PassoAbertura, ProgressoDiscoHash, ProgressoHash, TipoJob, TipoPasso,
+    EstadoJob, LeituraEmCurso, OrigemJob, PassoAbertura, ProgressoDiscoHash, ProgressoHash,
+    TipoJob, TipoPasso,
 };
 
 /// Janela mínima (ms) de medição para a estimativa de tempo restante deixar de ser "estimando…".
@@ -172,6 +173,19 @@ pub struct PainelDisco {
     pub estado: EstadoDisco,
     /// Segundos restantes; `None` = "estimando…" (ou concluído).
     pub eta_s: Option<u64>,
+    /// Arquivos grandes em leitura agora (bytes lidos de cada um, sobem durante a leitura).
+    pub lendo: Vec<LeituraEmCurso>,
+}
+
+/// `lendo /caminho/arquivo.iso (12,3 GiB de 205,0 GiB)`.
+#[must_use]
+pub fn lendo_texto(l: &LeituraEmCurso) -> String {
+    format!(
+        "lendo {} ({} de {})",
+        l.caminho,
+        bytes_humanos(l.bytes_lidos),
+        bytes_humanos(l.bytes_total)
+    )
 }
 
 /// Totais da etapa de hash.
@@ -315,6 +329,7 @@ fn disco_do_evento(d: &ProgressoDiscoHash, h: &ProgressoHash, pausado: bool) -> 
             EstadoDisco::Concluido => None,
             _ => eta_s(restante, d.bytes_por_seg, h.janela_ms),
         },
+        lendo: d.lendo.clone(),
     }
 }
 
@@ -409,6 +424,7 @@ fn titulo(e: &EntradaPainel<'_>, etapa: EtapaPainel) -> String {
             }
         }
         Some(TipoJob::Monitor) => "Monitor".into(),
+        Some(TipoJob::Duplicados) => "Agrupando duplicados".into(),
         Some(TipoJob::FullScan) | None => {
             if etapa == EtapaPainel::Verificacao {
                 "Verificação de integridade".into()
@@ -661,6 +677,13 @@ fn linhas_hash(h: &PainelHash) -> Vec<String> {
         ) {
             v.push(format!("    {l}"));
         }
+        // Arquivos grandes: o contador de arquivos só anda quando um termina, então mostra o
+        // andamento de dentro do arquivo.
+        for d in &h.discos {
+            for l in &d.lendo {
+                v.push(format!("    {}: {}", d.nome, lendo_texto(l)));
+            }
+        }
     }
     v
 }
@@ -722,6 +745,7 @@ mod testes {
             bytes_por_seg: bps,
             ativo: true,
             concluido: false,
+            lendo: Vec::new(),
         }
     }
 
@@ -972,6 +996,24 @@ mod testes {
         assert_eq!(
             painel.hash.unwrap().discos[2].estado,
             EstadoDisco::Aguardando
+        );
+    }
+
+    #[test]
+    fn arquivo_grande_em_leitura_aparece_no_painel_com_gb_lidos() {
+        let mut h = hash(30_000);
+        h.discos[0].lendo = vec![LeituraEmCurso {
+            caminho: "/mnt/a/backup.img".into(),
+            bytes_lidos: 12 << 30,
+            bytes_total: 205 << 30,
+        }];
+        let p = passo_retomada();
+        let painel = PainelJob::montar(&entrada(Some(&h), Some(&p)));
+        assert_eq!(painel.hash.as_ref().unwrap().discos[0].lendo.len(), 1);
+        let t = painel.linhas().join("\n");
+        assert!(
+            t.contains("lendo /mnt/a/backup.img (12,0 GiB de 205,0 GiB)"),
+            "{t}"
         );
     }
 }

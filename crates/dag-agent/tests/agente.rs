@@ -393,6 +393,66 @@ fn status_mostra_a_etapa_de_hash_e_retomar_a_conclui() {
     assert!(execucoes[0].hash.is_none());
 }
 
+/// Um arquivo de centenas de GB em leitura há mais que a janela: nenhum item concluído, mas o
+/// batimento mantém a etapa "em andamento" (nunca "parada") e mostra o arquivo e os bytes lidos.
+#[test]
+fn hash_de_arquivo_grande_com_batimento_nao_aparece_como_parado() {
+    let c = cenario();
+    {
+        let mut a = agente(&c);
+        a.executar(scan_cmd(&c.raiz));
+    }
+    let agora = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // Tudo velho (fora da janela de 10 min) ...
+    simular_hash_no_meio(&c, 1_000);
+    let status = |c: &Cenario| {
+        let Resposta::Status { execucoes, .. } =
+            executar_comando(&c.catalogo, Comando::Status { execucao: None })
+        else {
+            panic!()
+        };
+        execucoes.into_iter().next().unwrap()
+    };
+    let e = status(&c);
+    assert_eq!(e.estado_detalhe, "hash_parado");
+    // ... menos o item em leitura, com batimento recente.
+    {
+        let cat = Catalogo::abrir(&c.catalogo).unwrap();
+        cat.armazem()
+            .conexao()
+            .execute(
+                "UPDATE fila_hash SET state = 'em_andamento', bytes_lidos = 5000, updated_at = ?1
+                 WHERE id = (SELECT MIN(id) FROM fila_hash WHERE state = 'pendente')",
+                [agora],
+            )
+            .unwrap();
+    }
+    let e = status(&c);
+    assert_eq!(e.estado, EstadoExecucao::EmAndamento);
+    assert_eq!(e.estado_detalhe, "hash_em_andamento");
+    let h = e.hash.as_ref().unwrap();
+    assert!(h.em_andamento);
+    let lendo: Vec<_> = h.discos.iter().flat_map(|d| d.lendo.iter()).collect();
+    assert_eq!(lendo.len(), 1, "{h:?}");
+    assert_eq!(lendo[0].bytes_lidos, 5000);
+    // Sem vazão medida (só o agente sabe a taxa): nada de "0 B/s" inventado.
+    assert_eq!(h.bytes_por_seg, None);
+    // Batimento velho = parada de novo.
+    {
+        let cat = Catalogo::abrir(&c.catalogo).unwrap();
+        cat.armazem()
+            .conexao()
+            .execute("UPDATE fila_hash SET updated_at = 1000", [])
+            .unwrap();
+    }
+    let e = status(&c);
+    assert_eq!(e.estado_detalhe, "hash_parado");
+    assert!(e.hash.unwrap().discos.iter().all(|d| d.lendo.is_empty()));
+}
+
 #[test]
 fn listar_volumes_registra_no_catalogo() {
     let c = cenario();

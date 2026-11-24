@@ -50,7 +50,7 @@ pub use jobs::{EstadoJob, EventoAgente, JobInfo, OrigemJob, TipoJob, VisaoJobs, 
 pub use painel::{EntradaPainel, Onde, PainelJob};
 pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
 pub use progresso::{
-    FaseInventario, PassoAbertura, Progresso, ProgressoDiscoHash, ProgressoHash,
+    FaseInventario, LeituraEmCurso, PassoAbertura, Progresso, ProgressoDiscoHash, ProgressoHash,
     ProgressoInventario, TipoPasso,
 };
 pub use reconciliacao::{EventoInfo, ResumoMonitorInfo, ResumoReconciliacao, SaudeMonitorInfo};

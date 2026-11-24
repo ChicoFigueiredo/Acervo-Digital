@@ -39,7 +39,7 @@ fn hora() -> String {
 /// O que mudou no monitor e vale uma linha (backlog e contadores mudam o tempo todo).
 fn chave_monitor(m: &SaudeMonitorInfo) -> (String, bool, u64, u64, Option<String>) {
     (
-        m.estado.clone(),
+        m.situacao_texto(),
         m.em_execucao,
         m.lacunas_abertas,
         m.overflows,
@@ -50,7 +50,7 @@ fn chave_monitor(m: &SaudeMonitorInfo) -> (String, bool, u64, u64, Option<String
 fn linha_monitor(m: &SaudeMonitorInfo) -> String {
     format!(
         "monitor: {}{}, lacunas abertas {}, overflows {}, backlog {}{}",
-        m.estado,
+        m.situacao_texto(),
         if m.em_execucao { " (vivo)" } else { "" },
         m.lacunas_abertas,
         m.overflows,

@@ -1,15 +1,19 @@
-//! `dag`: CLI do DAG. Cada subcomando monta um [`Comando`] e o executa em processo pelo
-//! `dag-agent` (escritor único do Catálogo). O worker de longa duração com IPC vem depois.
+//! `dag`: CLI do DAG. Cada subcomando monta um [`Comando`] e o envia ao agente em segundo plano
+//! (`dag agente`), se houver um servindo o Catálogo, ou o executa numa sessão em processo pelo
+//! `dag-agent` (escritor único do Catálogo).
 //!
 //! Códigos de saída: 0 ok; 1 erro; 2 ainda não implementado; 130 varredura cancelada (Ctrl-C).
 
 mod saida;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use dag_agent::{Agente, caminho_catalogo_do_ambiente, incremento_pendente, somente_leitura};
+use dag_agent::{
+    Cancelador, Conexao, ConfigServidor, ExibidorStderr, Servidor, caminho_catalogo_do_ambiente,
+    caminho_socket_padrao, incremento_pendente,
+};
 use dag_core::{
-    AcaoServico, Alvo, ArquivoId, Comando, ExecucaoId, GrupoId, MarcacaoId, ModoVarredura,
-    NivelEspaco, OrdemDuplicados, Resposta, TipoRelatorio,
+    AcaoServico, Alvo, ArquivoId, Autor, Comando, ExecucaoId, GrupoId, MarcacaoId, ModoVarredura,
+    NivelEspaco, OrdemDuplicados, Pedido, Resposta, TipoRelatorio,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -28,6 +32,9 @@ struct Cli {
     /// Arquivo do Catálogo (padrão: $DAG_CATALOGO, senão $XDG_DATA_HOME/dag/catalogo.sqlite)
     #[arg(long, global = true, value_name = "ARQUIVO")]
     catalogo: Option<PathBuf>,
+    /// Socket do agente em segundo plano (padrão: $DAG_SOCKET, senão $XDG_RUNTIME_DIR/dag/agente.sock)
+    #[arg(long, global = true, value_name = "ARQUIVO")]
+    socket: Option<PathBuf>,
     #[command(subcommand)]
     comando: Sub,
 }
@@ -149,6 +156,10 @@ enum Sub {
         /// Fast Scan: reconcilia reaproveitando o que não mudou
         #[arg(long, required_unless_present_any = ["full", "retomar"])]
         fast: bool,
+        /// Pastas que negam acesso: pede ao Polkit (pkexec + dag-helper) a leitura só dos
+        /// metadados delas. Nunca roda o DAG como root; a senha vai só ao diálogo do sistema
+        #[arg(long, conflicts_with = "retomar")]
+        elevar: bool,
         /// Retoma a execução ID (cancelada, pausada ou interrompida)
         #[arg(long, value_name = "ID", conflicts_with_all = ["full", "fast", "raizes"])]
         retomar: Option<i64>,
@@ -268,6 +279,13 @@ enum Sub {
     Catalogo(Catalogo),
     /// Servidor MCP por stdio
     Mcp,
+    /// Agente em segundo plano: único escritor do Catálogo, serve o socket local e monitora as
+    /// raízes (processo em primeiro plano; a unidade systemd o usa)
+    Agente {
+        /// Não monitora as raízes catalogadas
+        #[arg(long)]
+        sem_monitor: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -280,12 +298,23 @@ enum Marcar {
 
 #[derive(Subcommand, Debug)]
 enum Servico {
+    /// Estado do serviço (instalado, autostart, ativo, PID, linger)
+    Estado,
+    /// Instala a unidade systemd de usuário (não habilita nem inicia)
     Instalar,
+    /// Para, desabilita e remove a unidade
     Remover,
     Iniciar,
     Parar,
-    /// Liga ou desliga a inicialização automática
+    Reiniciar,
+    /// Liga ou desliga a inicialização automática (no login)
     Autostart {
+        #[arg(value_parser = ["on", "off"])]
+        estado: String,
+    },
+    /// Linger: mantém o serviço de usuário desde o boot e após o último logout
+    /// (`loginctl enable-linger`; pode pedir autorização do Polkit)
+    Linger {
         #[arg(value_parser = ["on", "off"])]
         estado: String,
     },
@@ -335,6 +364,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             full,
             raizes,
             sem_hash,
+            elevar,
             ..
         } => Comando::IniciarScan {
             modo: if full {
@@ -344,6 +374,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             },
             raizes,
             sem_hash,
+            elevar,
         },
         Sub::Monitorar {
             raizes,
@@ -432,6 +463,11 @@ fn montar(sub: Sub) -> Option<Comando> {
         },
         Sub::Servico(s) => Comando::Servico {
             acao: match s {
+                Servico::Estado => AcaoServico::Estado,
+                Servico::Reiniciar => AcaoServico::Reiniciar,
+                Servico::Linger { estado } => AcaoServico::PersistirSemSessao {
+                    ativo: estado == "on",
+                },
                 Servico::Instalar => AcaoServico::Instalar,
                 Servico::Remover => AcaoServico::Remover,
                 Servico::Iniciar => AcaoServico::Iniciar,
@@ -442,21 +478,21 @@ fn montar(sub: Sub) -> Option<Comando> {
             },
         },
         Sub::Catalogo(Catalogo::Backup { destino }) => Comando::BackupCatalogo { destino },
-        Sub::Mcp => return None,
+        Sub::Mcp | Sub::Agente { .. } => return None,
     })
 }
 
 static INTERROMPIDO: AtomicBool = AtomicBool::new(false);
 
 /// Primeiro Ctrl-C cancela a varredura com limpeza (a fila fica retomável); o segundo aborta.
-fn instalar_ctrl_c(agente: &Agente) {
-    let controle = agente.controle();
+/// Com o agente em segundo plano, o cancelamento vai pelo socket e o trabalho dele é que para.
+fn instalar_ctrl_c(cancelador: Cancelador) {
     let r = ctrlc::set_handler(move || {
         if INTERROMPIDO.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
         }
         eprintln!("\ncancelando: gravando o que já foi lido (Ctrl-C de novo aborta)...");
-        controle.cancelar();
+        cancelador.cancelar();
     });
     if let Err(e) = r {
         eprintln!("aviso: Ctrl-C não tratado ({e})");
@@ -472,53 +508,176 @@ fn codigo_de_saida(r: &Resposta) -> u8 {
     }
 }
 
-fn executar(cli: Cli) -> Resposta {
+/// Resultado de um comando e, para `dag status`, quem o atendeu.
+struct Execucao {
+    resposta: Resposta,
+    /// `Some(None)`: sem agente (sessão); `Some(Some(..))`: agente em segundo plano.
+    agente: Option<Option<dag_agent::InfoServidor>>,
+}
+
+fn executar(cli: Cli) -> Execucao {
+    let sem = |resposta| Execucao {
+        resposta,
+        agente: None,
+    };
     let Some(comando) = montar(cli.comando) else {
-        return Resposta::Erro {
+        return sem(Resposta::Erro {
             codigo: "nao_implementado".into(),
-            mensagem: "dag mcp: servidor MCP ainda não implementado (incremento 6)".into(),
-        };
+            mensagem: "subcomando sem comando associado".into(),
+        });
     };
     if let Some(n) = incremento_pendente(&comando) {
-        return Resposta::Erro {
+        return sem(Resposta::Erro {
             codigo: "nao_implementado".into(),
             mensagem: format!("ainda não implementado (incremento {n})"),
-        };
+        });
     }
     let caminho = match caminho_catalogo_do_ambiente(cli.catalogo.as_deref()) {
         Ok(c) => c,
-        Err(e) => return e.para_resposta(),
+        Err(e) => return sem(e.para_resposta()),
     };
-    let agente = if somente_leitura(&comando) {
-        Agente::abrir_leitura(&caminho)
-    } else {
-        Agente::abrir(&caminho)
+    // O serviço é gerido direto no systemd do usuário: não abre o Catálogo (que pode estar com o
+    // agente em segundo plano) nem cria nada.
+    if let Comando::Servico { acao } = &comando {
+        return sem(dag_agent::servico::executar_avulso(*acao, &caminho));
+    }
+    let socket = cli.socket.unwrap_or_else(caminho_socket_padrao);
+    let mut conexao = match Conexao::abrir_para(&caminho, &socket, &comando) {
+        Ok(c) => c,
+        Err(e) => return sem(e.para_resposta()),
     };
-    let mut agente = match agente {
-        Ok(a) => a,
-        Err(e) => return e.para_resposta(),
+    instalar_ctrl_c(conexao.cancelador());
+    let eh_status = matches!(comando, Comando::Status { .. });
+    let mut exibidor = ExibidorStderr::novo();
+    let resposta = match conexao.enviar(
+        Pedido {
+            autor: Autor::Cli,
+            comando,
+        },
+        &mut |p| exibidor.mostrar(p),
+    ) {
+        Ok(r) => r,
+        Err(e) => e.para_resposta(),
     };
-    instalar_ctrl_c(&agente);
-    agente.executar(comando)
+    let agente = eh_status.then(|| conexao.info_daemon());
+    Execucao { resposta, agente }
+}
+
+/// `dag agente`: roda o agente em primeiro plano até SIGTERM/SIGINT e encerra com checkpoint.
+fn rodar_agente(
+    catalogo: Option<&std::path::Path>,
+    socket: Option<PathBuf>,
+    sem_monitor: bool,
+) -> ExitCode {
+    let falha = |e: &dyn std::fmt::Display| {
+        eprintln!("erro: {e}");
+        ExitCode::from(1)
+    };
+    let caminho = match caminho_catalogo_do_ambiente(catalogo) {
+        Ok(c) => c,
+        Err(e) => return falha(&e),
+    };
+    let socket = socket.unwrap_or_else(caminho_socket_padrao);
+    let mut cfg = ConfigServidor::novo(caminho, socket);
+    cfg.monitor = !sem_monitor;
+    let servidor = match Servidor::iniciar(cfg) {
+        Ok(s) => s,
+        Err(e) => return falha(&e),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // `termination`: SIGINT, SIGTERM e SIGHUP.
+    if let Err(e) = ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    }) {
+        return falha(&e);
+    }
+    loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(()) => {
+                eprintln!("agente: sinal recebido; encerrando com checkpoint...");
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if servidor.ativo() => {}
+            Err(_) => break,
+        }
+    }
+    servidor.encerrar();
+    ExitCode::SUCCESS
+}
+
+/// `dag mcp`: servidor MCP por stdio (só quadros do protocolo no stdout; logs no stderr).
+fn servir_mcp(catalogo: Option<&std::path::Path>, socket: Option<PathBuf>) -> ExitCode {
+    let caminho = match caminho_catalogo_do_ambiente(catalogo) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("erro: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let socket = socket.unwrap_or_else(caminho_socket_padrao);
+    match dag_mcp::servir_stdio(&caminho, &socket) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("erro: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn agente_json(info: Option<&dag_agent::InfoServidor>) -> serde_json::Value {
+    match info {
+        Some(i) => serde_json::json!({
+            "servindo": true,
+            "pid": i.pid,
+            "catalogo": i.catalogo,
+            "monitor": i.monitor,
+            "versao": i.versao,
+        }),
+        None => serde_json::json!({ "servindo": false }),
+    }
+}
+
+fn agente_texto(info: Option<&dag_agent::InfoServidor>) -> String {
+    match info {
+        Some(i) => format!(
+            "Agente: servindo (pid {}, monitor {})\n",
+            i.pid,
+            if i.monitor { "ligado" } else { "desligado" }
+        ),
+        None => "Agente: nenhum em execução (este comando rodou numa sessão em processo)\n".into(),
+    }
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if matches!(cli.comando, Sub::Mcp) {
+        return servir_mcp(cli.catalogo.as_deref(), cli.socket);
+    }
+    if let Sub::Agente { sem_monitor } = cli.comando {
+        return rodar_agente(cli.catalogo.as_deref(), cli.socket, sem_monitor);
+    }
     let json = cli.json;
-    let resposta = executar(cli);
+    let Execucao { resposta, agente } = executar(cli);
     let codigo = codigo_de_saida(&resposta);
     if json {
-        match serde_json::to_string(&resposta) {
-            Ok(j) => println!("{j}"),
+        let mut valor = match serde_json::to_value(&resposta) {
+            Ok(v) => v,
             Err(e) => {
                 eprintln!("erro ao serializar resposta: {e}");
                 return ExitCode::from(1);
             }
+        };
+        if let (Some(info), Some(obj)) = (&agente, valor.as_object_mut()) {
+            obj.insert("agente".into(), agente_json(info.as_ref()));
         }
+        println!("{valor}");
         if let Resposta::Erro { mensagem, .. } = &resposta {
             eprintln!("erro: {mensagem}");
         }
     } else {
+        if let Some(info) = &agente {
+            println!("{}", agente_texto(info.as_ref()));
+        }
         saida::imprimir(&resposta);
     }
     ExitCode::from(codigo)

@@ -1,26 +1,25 @@
 //! O [`Agente`]: abre o Catálogo e executa [`Comando`]s.
 
 use std::fmt;
-use std::io::{IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use dag_core::formato::{bytes_humanos, inteiro_pt_br};
 use dag_core::{
-    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId, ModoVarredura,
-    OrdemDuplicados, Pedido, Resposta, ResumoCatalogo, ResumoDuplicados, ResumoHash,
-    ResumoMonitorInfo, ResumoReconciliacao, ResumoVerificacao, SaudeMonitorInfo, StatusExecucao,
-    TipoDispositivo, TipoMarcacao, TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
+    Alvo, Autor, Comando, EstadoExecucao, EtapaVarredura, EventoInfo, ExecucaoId, FaseInventario,
+    ModoVarredura, OrdemDuplicados, Pedido, Progresso, ProgressoInventario, Resposta,
+    ResumoCatalogo, ResumoDuplicados, ResumoHash, ResumoMonitorInfo, ResumoReconciliacao,
+    ResumoVerificacao, SaudeMonitorInfo, StatusExecucao, TipoDispositivo, TipoMarcacao,
+    TipoRelatorio, VolumeDescoberto, VolumeId, VolumeInfo,
 };
 use dag_monitor::{ConfigMonitor, Monitor};
 use dag_platform_linux::descobrir_volumes;
 use dag_scanner::{
-    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan, Progresso,
-    ProgressoHash, ResultadoScan, VerificacaoIntegridade,
+    ControleScan, DesfechoScan, EtapaHash, FaseProgresso, FastScan, FullScan,
+    Progresso as ProgressoScanner, ProgressoHash as ProgressoHashScanner, ResultadoScan,
+    VerificacaoIntegridade,
 };
 use dag_store::Catalogo;
 use dag_store::duplicados::{self, Escopo, FiltroGrupos};
@@ -31,11 +30,13 @@ use rusqlite::{Connection, OpenFlags, params};
 use crate::caminho::preparar;
 use crate::classificador::ClassificadorPorExtensao;
 use crate::erro::ErroAgente;
+use crate::exibir::progresso_stderr;
 use crate::explorar::explorar;
 use crate::finalidade::classificar_execucao;
 use crate::trava::GuardaEscritor;
 
-type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
+/// Destino dos eventos de progresso do agente.
+pub type CallbackProgresso = Arc<dyn Fn(&Progresso) + Send + Sync>;
 
 const STATUS_LIMITE: i64 = 10;
 const PAGINA_PADRAO: u32 = 50;
@@ -68,11 +69,9 @@ pub fn somente_leitura(c: &Comando) -> bool {
 /// Incremento em que o comando passa a existir, se ainda não foi implementado.
 #[must_use]
 pub fn incremento_pendente(c: &Comando) -> Option<u8> {
-    match c {
-        // Pausar/cancelar entre processos e o serviço exigem o worker com IPC.
-        Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Servico { .. } => Some(6),
-        _ => None,
-    }
+    // O serviço (incremento 6) existe: ver `servico.rs`.
+    let _ = c;
+    None
 }
 
 /// O Catálogo aberto, com (ou sem) a trava de escritor.
@@ -154,11 +153,35 @@ impl Agente {
         self
     }
 
-    /// Callback de progresso da varredura (padrão: linha em stderr).
+    /// Callback de progresso (padrão: linha em stderr). Recebe inventário, reconciliação, hash
+    /// com bytes, verificação e mudanças de etapa; pode ser chamado de threads do trabalho.
     #[must_use]
     pub fn com_progresso(mut self, f: impl Fn(&Progresso) + Send + Sync + 'static) -> Self {
         self.progresso = Some(Arc::new(f));
         self
+    }
+
+    /// Troca (ou remove) o destino do progresso numa instância já montada.
+    pub fn definir_progresso(&mut self, f: Option<CallbackProgresso>) {
+        self.progresso = f;
+    }
+
+    /// Emite uma mudança de etapa sem contadores.
+    fn mensagem(&self, texto: impl Into<String>) {
+        if let Some(p) = &self.progresso {
+            p(&Progresso::Mensagem {
+                texto: texto.into(),
+            });
+        }
+    }
+
+    /// Consolida o WAL no arquivo principal (encerramento limpo do serviço).
+    pub fn checkpoint(&self) {
+        let _ = self
+            .catalogo
+            .armazem()
+            .conexao()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
     }
 
     /// Sem saída de progresso.
@@ -211,6 +234,13 @@ impl Agente {
     }
 
     fn tentar(&mut self, comando: Comando) -> Result<Resposta, ErroAgente> {
+        if let Comando::Servico { acao } = &comando {
+            let con = self
+                .guarda
+                .is_some()
+                .then(|| self.catalogo.armazem().conexao());
+            return Ok(crate::servico::executar(*acao, &self.caminho, con));
+        }
         if let Some(n) = incremento_pendente(&comando) {
             return Err(ErroAgente::NaoImplementado(n));
         }
@@ -225,10 +255,14 @@ impl Agente {
                 modo: ModoVarredura::FastScan,
                 raizes,
                 sem_hash,
-            } => self.fast_scan(&raizes, sem_hash),
+                elevar,
+            } => self.fast_scan(&raizes, sem_hash, elevar),
             Comando::IniciarScan {
-                raizes, sem_hash, ..
-            } => self.full_scan(&raizes, sem_hash),
+                raizes,
+                sem_hash,
+                elevar,
+                ..
+            } => self.full_scan(&raizes, sem_hash, elevar),
             Comando::Monitorar {
                 raizes,
                 reconciliar_a_cada_s,
@@ -313,6 +347,9 @@ impl Agente {
                 saida,
             } => self.relatorio(tipo, nivel, limite, cursor.as_deref(), saida.as_deref()),
             Comando::VerificarIntegridade { raizes } => self.verificar(&raizes),
+            // Controlam um trabalho em andamento: só fazem sentido num agente em segundo plano
+            // (que os atende fora da fila). Em processo, nada roda concorrentemente.
+            Comando::Pausar { .. } | Comando::Cancelar { .. } => Err(ErroAgente::SemAgente),
             _ => Err(ErroAgente::NaoImplementado(0)),
         }
     }
@@ -367,40 +404,58 @@ impl Agente {
 
     // ------------------------------------------------------------------ varredura
 
-    fn novo_scan(&self, raizes: Vec<PathBuf>) -> Result<FullScan, ErroAgente> {
+    fn novo_scan(&self, raizes: Vec<PathBuf>, elevar: bool) -> Result<FullScan, ErroAgente> {
+        let elevado = crate::servico::leitor_elevado_se(&raizes, elevar);
         let mut scan = FullScan::novo(raizes, self.volumes_do_sistema()?)
             .com_controle(self.controle.clone())
             .com_classificador(Arc::new(ClassificadorPorExtensao));
+        if let Some(l) = elevado {
+            scan = scan.com_leitor_elevado(l);
+        }
         if let Some(p) = &self.progresso {
             let p = Arc::clone(p);
-            scan = scan.com_progresso(move |x| p(x));
+            scan = scan.com_progresso(move |x| p(&Progresso::Inventario(inventario_de(x))));
         }
         Ok(scan)
     }
 
-    fn full_scan(&mut self, raizes: &[String], sem_hash: bool) -> Result<Resposta, ErroAgente> {
+    fn full_scan(
+        &mut self,
+        raizes: &[String],
+        sem_hash: bool,
+        elevar: bool,
+    ) -> Result<Resposta, ErroAgente> {
         if raizes.is_empty() {
             return Err(ErroAgente::Invalido("informe ao menos uma raiz".into()));
         }
-        let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect())?;
+        let scan = self.novo_scan(raizes.iter().map(PathBuf::from).collect(), elevar)?;
         let r = scan.executar(&mut self.catalogo)?;
         self.concluir_scan(r, sem_hash)
     }
 
     /// Fast Scan (A-12): reconcilia o Catálogo com o disco reaproveitando metadados e hash do
     /// que não mudou. Sem raízes, usa as raízes catalogadas cujo Volume está conectado.
-    fn fast_scan(&mut self, raizes: &[String], sem_hash: bool) -> Result<Resposta, ErroAgente> {
+    fn fast_scan(
+        &mut self,
+        raizes: &[String],
+        sem_hash: bool,
+        elevar: bool,
+    ) -> Result<Resposta, ErroAgente> {
         let raizes: Vec<PathBuf> = if raizes.is_empty() {
             self.raizes_padrao()?
         } else {
             raizes.iter().map(PathBuf::from).collect()
         };
+        let elevado = crate::servico::leitor_elevado_se(&raizes, elevar);
         let mut scan = FastScan::novo(raizes, self.volumes_do_sistema()?)
             .com_controle(self.controle.clone())
             .com_classificador(Arc::new(ClassificadorPorExtensao));
+        if let Some(l) = elevado {
+            scan = scan.com_leitor_elevado(l);
+        }
         if let Some(p) = &self.progresso {
             let p = Arc::clone(p);
-            scan = scan.com_progresso(move |x| p(x));
+            scan = scan.com_progresso(move |x| p(&Progresso::Reconciliacao(inventario_de(x))));
         }
         let r = scan.executar(&mut self.catalogo)?;
         self.concluir_scan(r, sem_hash)
@@ -430,11 +485,11 @@ impl Agente {
                 .map(|v| v.st_dev);
             if r.conectado && dev.is_some() && dev == esperado {
                 out.push(caminho);
-            } else if self.progresso.is_some() {
-                eprintln!(
+            } else {
+                self.mensagem(format!(
                     "raiz ignorada (volume desconectado ou indisponível): {}",
                     caminho.display()
-                );
+                ));
             }
         }
         if out.is_empty() {
@@ -478,9 +533,7 @@ impl Agente {
                 pos_reconciliacao(cat, execucoes, autor).map_err(|e| e.to_string())
             });
         }
-        if self.progresso.is_some() {
-            eprintln!("monitorando (Ctrl-C para encerrar)...");
-        }
+        self.mensagem("monitorando (Ctrl-C para encerrar)...");
         let inicio = Instant::now();
         let r = monitor.executar(&mut self.catalogo, &self.controle)?;
         Ok(Resposta::MonitorEncerrado {
@@ -552,7 +605,7 @@ impl Agente {
     }
 
     fn retomar_scan(&mut self, id: ExecucaoId) -> Result<Resposta, ErroAgente> {
-        let scan = self.novo_scan(Vec::new())?;
+        let scan = self.novo_scan(Vec::new(), false)?;
         let r = scan.retomar(&mut self.catalogo, id.0)?;
         self.concluir_scan(r, false)
     }
@@ -569,15 +622,13 @@ impl Agente {
         let mut duracao = r.duracao;
         let (mut hash, mut dup) = (None, None);
         if r.desfecho != DesfechoScan::Cancelada {
-            if self.progresso.is_some() {
-                eprintln!("classificando finalidade (por caminho)...");
-            }
+            self.mensagem("classificando finalidade (por caminho)...");
             classificar_execucao(&mut self.catalogo, r.execucao_id, agora())?;
             if !sem_hash {
                 let mut etapa =
                     EtapaHash::nova(ExecucaoId(r.execucao_id)).com_controle(self.controle.clone());
-                if self.progresso.is_some() {
-                    etapa = etapa.com_progresso(progresso_hash_stderr());
+                if let Some(p) = &self.progresso {
+                    etapa = etapa.com_progresso(sink_hash(Arc::clone(p), false));
                 }
                 let h = etapa.executar(&mut self.catalogo)?;
                 duracao += h.duracao;
@@ -619,20 +670,16 @@ impl Agente {
 
     /// Reconstrói os Grupos de Duplicados e reavalia as Marcações.
     fn atualizar_duplicados(&mut self) -> Result<ResumoDuplicados, ErroAgente> {
-        if self.progresso.is_some() {
-            eprintln!("[duplicados] reconstruindo Grupos de Duplicados...");
-        }
+        self.mensagem("[duplicados] reconstruindo Grupos de Duplicados...");
         let t = agora();
         duplicados::reconstruir_grupos(&mut self.catalogo, Escopo::Tudo, self.autor, t)?;
-        if self.progresso.is_some() {
-            eprintln!("[marcações] reavaliando Marcações contra o hash atual...");
-        }
+        self.mensagem("[marcações] reavaliando Marcações contra o hash atual...");
         let pendentes = duplicados::reavaliar_marcacoes(&mut self.catalogo, self.autor, t)?;
         let mut r = duplicados::resumo_duplicados(self.catalogo.armazem().conexao())?;
-        if pendentes > 0 && self.progresso.is_some() {
-            eprintln!(
+        if pendentes > 0 {
+            self.mensagem(format!(
                 "[marcações] {pendentes} Marcação(ões) ficaram pendentes (conteúdo mudou); confirme com `dag confirmar`."
-            );
+            ));
         }
         r.marcacoes_pendentes = r.marcacoes_pendentes.max(pendentes);
         Ok(r)
@@ -729,8 +776,8 @@ impl Agente {
         if !raizes.is_empty() {
             v = v.raizes(raizes.iter().map(PathBuf::from));
         }
-        if self.progresso.is_some() {
-            v = v.com_progresso(progresso_hash_stderr());
+        if let Some(p) = &self.progresso {
+            v = v.com_progresso(sink_hash(Arc::clone(p), true));
         }
         let r = v.executar(&mut self.catalogo)?;
         Ok(Resposta::Verificacao {
@@ -826,6 +873,10 @@ impl Agente {
 /// Abre o Catálogo (como escritor, ou só leitura para `Status`/`Explorar`) e executa um comando.
 /// Erros de abertura (inclusive “outro processo do DAG já é o escritor”) viram [`Resposta::Erro`].
 pub fn executar_comando(caminho: &Path, comando: Comando) -> Resposta {
+    // O serviço não precisa do Catálogo (e pode estar rodando como escritor dele).
+    if let Comando::Servico { acao } = &comando {
+        return crate::servico::executar_avulso(*acao, caminho);
+    }
     if let Some(n) = incremento_pendente(&comando) {
         return ErroAgente::NaoImplementado(n).para_resposta();
     }
@@ -925,69 +976,47 @@ fn nome_desfecho(d: DesfechoScan) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------- progresso em stderr
+// ---------------------------------------------------------------------- progresso
 
-/// Progresso da etapa de hash (e da verificação) em stderr: uma linha por 2 s sem terminal.
-fn progresso_hash_stderr() -> impl FnMut(&ProgressoHash) + Send + 'static {
-    let tty = std::io::stderr().is_terminal();
-    let inicio = Instant::now();
-    let mut ultimo_ms = 0u64;
-    move |p: &ProgressoHash| {
-        let agora_ms = u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let fim = p.arquivos_total > 0 && p.arquivos_feitos >= p.arquivos_total;
-        if !tty && !fim && agora_ms < ultimo_ms + 2000 {
-            return;
-        }
-        ultimo_ms = agora_ms;
-        let linha = format!(
-            "[hash] {}/{} arquivos, {} de {} lidos | {}/s | {} reaproveitados",
-            inteiro_pt_br(p.arquivos_feitos),
-            inteiro_pt_br(p.arquivos_total),
-            bytes_humanos(p.bytes_lidos),
-            bytes_humanos(p.bytes_total),
-            bytes_humanos(p.bytes_por_seg as u64),
-            inteiro_pt_br(p.reaproveitados),
-        );
-        let mut e = std::io::stderr().lock();
-        let _ = if tty {
-            write!(e, "\r\x1b[2K{linha}{}", if fim { "\n" } else { "" })
-        } else {
-            writeln!(e, "{linha}")
-        };
+fn inventario_de(p: &ProgressoScanner) -> ProgressoInventario {
+    ProgressoInventario {
+        execucao: ExecucaoId(p.execucao_id),
+        fase: match p.fase {
+            FaseProgresso::Inventario => FaseInventario::Inventario,
+            FaseProgresso::Pausado => FaseInventario::Pausado,
+            FaseProgresso::Agregacao => FaseInventario::Agregacao,
+            FaseProgresso::Concluido => FaseInventario::Concluido,
+        },
+        pastas: p.pastas,
+        arquivos: p.arquivos,
+        especiais: p.especiais,
+        bytes_logicos: p.bytes_logicos,
+        ignorados: p.ignorados,
+        erros: p.erros,
+        diretorios_pendentes: p.diretorios_pendentes,
+        decorrido_ms: u64::try_from(p.decorrido.as_millis()).unwrap_or(u64::MAX),
+        entradas_por_segundo: p.entradas_por_segundo,
     }
 }
 
-fn progresso_stderr() -> CallbackProgresso {
-    let tty = std::io::stderr().is_terminal();
-    let inicio = Instant::now();
-    let ultimo_ms = AtomicU64::new(0);
-    Arc::new(move |p: &Progresso| {
-        let fase = match p.fase {
-            FaseProgresso::Inventario => "inventário",
-            FaseProgresso::Pausado => "pausado",
-            FaseProgresso::Agregacao => "agregando",
-            FaseProgresso::Concluido => "concluído",
+/// Adapta o progresso da etapa de hash (ou da verificação) ao [`Progresso`] do contrato.
+fn sink_hash(
+    p: Arc<dyn Fn(&Progresso) + Send + Sync>,
+    verificacao: bool,
+) -> impl FnMut(&ProgressoHashScanner) + Send + 'static {
+    move |h: &ProgressoHashScanner| {
+        let ev = dag_core::ProgressoHash {
+            arquivos_feitos: h.arquivos_feitos,
+            arquivos_total: h.arquivos_total,
+            bytes_lidos: h.bytes_lidos,
+            bytes_total: h.bytes_total,
+            bytes_por_seg: h.bytes_por_seg,
+            reaproveitados: h.reaproveitados,
         };
-        let agora_ms = u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let fim = p.fase == FaseProgresso::Concluido;
-        // Sem terminal: no máximo uma linha a cada 2 s (mais a final).
-        if !tty && !fim && agora_ms < ultimo_ms.load(Ordering::Relaxed) + 2000 {
-            return;
-        }
-        ultimo_ms.store(agora_ms, Ordering::Relaxed);
-        let linha = format!(
-            "[{fase}] {} pastas, {} arquivos, {} | {} pendentes | {} itens/s",
-            inteiro_pt_br(p.pastas),
-            inteiro_pt_br(p.arquivos),
-            bytes_humanos(p.bytes_logicos),
-            inteiro_pt_br(p.diretorios_pendentes),
-            inteiro_pt_br(p.entradas_por_segundo as u64),
-        );
-        let mut e = std::io::stderr().lock();
-        let _ = if tty {
-            write!(e, "\r\x1b[2K{linha}{}", if fim { "\n" } else { "" })
+        p(&if verificacao {
+            Progresso::Verificacao(ev)
         } else {
-            writeln!(e, "{linha}")
-        };
-    })
+            Progresso::Hash(ev)
+        });
+    }
 }

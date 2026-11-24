@@ -53,6 +53,7 @@ fn scan(raizes: &[&Path], sem_hash: bool) -> Comando {
             .map(|r| r.to_str().unwrap().to_string())
             .collect(),
         sem_hash,
+        elevar: false,
     }
 }
 

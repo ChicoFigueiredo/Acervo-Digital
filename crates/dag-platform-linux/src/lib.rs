@@ -11,9 +11,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod dispositivo;
+pub mod elevacao;
 mod erro;
 mod fonte;
 mod mountinfo;
+pub mod servico;
 mod volumes;
 
 pub use erro::Erro;

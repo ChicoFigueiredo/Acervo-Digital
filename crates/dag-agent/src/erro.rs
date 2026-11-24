@@ -45,6 +45,17 @@ pub enum ErroAgente {
     NaoEncontrado(String),
     #[error("ainda não implementado (incremento {0})")]
     NaoImplementado(u8),
+    #[error(
+        "nenhum agente do DAG está em execução: pausar, retomar e cancelar só atuam sobre o agente em segundo plano (`dag agente` ou o serviço); uma varredura em primeiro plano se cancela com Ctrl-C"
+    )]
+    SemAgente,
+    #[error("nenhuma varredura em andamento neste agente")]
+    NadaEmExecucao,
+    #[error("não foi possível falar com o agente em {}: {motivo}", .socket.display())]
+    AgenteIndisponivel { socket: PathBuf, motivo: String },
+    /// Violação do protocolo do socket (quadro malformado, conexão cortada...).
+    #[error("protocolo do agente: {0}")]
+    Ipc(String),
 }
 
 impl ErroAgente {
@@ -75,6 +86,10 @@ impl ErroAgente {
             Self::Invalido(_) => "invalido",
             Self::NaoEncontrado(_) => "nao_encontrado",
             Self::NaoImplementado(_) => "nao_implementado",
+            Self::SemAgente => "sem_agente",
+            Self::NadaEmExecucao => "nada_em_execucao",
+            Self::AgenteIndisponivel { .. } => "agente_indisponivel",
+            Self::Ipc(_) => "ipc",
         }
     }
 

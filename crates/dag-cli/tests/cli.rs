@@ -88,21 +88,27 @@ fn scan_retomar_e_exclusivo() {
 }
 
 #[test]
-fn subcomandos_futuros_saem_com_2_sem_criar_catalogo() {
+fn controlar_sem_agente_sai_com_1_sem_criar_catalogo() {
     let tmp = tempfile::tempdir().unwrap();
     let cat = tmp.path().join("nao-criar/c.sqlite");
     let cat = cat.to_str().unwrap();
-    let casos: [(&[&str], &str); 2] = [
-        (&["servico", "autostart", "on"], "incremento 6"),
-        (&["pausar", "--execucao", "3"], "incremento 6"),
-    ];
-    for (args, esperado) in casos {
-        let mut a = vec!["--catalogo", cat, "--json"];
+    let socket = tmp.path().join("sem-agente.sock");
+    let socket = socket.to_str().unwrap();
+    for args in [
+        &["pausar", "--execucao", "3"][..],
+        &["cancelar"][..],
+        &["retomar"][..],
+    ] {
+        let mut a = vec!["--catalogo", cat, "--socket", socket, "--json"];
         a.extend_from_slice(args);
         let o = dag(&a);
-        assert_eq!(o.status.code(), Some(2), "{args:?}");
-        assert_eq!(json(&o)["codigo"], "nao_implementado");
-        assert!(String::from_utf8(o.stderr).unwrap().contains(esperado));
+        assert_eq!(o.status.code(), Some(1), "{args:?}");
+        assert_eq!(json(&o)["codigo"], "sem_agente");
+        assert!(
+            String::from_utf8(o.stderr)
+                .unwrap()
+                .contains("nenhum agente do DAG está em execução")
+        );
     }
     assert!(!Path::new(cat).exists());
     assert!(!Path::new(cat).parent().unwrap().exists());
@@ -312,10 +318,11 @@ fn retomar_execucao_inexistente_da_erro() {
 }
 
 #[test]
-fn mcp_placeholder() {
+fn mcp_sem_entrada_encerra_limpo_sem_poluir_stdout() {
+    // `dag` roda sem stdin útil: o servidor MCP vê EOF e sai com 0, sem imprimir nada.
     let o = dag(&["mcp"]);
-    assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8(o.stderr).unwrap().contains("MCP"));
+    assert_eq!(o.status.code(), Some(0));
+    assert!(o.stdout.is_empty());
 }
 
 #[test]
@@ -416,4 +423,23 @@ fn intervalo_invalido_e_rejeitado() {
             .status
             .success()
     );
+}
+
+/// CA-A12: instalação limpa não tem serviço e `estado` não cria nada (nem o Catálogo).
+#[test]
+fn servico_estado_em_instalacao_limpa() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cat = tmp.path().join("nao-criar/c.sqlite");
+    let o = Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env_remove("DAG_CATALOGO")
+        .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+        .env("HOME", tmp.path())
+        .args(["--catalogo", cat.to_str().unwrap(), "servico", "estado"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let saida = String::from_utf8(o.stdout).unwrap();
+    assert!(saida.contains("não instalado"), "{saida}");
+    assert!(!tmp.path().join("cfg").exists());
+    assert!(!tmp.path().join("nao-criar").exists());
 }

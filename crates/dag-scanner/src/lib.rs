@@ -33,6 +33,7 @@
 mod classificador;
 mod config;
 mod controle;
+mod elevado;
 mod erro;
 mod fast;
 mod hash;
@@ -43,6 +44,7 @@ mod visita;
 pub use classificador::{Classificador, FonteEvidencia, SemClassificacao, TipoDetectado};
 pub use config::{Casamento, ConfigScan, Exclusao, FaseProgresso, Progresso};
 pub use controle::{ControleScan, EstadoControle};
+pub use elevado::{EntradaElevada, LeitorElevado, TipoElevado};
 pub use erro::ErroScan;
 pub use fast::{FastScan, ResumoFast};
 pub use hash::{

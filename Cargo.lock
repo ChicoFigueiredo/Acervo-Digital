@@ -836,6 +836,7 @@ dependencies = [
  "dag-store",
  "rusqlite",
  "rustix 1.1.6",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -862,6 +863,7 @@ dependencies = [
  "ctrlc",
  "dag-agent",
  "dag-core",
+ "dag-mcp",
  "serde_json",
  "tempfile",
 ]
@@ -873,6 +875,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dag-mcp"
+version = "0.1.0"
+dependencies = [
+ "dag-agent",
+ "dag-core",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -894,7 +906,21 @@ name = "dag-platform-linux"
 version = "0.1.0"
 dependencies = [
  "dag-core",
+ "dag-privileged-helper",
  "rustix 1.1.6",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dag-privileged-helper"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

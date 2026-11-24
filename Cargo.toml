@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 dag-agent = { path = "crates/dag-agent" }
 dag-core = { path = "crates/dag-core" }
+dag-mcp = { path = "crates/dag-mcp" }
 dag-monitor = { path = "crates/dag-monitor" }
 dag-platform-linux = { path = "crates/dag-platform-linux" }
 dag-scanner = { path = "crates/dag-scanner" }
@@ -25,8 +26,8 @@ serde_json = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
-rustix = { version = "1", features = ["fs", "event"] }
-ctrlc = "3"
+rustix = { version = "1", features = ["fs", "event", "net", "process"] }
+ctrlc = { version = "3", features = ["termination"] }
 blake3 = "1"
 
 [workspace.lints.rust]

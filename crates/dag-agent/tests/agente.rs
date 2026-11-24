@@ -73,6 +73,7 @@ fn scan_cmd(raiz: &Path) -> Comando {
         modo: ModoVarredura::FullScan,
         raizes: vec![raiz.to_str().unwrap().to_string()],
         sem_hash: false,
+        elevar: false,
     }
 }
 
@@ -379,12 +380,17 @@ fn scan_cancelado_e_retomado_em_outro_processo() {
 }
 
 #[test]
-fn comandos_futuros_continuam_nao_implementados() {
+fn pausar_e_cancelar_em_processo_apontam_para_o_agente_em_segundo_plano() {
     let c = cenario();
     let mut a = agente(&c);
-    let Resposta::Erro { codigo, mensagem } = a.executar(Comando::Pausar { execucao: None }) else {
-        panic!()
-    };
-    assert_eq!(codigo, "nao_implementado");
-    assert!(mensagem.contains("incremento 6"), "{mensagem}");
+    for comando in [
+        Comando::Pausar { execucao: None },
+        Comando::Cancelar { execucao: None },
+    ] {
+        let Resposta::Erro { codigo, mensagem } = a.executar(comando) else {
+            panic!()
+        };
+        assert_eq!(codigo, "sem_agente");
+        assert!(mensagem.contains("dag agente"), "{mensagem}");
+    }
 }

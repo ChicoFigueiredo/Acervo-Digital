@@ -444,6 +444,13 @@ impl FastScan {
         self
     }
 
+    /// Ver [`FullScan::com_leitor_elevado`].
+    #[must_use]
+    pub fn com_leitor_elevado(mut self, l: Arc<dyn crate::LeitorElevado>) -> Self {
+        self.inner = self.inner.com_leitor_elevado(l);
+        self
+    }
+
     /// Limite de eventos individuais (criado/alterado/removido) gravados por execução.
     #[must_use]
     pub fn com_max_eventos(mut self, n: u64) -> Self {

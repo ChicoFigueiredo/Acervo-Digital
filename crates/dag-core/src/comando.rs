@@ -48,6 +48,14 @@ pub enum AcaoServico {
     Autostart {
         ativo: bool,
     },
+    Reiniciar,
+    /// Estado do serviço (instalado, autostart, ativo, PID, linger).
+    Estado,
+    /// Liga ou desliga o *linger* do usuário (`loginctl enable-linger`): o serviço de usuário
+    /// passa a subir no boot e a sobreviver ao último logout. Ação explícita e separada.
+    PersistirSemSessao {
+        ativo: bool,
+    },
 }
 
 /// Toda operação que o worker aceita.
@@ -67,6 +75,9 @@ pub enum Comando {
         raizes: Vec<String>,
         #[serde(default)]
         sem_hash: bool,
+        /// Lê pastas que negam acesso por um helper privilegiado (Polkit; opt-in, `--elevar`).
+        #[serde(default)]
+        elevar: bool,
     },
     /// Pausa a execução indicada (ou a única em andamento).
     Pausar { execucao: Option<ExecucaoId> },
@@ -342,6 +353,7 @@ mod tests {
                 modo: ModoVarredura::FastScan,
                 raizes: vec!["/tmp".into()],
                 sem_hash: true,
+                elevar: false,
             },
             Comando::ListarDuplicados {
                 volume: Some("SSD".into()),
@@ -383,6 +395,15 @@ mod tests {
             Comando::Servico {
                 acao: AcaoServico::Autostart { ativo: true },
             },
+            Comando::Servico {
+                acao: AcaoServico::PersistirSemSessao { ativo: false },
+            },
+            Comando::Servico {
+                acao: AcaoServico::Estado,
+            },
+            Comando::Servico {
+                acao: AcaoServico::Reiniciar,
+            },
             Comando::BackupCatalogo {
                 destino: "/b".into(),
             },
@@ -402,6 +423,7 @@ mod tests {
             modo: ModoVarredura::FullScan,
             raizes: vec!["/x".into()],
             sem_hash: false,
+            elevar: false,
         };
         let v: serde_json::Value = serde_json::to_value(&c).unwrap();
         assert_eq!(v["comando"], "iniciar_scan");

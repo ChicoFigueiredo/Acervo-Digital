@@ -13,7 +13,7 @@ use bancada_casca::{
 use dag_agent::{ErroAgente, caminho_catalogo_do_ambiente, caminho_do_lock};
 use dag_core::{Comando, ModoVarredura, Resposta, VolumeDescoberto};
 use dag_scanner::EstadoControle;
-use dag_store::consulta_gui::{self, AndamentoHash as AndamentoDb, TotaisCatalogo};
+use dag_store::consulta_gui::{self, TotaisCatalogo};
 
 use crate::confirmacao::{AcaoMarcacao, AlvoAcao, planejar};
 use crate::formato::{bytes_humanos, inteiro_pt_br};
@@ -32,8 +32,6 @@ const MOTIVO_SCAN_ATIVO: &str = "Há uma varredura em andamento";
 
 /// Quantos avisos ficam na faixa de mensagens.
 const MAX_AVISOS: usize = 4;
-/// Intervalo entre leituras do andamento da fila de hash.
-const INTERVALO_HASH: Duration = Duration::from_millis(1500);
 
 /// Parâmetros do app.
 #[derive(Debug, Clone)]
@@ -84,8 +82,8 @@ pub struct ScanAtivo {
     pub sem_hash: bool,
     pub inicio: Instant,
     pub progresso: Option<ProgressoScan>,
-    pub hash: Carga<AndamentoDb>,
-    pub ultima_leitura_hash: Option<Instant>,
+    /// Último progresso do hash (arquivos e bytes), vindo do agente.
+    pub bytes_hash: Option<dag_core::ProgressoHash>,
     pub amostras_hash: Vec<(AndamentoHash, Duration)>,
 }
 
@@ -96,8 +94,7 @@ impl ScanAtivo {
             sem_hash,
             inicio: Instant::now(),
             progresso: None,
-            hash: Carga::default(),
-            ultima_leitura_hash: None,
+            bytes_hash: None,
             amostras_hash: Vec::new(),
         }
     }
@@ -175,6 +172,7 @@ impl AppDag {
             ConfigWorker {
                 caminho: cfg.caminho.clone(),
                 volumes_fixos: cfg.volumes_fixos,
+                socket: None,
             },
             acordador.clone(),
         );
@@ -262,6 +260,7 @@ impl AppDag {
                 modo: ModoVarredura::FullScan,
                 raizes,
                 sem_hash,
+                elevar: false,
             },
             Proposito::Scan { sem_hash },
         );
@@ -330,10 +329,24 @@ impl AppDag {
                         s.progresso = Some(p);
                     }
                 }
+                Evento::Hash(h) => {
+                    if let Some(s) = self.scan.as_mut() {
+                        s.amostras_hash.push((
+                            AndamentoHash {
+                                total: h.arquivos_total,
+                                concluidos: h.arquivos_feitos,
+                            },
+                            s.inicio.elapsed(),
+                        ));
+                        if s.amostras_hash.len() > 8 {
+                            s.amostras_hash.remove(0);
+                        }
+                        s.bytes_hash = Some(h);
+                    }
+                }
                 Evento::Resposta { id, resposta } => self.tratar_resposta(id, *resposta),
             }
         }
-        self.consultar_hash();
         if self.totais_geracao != self.geracao {
             self.totais_geracao = self.geracao;
             self.totais.pedir(
@@ -342,36 +355,6 @@ impl AppDag {
             );
         }
         self.totais.atualizar();
-    }
-
-    /// Lê o andamento da fila de hash enquanto a etapa roda (denominador real).
-    fn consultar_hash(&mut self) {
-        let Some(s) = self.scan.as_mut() else { return };
-        if s.hash.atualizar()
-            && let Some(h) = s.hash.dado
-        {
-            s.amostras_hash.push((
-                AndamentoHash {
-                    total: h.total,
-                    concluidos: h.concluidos,
-                },
-                s.inicio.elapsed(),
-            ));
-            if s.amostras_hash.len() > 8 {
-                s.amostras_hash.remove(0);
-            }
-        }
-        let na_etapa = s.fase() == Some(FaseScan::Concluido) && !s.sem_hash;
-        let vencido = s
-            .ultima_leitura_hash
-            .is_none_or(|t| t.elapsed() >= INTERVALO_HASH);
-        if na_etapa && vencido && !s.hash.carregando() {
-            s.ultima_leitura_hash = Some(Instant::now());
-            s.hash.pedir(
-                self.leitor
-                    .consultar(|c| consulta_gui::andamento_do_hash(c).map_err(erro)),
-            );
-        }
     }
 
     fn tratar_resposta(&mut self, id: u64, resposta: Resposta) {
@@ -624,7 +607,7 @@ impl AppDag {
     pub fn segmentos_de_status(&self) -> Vec<SegmentoStatus> {
         let modo = self.worker.modo();
         let tom = match modo {
-            ModoWorker::Escritor => Tom::Sucesso,
+            ModoWorker::Escritor | ModoWorker::Servico => Tom::Sucesso,
             ModoWorker::Iniciando | ModoWorker::Encerrado => Tom::Neutro,
             ModoWorker::SomenteLeitura { .. } => Tom::Aviso,
             ModoWorker::Falhou { .. } => Tom::Perigo,

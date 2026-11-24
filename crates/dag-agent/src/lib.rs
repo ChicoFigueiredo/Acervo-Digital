@@ -1,9 +1,11 @@
 //! `dag-agent`: o escritor único do Catálogo (spec §6).
 //!
-//! Neste incremento é uma biblioteca: [`Agente`] abre o Catálogo, garante por trava
-//! exclusiva que nenhum outro processo escreve nele ([`GuardaEscritor`]) e executa
-//! [`Comando`](dag_core::Comando)s em processo, devolvendo [`Resposta`](dag_core::Resposta).
-//! O worker de longa duração com IPC virá em incremento posterior; ele reaproveita esta lógica.
+//! [`Agente`] abre o Catálogo, garante por trava exclusiva que nenhum outro processo escreve nele
+//! ([`GuardaEscritor`]) e executa [`Comando`](dag_core::Comando)s em processo, devolvendo
+//! [`Resposta`](dag_core::Resposta) (modo 1, agente de sessão). [`Servidor`] é o mesmo agente
+//! como processo de longa duração (`dag agente`), servindo um socket Unix protegido
+//! ([`protocolo`]); [`Cliente`] e [`Conexao`] são o lado de GUI, CLI e MCP, que usam o agente em
+//! segundo plano se houver e, senão, uma sessão em processo.
 //!
 //! Somente leitura sobre o acervo: o agente só escreve no Catálogo, no arquivo de trava ao lado
 //! dele e nos destinos de backup pedidos pelo usuário.
@@ -13,9 +15,14 @@
 mod agente;
 mod caminho;
 mod classificador;
+pub mod cliente;
 mod erro;
+mod exibir;
 mod explorar;
 mod finalidade;
+pub mod protocolo;
+pub mod servico;
+pub mod servidor;
 mod trava;
 
 pub use agente::{Agente, executar_comando, incremento_pendente, somente_leitura};
@@ -23,5 +30,11 @@ pub use caminho::{
     VAR_CATALOGO, caminho_catalogo_do_ambiente, caminho_do_lock, resolver_caminho_catalogo,
 };
 pub use classificador::ClassificadorPorExtensao;
+pub use cliente::{
+    Cancelador, Cliente, Conexao, VAR_SOCKET, caminho_socket_padrao, resolver_caminho_socket,
+};
 pub use erro::ErroAgente;
+pub use exibir::ExibidorStderr;
+pub use protocolo::InfoServidor;
+pub use servidor::{ConfigServidor, Servidor, uid_autorizado};
 pub use trava::GuardaEscritor;

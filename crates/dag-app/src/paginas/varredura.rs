@@ -337,6 +337,13 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
                 percentual(Some(f64::from(f) * 100.0))
             )));
             let mut linha = Vec::new();
+            if let Some(b) = &s.bytes_hash {
+                linha.push(format!(
+                    "{} de {} lidos",
+                    bytes_humanos(b.bytes_lidos),
+                    bytes_humanos(b.bytes_total)
+                ));
+            }
             if let Some(t) = s.taxa_hash() {
                 linha.push(taxa_itens(t, "arquivos"));
             }

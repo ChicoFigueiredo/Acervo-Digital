@@ -16,6 +16,7 @@ use dag_store::inventario::{Severidade, TipoEntrada};
 use crate::classificador::{Classificador, TipoDetectado};
 use crate::config::Exclusao;
 use crate::controle::ControleScan;
+use crate::elevado::{EntradaElevada, LeitorElevado, TipoElevado};
 
 /// Diretório a visitar.
 #[derive(Debug)]
@@ -180,6 +181,8 @@ pub(crate) struct Contexto<'a> {
     pub classificador: &'a dyn Classificador,
     pub controle: &'a ControleScan,
     pub entradas_por_mensagem: usize,
+    /// Leitor com privilégio (opt-in) para pastas que dão `EACCES`.
+    pub elevado: Option<&'a dyn LeitorElevado>,
 }
 
 fn juntar(dir: &[u8], nome: &[u8]) -> (Vec<u8>, usize) {
@@ -200,10 +203,19 @@ pub(crate) fn visitar(job: &Job, ctx: &Contexto<'_>, saida: &SyncSender<Msg>) ->
         Ok(l) => l,
         Err(e) => {
             let (codigo, severidade) = classificar_io(&e);
+            let mut motivo = format!("não foi possível listar o diretório: {e}");
+            if e.kind() == io::ErrorKind::PermissionDenied
+                && let Some(leitor) = ctx.elevado
+            {
+                match leitor.listar(&job.caminho) {
+                    Ok(filhos) => return visitar_elevado(job, ctx, saida, &e, filhos),
+                    Err(e2) => motivo.push_str(&format!("; leitura elevada falhou: {e2}")),
+                }
+            }
             let fim = Fim::Falha(Problema {
                 caminho: job.caminho.clone(),
                 codigo,
-                motivo: format!("não foi possível listar o diretório: {e}"),
+                motivo,
                 severidade,
             });
             return saida
@@ -319,6 +331,96 @@ pub(crate) fn visitar(job: &Job, ctx: &Contexto<'_>, saida: &SyncSender<Msg>) ->
             fim: Fim::Ok,
         })
         .is_ok()
+}
+
+fn natureza_elevada(t: TipoElevado) -> Natureza {
+    match t {
+        TipoElevado::Pasta => Natureza::Pasta,
+        TipoElevado::Arquivo => Natureza::Outra(TipoEntrada::Arquivo),
+        TipoElevado::Symlink => Natureza::Outra(TipoEntrada::Symlink),
+        TipoElevado::Fifo => Natureza::Outra(TipoEntrada::Fifo),
+        TipoElevado::Socket => Natureza::Outra(TipoEntrada::Socket),
+        TipoElevado::DispositivoBloco => Natureza::Outra(TipoEntrada::DispositivoBloco),
+        TipoElevado::DispositivoChar => Natureza::Outra(TipoEntrada::DispositivoChar),
+        TipoElevado::Outro => Natureza::Outra(TipoEntrada::Outro),
+    }
+}
+
+fn entrada_elevada(dir: &[u8], f: EntradaElevada, ctx: &Contexto<'_>) -> Entrada {
+    let (caminho, off) = juntar(dir, &f.nome);
+    let natureza = natureza_elevada(f.tipo);
+    let mut e = Entrada {
+        caminho,
+        off_nome: off,
+        natureza,
+        dev: f.dev,
+        inode: f.ino,
+        nlink: f.nlink,
+        tamanho: f.tamanho,
+        alocado: f.blocos.checked_mul(512),
+        mtime_ns: Some(f.mtime_ns),
+        ctime_ns: Some(f.ctime_ns),
+        birth_ns: None,
+        attrs: format!(
+            "{{\"mode\":{},\"uid\":{},\"gid\":{}}}",
+            f.mode, f.uid, f.gid
+        ),
+        alvo: f.alvo_symlink,
+        tipo: None,
+    };
+    if natureza == Natureza::Outra(TipoEntrada::Arquivo) {
+        e.tipo = ctx.classificador.tipo_do_arquivo(e.nome());
+    }
+    e
+}
+
+/// Segue a visita de uma pasta cujo `read_dir` deu `EACCES`, com os metadados lidos pelo
+/// helper elevado. O acesso negado continua registrado (aviso), e as exclusões valem igual.
+fn visitar_elevado(
+    job: &Job,
+    ctx: &Contexto<'_>,
+    saida: &SyncSender<Msg>,
+    negado: &io::Error,
+    filhos: Vec<EntradaElevada>,
+) -> bool {
+    let mut entradas = Vec::new();
+    let mut ignoradas = Vec::new();
+    for f in filhos {
+        let e = entrada_elevada(&job.caminho, f, ctx);
+        if let Some(ex) = ctx
+            .exclusoes
+            .iter()
+            .find(|x| x.casa(&e.caminho, &e.caminho[e.off_nome..]))
+        {
+            ignoradas.push(Ignorada {
+                caminho: e.caminho,
+                motivo: ex.motivo.clone(),
+            });
+        } else {
+            entradas.push(e);
+        }
+    }
+    let problemas = vec![Problema {
+        caminho: job.caminho.clone(),
+        codigo: "permissao_negada_elevada",
+        motivo: format!(
+            "não foi possível listar o diretório: {negado}; metadados lidos pelo helper elevado (conteúdo dos arquivos continua inacessível)"
+        ),
+        severidade: Severidade::Aviso,
+    }];
+    let lote = Msg::Lote {
+        fila_id: job.fila_id,
+        entradas,
+        ignoradas,
+        problemas,
+    };
+    saida.send(lote).is_ok()
+        && saida
+            .send(Msg::Fim {
+                fila_id: job.fila_id,
+                fim: Fim::Ok,
+            })
+            .is_ok()
 }
 
 /// Metadados `lstat` de um caminho (usado nas raízes).

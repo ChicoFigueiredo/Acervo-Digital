@@ -9,8 +9,13 @@ publish.workspace = true
 
 [dependencies]
 dag-core.workspace = true
-rustix.workspace = true
+dag-privileged-helper = { path = "../dag-privileged-helper" }
+rustix = { workspace = true, features = ["process"] }
+serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

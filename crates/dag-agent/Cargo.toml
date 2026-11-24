@@ -14,7 +14,8 @@ dag-platform-linux.workspace = true
 dag-scanner.workspace = true
 dag-store.workspace = true
 rusqlite.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

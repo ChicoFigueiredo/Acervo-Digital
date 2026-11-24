@@ -23,6 +23,7 @@ use rusqlite::Connection;
 use crate::classificador::{Classificador, SemClassificacao};
 use crate::config::{ConfigScan, FaseProgresso, Progresso};
 use crate::controle::{ControleScan, EstadoControle};
+use crate::elevado::LeitorElevado;
 use crate::erro::ErroScan;
 use crate::fast::{self, Contagem, ResumoFast};
 use crate::visita::{self, Contexto, Entrada, Fim, Job, Msg, Natureza};
@@ -62,6 +63,7 @@ pub struct FullScan {
     controle: ControleScan,
     progresso: Option<CallbackProgresso>,
     classificador: Arc<dyn Classificador>,
+    leitor_elevado: Option<Arc<dyn LeitorElevado>>,
     rapido: bool,
     max_eventos: u64,
 }
@@ -132,6 +134,7 @@ impl FullScan {
             controle: ControleScan::novo(),
             progresso: None,
             classificador: Arc::new(SemClassificacao),
+            leitor_elevado: None,
             rapido: false,
             max_eventos: fast::MAX_EVENTOS_PADRAO,
         }
@@ -166,6 +169,13 @@ impl FullScan {
     #[must_use]
     pub fn com_classificador(mut self, c: Arc<dyn Classificador>) -> Self {
         self.classificador = c;
+        self
+    }
+
+    /// Leitor de metadados com privilégio para pastas que negam acesso (opt-in, `--elevar`).
+    #[must_use]
+    pub fn com_leitor_elevado(mut self, l: Arc<dyn LeitorElevado>) -> Self {
+        self.leitor_elevado = Some(l);
         self
     }
 
@@ -650,6 +660,7 @@ impl FullScan {
             classificador: self.classificador.as_ref(),
             controle: &self.controle,
             entradas_por_mensagem: cfg.entradas_por_mensagem.max(1),
+            elevado: self.leitor_elevado.as_deref(),
         };
         thread::scope(|s| {
             for _ in 0..cfg.concorrencia.max(1) {

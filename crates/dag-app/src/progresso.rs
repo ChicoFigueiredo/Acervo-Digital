@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use dag_scanner::{FaseProgresso, Progresso};
+use dag_core::{FaseInventario, ProgressoInventario};
 
 /// Fase do inventário, como o scanner a informa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub enum FaseScan {
     Concluido,
 }
 
-/// Instantâneo de progresso, copiado do callback do scanner.
+/// Instantâneo de progresso, copiado do evento de progresso do agente.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressoScan {
     pub execucao: i64,
@@ -34,15 +34,15 @@ pub struct ProgressoScan {
     pub itens_por_s: f64,
 }
 
-impl From<&Progresso> for ProgressoScan {
-    fn from(p: &Progresso) -> Self {
+impl From<&ProgressoInventario> for ProgressoScan {
+    fn from(p: &ProgressoInventario) -> Self {
         Self {
-            execucao: p.execucao_id,
+            execucao: p.execucao.0,
             fase: match p.fase {
-                FaseProgresso::Inventario => FaseScan::Inventario,
-                FaseProgresso::Pausado => FaseScan::Pausado,
-                FaseProgresso::Agregacao => FaseScan::Agregacao,
-                FaseProgresso::Concluido => FaseScan::Concluido,
+                FaseInventario::Inventario => FaseScan::Inventario,
+                FaseInventario::Pausado => FaseScan::Pausado,
+                FaseInventario::Agregacao => FaseScan::Agregacao,
+                FaseInventario::Concluido => FaseScan::Concluido,
             },
             pastas: p.pastas,
             arquivos: p.arquivos,
@@ -51,7 +51,7 @@ impl From<&Progresso> for ProgressoScan {
             ignorados: p.ignorados,
             erros: p.erros,
             pendentes: p.diretorios_pendentes,
-            decorrido: p.decorrido,
+            decorrido: Duration::from_millis(p.decorrido_ms),
             itens_por_s: p.entradas_por_segundo,
         }
     }
@@ -203,10 +203,10 @@ mod testes {
     }
 
     #[test]
-    fn converte_do_progresso_do_scanner() {
-        let p = Progresso {
-            execucao_id: 3,
-            fase: FaseProgresso::Agregacao,
+    fn converte_do_progresso_do_agente() {
+        let p = ProgressoInventario {
+            execucao: dag_core::ExecucaoId(3),
+            fase: FaseInventario::Agregacao,
             pastas: 2,
             arquivos: 10,
             especiais: 1,
@@ -214,7 +214,7 @@ mod testes {
             ignorados: 4,
             erros: 5,
             diretorios_pendentes: 6,
-            decorrido: Duration::from_secs(7),
+            decorrido_ms: 7000,
             entradas_por_segundo: 8.5,
         };
         let v = ProgressoScan::from(&p);

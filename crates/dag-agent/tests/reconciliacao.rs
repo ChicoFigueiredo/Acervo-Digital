@@ -67,6 +67,7 @@ fn full(t: &T) -> Comando {
         modo: ModoVarredura::FullScan,
         raizes: vec![t.raiz.to_str().unwrap().into()],
         sem_hash: false,
+        elevar: false,
     }
 }
 
@@ -75,6 +76,7 @@ fn fast(raizes: Vec<String>) -> Comando {
         modo: ModoVarredura::FastScan,
         raizes,
         sem_hash: false,
+        elevar: false,
     }
 }
 

@@ -77,6 +77,33 @@ pub fn resumir(r: &Resposta) -> String {
             catalogo.arquivos,
             bytes(catalogo.bytes_logicos)
         ),
+        Resposta::Jobs { jobs } => {
+            if jobs.is_empty() {
+                "Nenhum trabalho no agente.".into()
+            } else {
+                let itens: Vec<String> = jobs
+                    .iter()
+                    .map(|j| {
+                        let andamento = j.resumo_progresso();
+                        format!(
+                            "#{} {} ({}, {}{}){}",
+                            j.id,
+                            j.tipo.rotulo(),
+                            j.origem.rotulo(),
+                            j.estado.rotulo(),
+                            j.execucao
+                                .map_or(String::new(), |e| format!(", execução {e}")),
+                            if andamento.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {andamento}")
+                            }
+                        )
+                    })
+                    .collect();
+                format!("{} trabalho(s): {}.", jobs.len(), itens.join("; "))
+            }
+        }
         Resposta::Eventos { eventos } => format!("{} evento(s).", eventos.len()),
         Resposta::SaudeMonitor { .. } => "Saúde do monitor consultada.".into(),
         Resposta::MonitorEncerrado { .. } => "Monitoramento encerrado.".into(),

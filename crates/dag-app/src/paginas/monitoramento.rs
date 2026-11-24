@@ -2,6 +2,7 @@
 
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho};
 use crate::app::AppDag;
+use crate::formato::inteiro_pt_br;
 use crate::worker::ModoWorker;
 use bancada_casca::egui;
 
@@ -50,9 +51,66 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     cabecalho(ui, &PAGINA);
     informacoes_da_sessao(ui, app);
     ui.add_space(8.0);
-    ui.label("O monitoramento contínuo (inotify, backlog, reconciliação) e o Fast Scan chegam no incremento 5.");
+    ui.strong("Monitor do agente");
+    match app.worker.monitor() {
+        Some(m) => {
+            egui::Grid::new("monitor-do-agente")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Estado");
+                    ui.label(if m.em_execucao {
+                        format!("{} (ativo)", m.estado)
+                    } else {
+                        format!("{} (parado)", m.estado)
+                    });
+                    ui.end_row();
+                    ui.label("Backlog");
+                    ui.label(inteiro_pt_br(m.backlog));
+                    ui.end_row();
+                    ui.label("Lacunas abertas");
+                    ui.label(inteiro_pt_br(m.lacunas_abertas));
+                    ui.end_row();
+                    ui.label("Overflows do inotify");
+                    ui.label(inteiro_pt_br(m.overflows));
+                    ui.end_row();
+                    ui.label("Watches");
+                    ui.label(format!(
+                        "{} de {}",
+                        inteiro_pt_br(m.watches),
+                        inteiro_pt_br(m.watches_limite)
+                    ));
+                    ui.end_row();
+                    ui.label("Eventos processados");
+                    ui.label(inteiro_pt_br(m.eventos_processados));
+                    ui.end_row();
+                    if let Some(e) = &m.erro {
+                        ui.label("Erro");
+                        ui.label(e);
+                        ui.end_row();
+                    }
+                });
+        }
+        None => {
+            ui.weak("Sem informações do monitor (o agente não está conectado ou não monitora).");
+        }
+    }
+    ui.add_space(8.0);
+    ui.strong("Ponto de Confiança");
+    if app.worker.confianca().is_empty() {
+        ui.weak("Nenhuma Raiz catalogada ainda.");
+    }
+    for c in app.worker.confianca() {
+        let texto = match (c.confiavel_em, &c.motivo_perda) {
+            (Some(_), _) => "confiável: só o monitoramento a mantém em dia".to_string(),
+            (None, Some(m)) => format!("perdido ({m})"),
+            (None, None) => "ainda não confiável".to_string(),
+        };
+        ui.label(format!("{} — {texto}", c.raiz));
+    }
+    ui.add_space(8.0);
     ui.weak(
-        "Hoje a GUI só varre quando você pede (Full Scan), e a varredura é sempre somente leitura.",
+        "O monitoramento roda no agente em segundo plano; quem ele cede a vez (varreduras da \
+         GUI, da CLI ou do MCP) aparece em Varredura.",
     );
 }
 
@@ -71,7 +129,7 @@ pub fn informacoes_da_sessao(ui: &mut egui::Ui, app: &AppDag) {
                     .to_string(),
             );
             ui.end_row();
-            ui.label("Worker");
+            ui.label("Agente");
             ui.label(app.worker.modo().texto_status());
             ui.end_row();
             if let ModoWorker::SomenteLeitura { motivo } | ModoWorker::Falhou { motivo } =

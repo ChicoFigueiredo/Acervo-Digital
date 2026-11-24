@@ -142,6 +142,7 @@ fn desenhar(ui: &mut egui::Ui, app: &mut AppDag) {
     botoes(ui, app, &mut agir);
     ui.separator();
     progresso(ui, app);
+    trabalhos_do_agente(ui, app);
     ui.add_space(6.0);
     ui.strong("Últimas varreduras");
     estado_da_carga(ui, &app.varredura.execucoes);
@@ -386,6 +387,17 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
         ui.strong(format!("Em andamento — {fase}"));
         ui.weak(format!("({})", duracao(s.inicio.elapsed())));
     });
+    if let Some(j) = &s.job {
+        let exec = j
+            .execucao
+            .map_or_else(String::new, |e| format!(" · execução #{e}"));
+        ui.weak(format!(
+            "Trabalho #{} · {} · iniciado por {}{exec}",
+            j.id,
+            j.tipo.rotulo(),
+            j.origem.rotulo()
+        ));
+    }
     let hash = s.andamento_hash();
     match fracao_global(s.fase(), s.sem_hash, hash.as_ref()) {
         Some(f) => {
@@ -472,4 +484,41 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
     } else {
         ui.weak("Descobrindo volumes e preparando o inventário…");
     }
+}
+
+/// Todos os trabalhos do agente (qualquer cliente os pode ter iniciado), com Cancelar para os
+/// que ainda esperam na fila.
+fn trabalhos_do_agente(ui: &mut egui::Ui, app: &AppDag) {
+    let jobs: Vec<_> = app
+        .worker
+        .jobs()
+        .iter()
+        .filter(|j| j.tipo != dag_core::TipoJob::Monitor)
+        .collect();
+    if jobs.len() < 2 {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.strong("Trabalhos do agente");
+    egui::Grid::new("trabalhos-do-agente")
+        .num_columns(6)
+        .striped(true)
+        .show(ui, |ui| {
+            for j in jobs {
+                ui.label(format!("#{}", j.id));
+                ui.label(j.tipo.rotulo());
+                ui.label(j.origem.rotulo());
+                ui.label(j.estado.rotulo());
+                ui.weak(j.resumo_progresso());
+                if j.estado == dag_core::EstadoJob::Enfileirado
+                    && ui
+                        .small_button("Cancelar")
+                        .on_hover_text("Tira da fila sem começar")
+                        .clicked()
+                {
+                    app.worker.cancelar_job(j.id);
+                }
+                ui.end_row();
+            }
+        });
 }

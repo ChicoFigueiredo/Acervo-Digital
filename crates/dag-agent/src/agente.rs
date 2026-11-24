@@ -69,6 +69,7 @@ pub fn somente_leitura(c: &Comando) -> bool {
             | Comando::Relatorio { .. }
             | Comando::Eventos { .. }
             | Comando::SaudeMonitor
+            | Comando::ListarJobs
             | Comando::ConfigHash {
                 threads_por_disco: None,
                 max_discos: None
@@ -434,7 +435,13 @@ impl Agente {
             }),
             // Controlam um trabalho em andamento: só fazem sentido num agente em segundo plano
             // (que os atende fora da fila). Em processo, nada roda concorrentemente.
-            Comando::Pausar { .. } | Comando::Cancelar { .. } => Err(ErroAgente::SemAgente),
+            Comando::Pausar { .. }
+            | Comando::Cancelar { .. }
+            | Comando::PausarJob { .. }
+            | Comando::RetomarJob { .. }
+            | Comando::CancelarJob { .. } => Err(ErroAgente::SemAgente),
+            // Uma sessão em processo não tem fila: os trabalhos são do agente em segundo plano.
+            Comando::ListarJobs => Ok(Resposta::Jobs { jobs: Vec::new() }),
             _ => Err(ErroAgente::NaoImplementado(0)),
         }
     }
@@ -1063,6 +1070,13 @@ impl Agente {
             monitor: Some(self.saude_monitor()?),
             confianca: self.status_confianca()?,
         })
+    }
+
+    /// Saúde do monitor e Ponto de Confiança, para o fluxo de eventos do agente.
+    pub(crate) fn monitor_e_confianca(
+        &self,
+    ) -> Result<(SaudeMonitorInfo, Vec<StatusConfianca>), ErroAgente> {
+        Ok((self.saude_monitor()?, self.status_confianca()?))
     }
 
     /// Ponto de Confiança por Raiz.

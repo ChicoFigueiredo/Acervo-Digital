@@ -4,6 +4,8 @@ Nada aqui é instalado automaticamente. O DAG roda sem nenhum destes itens.
 
 ## 1. Serviço opcional (`dag-agente.service`, systemd de usuário)
 
+O serviço é opcional: CLI, GUI e MCP lançam o agente sozinhos quando ele não existe (ADR 0004). Com a unidade instalada, eles tentam antes `systemctl --user start dag-agente.service` e só então lançam um processo destacado. Variáveis: `DAG_BIN`, `DAG_SEM_SYSTEMD`, `DAG_AGENTE_ARGS`, `DAG_SEM_AGENTE`.
+
 ```
 dag servico estado          # instalado? autostart? ativo? PID, desde quando, linger
 dag servico instalar        # escreve ~/.config/systemd/user/dag-agente.service (NÃO habilita, NÃO inicia)

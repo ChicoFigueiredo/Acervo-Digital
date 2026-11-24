@@ -1,40 +1,53 @@
-//! Worker da GUI (spec §6 e §7): a GUI nunca escreve no SQLite e nunca inicia um segundo
-//! escritor.
+//! Worker da GUI (spec §6 e §7, ADR 0004): a GUI nunca escreve no SQLite e, por padrão, nunca
+//! é o escritor.
 //!
-//! * **Modo 2/3 (serviço)**: se há um agente em segundo plano (`dag agente`) servindo este
-//!   Catálogo no socket, o worker é cliente dele: os pedidos e o progresso (inclusive bytes do
-//!   hash) passam pelo socket; pausar, retomar e cancelar vão por uma segunda conexão.
-//! * **Modo 1 (sessão)**: senão, uma thread dona do [`Agente`] (e da trava de escritor) recebe
-//!   [`Pedido`]s por canal. Se outro processo já é o escritor, o worker abre em leitura e a GUI
-//!   diz isso. Pausar, retomar e cancelar usam o [`ControleScan`] compartilhado (a thread está
-//!   ocupada executando o scan).
+//! * **Modo agente (padrão)**: a GUI é cliente do agente em segundo plano (`dag agente`), que é
+//!   o único escritor. Se não há agente, o worker o sobe (unidade systemd de usuário, se
+//!   instalada; senão processo destacado). Os pedidos vão por conexões próprias, e o que a GUI
+//!   mostra (varredura, abertura, monitor) vem da **assinatura** de eventos do agente, então
+//!   enxerga e controla trabalhos iniciados por qualquer cliente (CLI, MCP, abertura do agente,
+//!   monitor). Se o agente cai ou reinicia, o worker reconecta sozinho.
+//! * **Modo em processo (`--sem-agente`, testes)**: uma thread dona do [`Agente`] (e da trava de
+//!   escritor) recebe [`Pedido`]s por canal. Se outro processo já é o escritor, o worker abre em
+//!   leitura e a GUI diz isso. Pausar, retomar e cancelar usam o [`ControleScan`] compartilhado.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dag_agent::{Agente, Cliente, ErroAgente, PoliticaAbertura, caminho_socket_padrao};
-use dag_core::{Autor, Comando, FaseInventario, Pedido, Progresso, Resposta, VolumeDescoberto};
+use dag_agent::{
+    Agente, Cliente, ErroAgente, EventoObservado, Observador, OpcoesLancamento, OpcoesObservador,
+    caminho_socket_padrao, garantir_agente, sem_agente_do_ambiente,
+};
+use dag_core::{
+    Autor, Comando, EstadoJob, EventoAgente, FaseInventario, JobInfo, Pedido, Progresso, Resposta,
+    SaudeMonitorInfo, StatusConfianca, TipoJob, VisaoJobs, VolumeDescoberto,
+};
 use dag_scanner::{ControleScan, EstadoControle};
 
 use crate::leitor::Acordador;
 use crate::progresso::ProgressoScan;
 
-/// Como o worker abriu o Catálogo.
+/// Como o worker chegou ao Catálogo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModoWorker {
     Iniciando,
-    /// Esta GUI é a escritora.
+    /// Sem agente (`--sem-agente`): esta GUI é a escritora, em processo.
     Escritor,
-    /// Um agente em segundo plano (serviço) é o escritor e a GUI é cliente dele.
+    /// Cliente do agente em segundo plano, o escritor único.
     Servico,
+    /// A conexão com o agente caiu (ele encerrou ou reiniciou); o worker reconecta sozinho.
+    Reconectando {
+        motivo: String,
+    },
     /// Outro processo é o escritor (ou o Catálogo só pôde ser aberto para leitura).
     SomenteLeitura {
         motivo: String,
     },
-    /// Nem leitura foi possível.
+    /// Nem leitura foi possível, ou o agente não pôde ser iniciado.
     Falhou {
         motivo: String,
     },
@@ -46,16 +59,17 @@ impl ModoWorker {
     #[must_use]
     pub fn texto_status(&self) -> String {
         match self {
-            Self::Iniciando => "Worker: iniciando…".into(),
-            Self::Escritor => "Worker: escritor (esta sessão)".into(),
-            Self::Servico => "Worker: serviço".into(),
+            Self::Iniciando => "Agente: iniciando…".into(),
+            Self::Escritor => "Worker: escritor (sem agente)".into(),
+            Self::Servico => "Agente: conectado".into(),
+            Self::Reconectando { .. } => "Agente desconectado, reconectando…".into(),
             Self::SomenteLeitura { .. } => "Worker: outro processo é o escritor".into(),
-            Self::Falhou { .. } => "Worker: falhou".into(),
+            Self::Falhou { .. } => "Agente: indisponível".into(),
             Self::Encerrado => "Worker: encerrado".into(),
         }
     }
 
-    /// Esta GUI consegue pedir escritas (ela mesma ou o serviço as executa)?
+    /// Esta GUI consegue pedir escritas (ela mesma ou o agente as executa)?
     #[must_use]
     pub fn pode_escrever(&self) -> bool {
         matches!(self, Self::Escritor | Self::Servico)
@@ -66,13 +80,32 @@ impl ModoWorker {
 #[derive(Debug, Clone)]
 pub struct ConfigWorker {
     pub caminho: PathBuf,
-    /// Volumes fixos em vez da descoberta do sistema (testes; só no modo sessão).
+    /// Volumes fixos em vez da descoberta do sistema (testes; só no modo em processo).
     pub volumes_fixos: Option<Vec<VolumeDescoberto>>,
     /// Socket do agente em segundo plano; `None` = o padrão (`$DAG_SOCKET`, `$XDG_RUNTIME_DIR`).
     pub socket: Option<PathBuf>,
     /// Retomada de execuções interrompidas e verificação das Raízes ao abrir como escritor
-    /// (ADR 0003). A GUI não monitora: nunca marca Ponto de Confiança.
-    pub abertura: PoliticaAbertura,
+    /// (ADR 0003); só vale no modo em processo, pois com o agente quem faz isso é ele. A GUI não
+    /// monitora: nunca marca Ponto de Confiança.
+    pub abertura: dag_agent::PoliticaAbertura,
+    /// Não usa o agente: abre o Catálogo em processo (`--sem-agente`, testes).
+    pub sem_agente: bool,
+    /// Como lançar o agente quando não há um; `None` = valores do ambiente.
+    pub lancamento: Option<OpcoesLancamento>,
+}
+
+impl ConfigWorker {
+    #[must_use]
+    pub fn novo(caminho: PathBuf) -> Self {
+        Self {
+            caminho,
+            volumes_fixos: None,
+            socket: None,
+            abertura: dag_agent::PoliticaAbertura::default(),
+            sem_agente: sem_agente_do_ambiente(),
+            lancamento: None,
+        }
+    }
 }
 
 /// Eventos do worker para a GUI.
@@ -82,7 +115,7 @@ pub enum Evento {
     Modo(ModoWorker),
     /// O worker começou a executar o pedido `id`.
     Iniciado { id: u64 },
-    /// Inventário ou reconciliação.
+    /// Inventário ou reconciliação do trabalho em andamento (seja de quem for).
     Progresso(ProgressoScan),
     /// Etapa de Hash Completo (ou verificação): arquivos e bytes reais, sem consultar o
     /// Catálogo.
@@ -92,6 +125,20 @@ pub enum Evento {
     /// Recuperação ao abrir (execução interrompida retomada, verificação das Raízes). `fim`
     /// `false` = em andamento (faixa de aviso); `true` = relatório final.
     Abertura { texto: String, fim: bool },
+    /// Todos os trabalhos do agente agora (em andamento e na fila), quem quer que os tenha
+    /// iniciado. Chega no instantâneo e a cada mudança.
+    Jobs(Vec<JobInfo>),
+    /// Um trabalho terminou (varredura, retomada, verificação), com a resposta que o pedido dele
+    /// recebeu; a GUI usa quando o trabalho não foi iniciado por ela.
+    JobFinalizado {
+        job: JobInfo,
+        desfecho: String,
+        resposta: Box<Resposta>,
+    },
+    /// Saúde do monitor do agente.
+    Monitor(SaudeMonitorInfo),
+    /// Ponto de Confiança por Raiz.
+    Confianca(Vec<StatusConfianca>),
 }
 
 enum Mensagem {
@@ -102,93 +149,72 @@ enum Mensagem {
 /// Alça para controlar o trabalho em curso.
 #[derive(Debug, Clone)]
 enum Alca {
-    /// O `ControleScan` do agente de sessão.
+    /// O `ControleScan` do agente de sessão (modo em processo).
     Local(ControleScan),
-    /// O agente em segundo plano: o estado é o último comando aceito por ele.
-    Remota {
-        socket: PathBuf,
-        estado: Arc<Mutex<EstadoControle>>,
-    },
+    /// O agente em segundo plano: pausar, retomar e cancelar vão por conexão própria, pelo id do
+    /// trabalho.
+    Remota { socket: PathBuf },
 }
 
 impl Alca {
-    fn estado(&self) -> EstadoControle {
+    /// Pede ao agente; a confirmação chega pelo fluxo de eventos.
+    fn agir_remoto(socket: &std::path::Path, comando: Comando) {
+        let socket = socket.to_path_buf();
+        // Conexão própria: não depende de nenhuma outra estar livre.
+        let _ = std::thread::Builder::new()
+            .name("dag-worker-controle".into())
+            .spawn(move || {
+                let _ = Cliente::conectar(&socket).and_then(|mut c| {
+                    c.enviar(
+                        Pedido {
+                            autor: Autor::Gui,
+                            comando,
+                        },
+                        &mut |_| {},
+                    )
+                });
+            });
+    }
+
+    fn pausar(&self, job: Option<u64>) {
         match self {
-            Self::Local(c) => c.estado(),
-            Self::Remota { estado, .. } => estado.lock().map_or(EstadoControle::Executando, |e| *e),
+            Self::Local(c) => c.pausar(),
+            Self::Remota { socket } => Self::agir_remoto(
+                socket,
+                job.map_or(Comando::Pausar { execucao: None }, |job| {
+                    Comando::PausarJob { job }
+                }),
+            ),
         }
     }
 
-    /// Cada pedido novo começa do zero.
-    fn reiniciar(&self) {
+    fn continuar(&self, job: Option<u64>) {
         match self {
-            Self::Local(c) => c.reiniciar(),
-            Self::Remota { estado, .. } => {
-                if let Ok(mut e) = estado.lock() {
-                    *e = EstadoControle::Executando;
-                }
-            }
+            Self::Local(c) => c.continuar(),
+            Self::Remota { socket } => Self::agir_remoto(
+                socket,
+                job.map_or(
+                    Comando::Retomar {
+                        execucao: None,
+                        threads_por_disco: None,
+                        max_discos: None,
+                    },
+                    |job| Comando::RetomarJob { job },
+                ),
+            ),
         }
     }
 
-    fn agir(&self, local: fn(&ControleScan), comando: Comando, novo: EstadoControle) {
+    fn cancelar(&self, job: Option<u64>) {
         match self {
-            Self::Local(c) => local(c),
-            Self::Remota { socket, estado } => {
-                let anterior = estado.lock().map_or(EstadoControle::Executando, |e| *e);
-                if let Ok(mut e) = estado.lock() {
-                    *e = novo;
-                }
-                let (socket, estado) = (socket.clone(), Arc::clone(estado));
-                // Conexão própria: a do pedido está esperando o fim do scan.
-                let _ = std::thread::Builder::new()
-                    .name("dag-worker-controle".into())
-                    .spawn(move || {
-                        let ok = Cliente::conectar(&socket)
-                            .and_then(|mut c| {
-                                c.enviar(
-                                    Pedido {
-                                        autor: Autor::Gui,
-                                        comando,
-                                    },
-                                    &mut |_| {},
-                                )
-                            })
-                            .is_ok_and(|r| !matches!(r, Resposta::Erro { .. }));
-                        if !ok && let Ok(mut e) = estado.lock() {
-                            *e = anterior;
-                        }
-                    });
-            }
+            Self::Local(c) => c.cancelar(),
+            Self::Remota { socket } => Self::agir_remoto(
+                socket,
+                job.map_or(Comando::Cancelar { execucao: None }, |job| {
+                    Comando::CancelarJob { job }
+                }),
+            ),
         }
-    }
-
-    fn pausar(&self) {
-        self.agir(
-            ControleScan::pausar,
-            Comando::Pausar { execucao: None },
-            EstadoControle::Pausado,
-        );
-    }
-
-    fn continuar(&self) {
-        self.agir(
-            ControleScan::continuar,
-            Comando::Retomar {
-                execucao: None,
-                threads_por_disco: None,
-                max_discos: None,
-            },
-            EstadoControle::Executando,
-        );
-    }
-
-    fn cancelar(&self) {
-        self.agir(
-            ControleScan::cancelar,
-            Comando::Cancelar { execucao: None },
-            EstadoControle::Cancelado,
-        );
     }
 
     fn eh_local(&self) -> bool {
@@ -204,6 +230,10 @@ pub struct Worker {
     modo: ModoWorker,
     proximo_id: u64,
     thread: Option<JoinHandle<()>>,
+    /// Último conjunto de trabalhos do agente (vazio no modo em processo).
+    jobs: Vec<JobInfo>,
+    monitor: Option<SaudeMonitorInfo>,
+    confianca: Vec<StatusConfianca>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -231,12 +261,37 @@ impl Worker {
             modo: ModoWorker::Iniciando,
             proximo_id: 1,
             thread,
+            jobs: Vec::new(),
+            monitor: None,
+            confianca: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn modo(&self) -> &ModoWorker {
         &self.modo
+    }
+
+    /// Os trabalhos do agente neste instante (em andamento e na fila).
+    #[must_use]
+    pub fn jobs(&self) -> &[JobInfo] {
+        &self.jobs
+    }
+
+    /// O trabalho que a GUI acompanha: o primeiro que não é o monitor e já saiu da fila.
+    #[must_use]
+    pub fn job_em_foco(&self) -> Option<&JobInfo> {
+        dag_core::job_em_foco(&self.jobs)
+    }
+
+    #[must_use]
+    pub fn monitor(&self) -> Option<&SaudeMonitorInfo> {
+        self.monitor.as_ref()
+    }
+
+    #[must_use]
+    pub fn confianca(&self) -> &[StatusConfianca] {
+        &self.confianca
     }
 
     /// Enfileira um comando (autor GUI) e devolve o id do pedido.
@@ -255,35 +310,53 @@ impl Worker {
         self.controle.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Estado do scan no controle (local ou o último aceito pelo serviço).
+    /// Estado do trabalho em foco: no agente vem do fluxo de eventos; em processo, do controle.
     #[must_use]
     pub fn estado_controle(&self) -> Option<EstadoControle> {
-        self.alca().map(|a| a.estado())
+        match self.alca()? {
+            Alca::Local(c) => Some(c.estado()),
+            Alca::Remota { .. } => Some(match self.job_em_foco().map(|j| j.estado) {
+                Some(EstadoJob::Pausado) => EstadoControle::Pausado,
+                Some(EstadoJob::Cancelando) => EstadoControle::Cancelado,
+                _ => EstadoControle::Executando,
+            }),
+        }
+    }
+
+    fn id_em_foco(&self) -> Option<u64> {
+        self.job_em_foco().map(|j| j.id)
     }
 
     pub fn pausar(&self) {
         if let Some(a) = self.alca() {
-            a.pausar();
+            a.pausar(self.id_em_foco());
         }
     }
 
     pub fn continuar(&self) {
         if let Some(a) = self.alca() {
-            a.continuar();
+            a.continuar(self.id_em_foco());
         }
     }
 
     pub fn cancelar(&self) {
         if let Some(a) = self.alca() {
-            a.cancelar();
+            a.cancelar(self.id_em_foco());
         }
     }
 
-    /// Ao sair, a varredura da própria sessão é cancelada com checkpoint; a de um serviço
-    /// continua (ela não pertence a esta janela).
+    /// Cancela um trabalho do agente pelo id (um que ainda está na fila, por exemplo).
+    pub fn cancelar_job(&self, job: u64) {
+        if let Some(a) = self.alca() {
+            a.cancelar(Some(job));
+        }
+    }
+
+    /// Ao sair, a varredura da própria sessão (modo em processo) é cancelada com checkpoint; a
+    /// do agente continua (ela não pertence a esta janela).
     fn cancelar_ao_sair(&self) {
         if let Some(a) = self.alca().filter(Alca::eh_local) {
-            a.cancelar();
+            a.cancelar(None);
         }
     }
 
@@ -309,21 +382,21 @@ impl Worker {
     }
 
     fn aplicar(&mut self, e: &Evento) {
-        if let Evento::Modo(m) = e {
-            self.modo = m.clone();
+        match e {
+            Evento::Modo(m) => self.modo = m.clone(),
+            Evento::Jobs(j) => self.jobs.clone_from(j),
+            Evento::Monitor(m) => self.monitor = Some(m.clone()),
+            Evento::Confianca(c) => self.confianca.clone_from(c),
+            _ => {}
         }
     }
 
     /// Cancela o que estiver rodando (se for desta sessão), pede para sair e espera a thread
-    /// (solta a trava). Com o serviço, a thread pode estar esperando uma resposta longa: não é
-    /// esperada.
+    /// (solta a trava no modo em processo).
     pub fn encerrar(mut self) {
         self.cancelar_ao_sair();
         let _ = self.tx.send(Mensagem::Sair);
-        let remoto = self.alca().is_some_and(|a| !a.eh_local());
-        if let Some(t) = self.thread.take()
-            && !remoto
-        {
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
         self.modo = ModoWorker::Encerrado;
@@ -332,21 +405,21 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Fechar a janela: cancela com checkpoint e deixa a thread terminar sozinha.
+        // Fechar a janela: no modo em processo cancela com checkpoint; com o agente nada é
+        // cancelado (o trabalho é dele) e a thread só deixa de acompanhar.
         self.cancelar_ao_sair();
         let _ = self.tx.send(Mensagem::Sair);
     }
 }
 
-/// Onde os pedidos são executados.
+/// Onde os pedidos são executados no modo em processo.
 #[allow(clippy::large_enum_variant)]
 enum Destino {
     Sessao(Agente),
-    Servico(Cliente),
     Nenhum,
 }
 
-fn abrir(cfg: &ConfigWorker, enc: &Arc<Encaminhador>) -> (Destino, ModoWorker) {
+fn abrir_em_processo(cfg: &ConfigWorker, enc: &Arc<Encaminhador>) -> (Destino, ModoWorker) {
     let sessao = |a: Agente| {
         let e = Arc::clone(enc);
         let mut a = a
@@ -357,12 +430,6 @@ fn abrir(cfg: &ConfigWorker, enc: &Arc<Encaminhador>) -> (Destino, ModoWorker) {
         }
         Destino::Sessao(a)
     };
-    // Já há um agente servindo este Catálogo? Então a GUI é cliente dele, nunca um segundo
-    // escritor.
-    let socket = cfg.socket.clone().unwrap_or_else(caminho_socket_padrao);
-    if let Some(c) = Cliente::conectar_se_serve(&socket, &cfg.caminho) {
-        return (Destino::Servico(c), ModoWorker::Servico);
-    }
     match Agente::abrir(&cfg.caminho) {
         Ok(a) => (sessao(a), ModoWorker::Escritor),
         Err(ErroAgente::EscritorOcupado(_)) => match Agente::abrir_leitura(&cfg.caminho) {
@@ -388,8 +455,8 @@ fn abrir(cfg: &ConfigWorker, enc: &Arc<Encaminhador>) -> (Destino, ModoWorker) {
     }
 }
 
-/// Converte eventos de progresso do agente em eventos da GUI, com cadência limitada (~8 por
-/// segundo por tipo, mais toda troca de fase e o fim do hash).
+/// Converte eventos de progresso do agente de sessão em eventos da GUI, com cadência limitada
+/// (~8 por segundo por tipo, mais toda troca de fase e o fim do hash).
 struct Encaminhador {
     tx: Sender<Evento>,
     acordador: Acordador,
@@ -456,6 +523,260 @@ impl Encaminhador {
     }
 }
 
+const TEXTO_ABERTURA: &str = "Conferindo o Catálogo: execuções interrompidas e mudanças no disco…";
+
+/// Traduz o fluxo do agente nos eventos da GUI, mantendo a visão dos trabalhos.
+#[derive(Default)]
+struct Tradutor {
+    visao: VisaoJobs,
+    ja_conectou: bool,
+}
+
+impl Tradutor {
+    /// Progresso numérico do trabalho em foco (o único que executa).
+    fn progresso_de(p: &Progresso, saida: &mut Vec<Evento>) {
+        match p {
+            Progresso::Inventario(i) | Progresso::Reconciliacao(i) => {
+                saida.push(Evento::Progresso(ProgressoScan::from(i)));
+            }
+            Progresso::Hash(h) | Progresso::Verificacao(h) => saida.push(Evento::Hash(h.clone())),
+            Progresso::Mensagem { .. } => {}
+        }
+    }
+
+    fn texto_abertura(etapa: Option<&str>) -> String {
+        etapa
+            .and_then(|e| e.strip_prefix("abertura: "))
+            .unwrap_or(TEXTO_ABERTURA)
+            .to_string()
+    }
+
+    fn traduzir(&mut self, ev: EventoObservado) -> Vec<Evento> {
+        let mut out = Vec::new();
+        match ev {
+            EventoObservado::Conectado(_) => {
+                self.ja_conectou = true;
+                out.push(Evento::Modo(ModoWorker::Servico));
+            }
+            EventoObservado::Desconectado { motivo } => {
+                // Sem conexão não se sabe o que roda: a visão zera até o próximo instantâneo.
+                self.visao = VisaoJobs::default();
+                if self.ja_conectou {
+                    out.push(Evento::Modo(ModoWorker::Reconectando { motivo }));
+                    out.push(Evento::Jobs(Vec::new()));
+                }
+            }
+            EventoObservado::Evento(e) => self.evento(&e, &mut out),
+        }
+        out
+    }
+
+    fn evento(&mut self, e: &EventoAgente, out: &mut Vec<Evento>) {
+        let fim = self.visao.aplicar(e);
+        match e {
+            EventoAgente::Instantaneo {
+                monitor, confianca, ..
+            } => {
+                out.push(Evento::Jobs(self.visao.jobs.clone()));
+                if let Some(a) = self.visao.jobs.iter().find(|j| j.tipo == TipoJob::Abertura) {
+                    out.push(Evento::Abertura {
+                        texto: Self::texto_abertura(a.etapa.as_deref()),
+                        fim: false,
+                    });
+                }
+                if let Some(f) = self.visao.em_foco() {
+                    for p in &f.progresso {
+                        Self::progresso_de(p, out);
+                    }
+                }
+                if let Some(m) = monitor {
+                    out.push(Evento::Monitor(m.clone()));
+                }
+                out.push(Evento::Confianca(confianca.clone()));
+            }
+            EventoAgente::JobEnfileirado { .. } | EventoAgente::JobAtualizado { .. } => {
+                out.push(Evento::Jobs(self.visao.jobs.clone()));
+            }
+            EventoAgente::JobIniciado { job } => {
+                out.push(Evento::Jobs(self.visao.jobs.clone()));
+                if job.tipo == TipoJob::Abertura {
+                    out.push(Evento::Abertura {
+                        texto: TEXTO_ABERTURA.into(),
+                        fim: false,
+                    });
+                }
+            }
+            EventoAgente::JobProgresso {
+                job, progresso: p, ..
+            } => {
+                let Some(j) = self.visao.job(*job) else {
+                    return;
+                };
+                if j.tipo == TipoJob::Abertura
+                    && let Progresso::Mensagem { texto } = p
+                    && let Some(t) = texto.strip_prefix("abertura: ")
+                {
+                    out.push(Evento::Abertura {
+                        texto: t.to_string(),
+                        fim: false,
+                    });
+                }
+                if self.visao.em_foco().is_some_and(|f| f.id == *job) {
+                    Self::progresso_de(p, out);
+                }
+            }
+            EventoAgente::JobFinalizado {
+                job,
+                desfecho,
+                resposta,
+            } => {
+                out.push(Evento::Jobs(self.visao.jobs.clone()));
+                if let Some(j) = fim {
+                    match j.tipo {
+                        TipoJob::Abertura => {
+                            let texto = match &**resposta {
+                                Resposta::Ok { mensagem } => mensagem.clone().unwrap_or_default(),
+                                Resposta::Erro { mensagem, .. } => {
+                                    format!("Recuperação ao abrir falhou: {mensagem}")
+                                }
+                                _ => String::new(),
+                            };
+                            out.push(Evento::Abertura { texto, fim: true });
+                        }
+                        TipoJob::Monitor => {}
+                        _ => out.push(Evento::JobFinalizado {
+                            job: job.clone(),
+                            desfecho: desfecho.clone(),
+                            resposta: resposta.clone(),
+                        }),
+                    }
+                }
+            }
+            EventoAgente::Monitor { saude } => out.push(Evento::Monitor(saude.clone())),
+            EventoAgente::PontoConfianca { confianca } => {
+                out.push(Evento::Confianca(confianca.clone()));
+            }
+            EventoAgente::Batida => {}
+        }
+    }
+}
+
+/// Acompanha o agente: traduz o fluxo de eventos para a GUI até `parar`.
+fn encaminhar_eventos(
+    obs: &Observador,
+    tx: &Sender<Evento>,
+    acordador: &Acordador,
+    parar: &AtomicBool,
+) {
+    let mut t = Tradutor::default();
+    while !parar.load(Ordering::SeqCst) {
+        let Some(ev) = obs.proximo(Duration::from_millis(100)) else {
+            continue;
+        };
+        let saida = t.traduzir(ev);
+        if saida.is_empty() {
+            continue;
+        }
+        for e in saida {
+            if tx.send(e).is_err() {
+                return;
+            }
+        }
+        acordador.acordar();
+    }
+}
+
+/// Modo agente: garante o agente, acompanha o fluxo e despacha os pedidos em conexões próprias.
+fn laco_agente(
+    cfg: &ConfigWorker,
+    rx: &Receiver<Mensagem>,
+    tx: &Sender<Evento>,
+    controle: &Arc<Mutex<Option<Alca>>>,
+    acordador: &Acordador,
+    lancar: bool,
+) {
+    let socket = cfg.socket.clone().unwrap_or_else(caminho_socket_padrao);
+    let lanc = cfg
+        .lancamento
+        .clone()
+        .unwrap_or_else(|| OpcoesLancamento::do_ambiente(&cfg.caminho, &socket));
+    let enviar = |e: Evento| {
+        let _ = tx.send(e);
+        acordador.acordar();
+    };
+    let mut motivo_falha: Option<String> = None;
+    if lancar && let Err(e) = garantir_agente(&lanc) {
+        let motivo = e.to_string();
+        enviar(Evento::Modo(ModoWorker::Falhou {
+            motivo: motivo.clone(),
+        }));
+        motivo_falha = Some(motivo);
+    }
+    if let Ok(mut g) = controle.lock() {
+        *g = Some(Alca::Remota {
+            socket: socket.clone(),
+        });
+    }
+    // O observador reconecta (e relança o agente, se for o caso) sozinho.
+    let mut opcoes = OpcoesObservador::novo(cfg.caminho.clone(), socket.clone());
+    if lancar {
+        opcoes.lancamento = Some(lanc);
+    }
+    let obs = Observador::iniciar(opcoes, None);
+    let parar = Arc::new(AtomicBool::new(false));
+    let encaminhador = {
+        let (tx, ac, parar) = (tx.clone(), acordador.clone(), Arc::clone(&parar));
+        std::thread::Builder::new()
+            .name("dag-worker-eventos".into())
+            .spawn(move || encaminhar_eventos(&obs, &tx, &ac, &parar))
+            .ok()
+    };
+    while let Ok(m) = rx.recv() {
+        match m {
+            Mensagem::Sair => break,
+            Mensagem::Pedido { id, pedido } => {
+                enviar(Evento::Iniciado { id });
+                let (tx, ac) = (tx.clone(), acordador.clone());
+                let (socket, catalogo) = (socket.clone(), cfg.caminho.clone());
+                let falha = motivo_falha.clone();
+                let r = std::thread::Builder::new()
+                    .name("dag-worker-pedido".into())
+                    .spawn(move || {
+                        let resposta = match Cliente::conectar_se_serve(&socket, &catalogo) {
+                            Some(mut c) => c
+                                .enviar(pedido, &mut |_| {})
+                                .unwrap_or_else(|e| e.para_resposta()),
+                            None => Resposta::Erro {
+                                codigo: "agente_indisponivel".into(),
+                                mensagem: falha.unwrap_or_else(|| {
+                                    "O agente está desconectado; a GUI está reconectando.".into()
+                                }),
+                            },
+                        };
+                        let _ = tx.send(Evento::Resposta {
+                            id,
+                            resposta: Box::new(resposta),
+                        });
+                        ac.acordar();
+                    });
+                if r.is_err() {
+                    enviar(Evento::Resposta {
+                        id,
+                        resposta: Box::new(Resposta::Erro {
+                            codigo: "worker_indisponivel".into(),
+                            mensagem: "Não foi possível iniciar a thread do pedido.".into(),
+                        }),
+                    });
+                }
+            }
+        }
+    }
+    parar.store(true, Ordering::SeqCst);
+    if let Some(t) = encaminhador {
+        let _ = t.join();
+    }
+}
+
 fn laco(
     cfg: &ConfigWorker,
     rx: &Receiver<Mensagem>,
@@ -463,18 +784,21 @@ fn laco(
     controle: &Arc<Mutex<Option<Alca>>>,
     acordador: &Acordador,
 ) {
+    // `--sem-agente` só vale se não houver agente: havendo um, ele é o escritor e a GUI o segue.
+    let socket = cfg.socket.clone().unwrap_or_else(caminho_socket_padrao);
+    let agente_ja_existe = Cliente::conectar_se_serve(&socket, &cfg.caminho).is_some();
+    if !cfg.sem_agente || agente_ja_existe {
+        laco_agente(cfg, rx, tx, controle, acordador, !cfg.sem_agente);
+        return;
+    }
     let enviar = |e: Evento| {
         let _ = tx.send(e);
         acordador.acordar();
     };
     let enc = Arc::new(Encaminhador::novo(tx.clone(), acordador.clone()));
-    let (mut destino, modo) = abrir(cfg, &enc);
+    let (mut destino, modo) = abrir_em_processo(cfg, &enc);
     let alca = match &destino {
         Destino::Sessao(a) => Some(Alca::Local(a.controle())),
-        Destino::Servico(c) => Some(Alca::Remota {
-            socket: c.socket().to_path_buf(),
-            estado: Arc::new(Mutex::new(EstadoControle::Executando)),
-        }),
         Destino::Nenhum => None,
     };
     if let Ok(mut g) = controle.lock() {
@@ -484,9 +808,10 @@ fn laco(
     if modo == ModoWorker::Escritor
         && let Destino::Sessao(a) = &mut destino
     {
-        // A GUI é a escritora: o que o processo anterior deixou pela metade continua daqui.
+        // Sem agente a GUI é a escritora: o que o processo anterior deixou pela metade continua
+        // daqui.
         enviar(Evento::Abertura {
-            texto: "Conferindo o Catálogo: execuções interrompidas e mudanças no disco…".into(),
+            texto: TEXTO_ABERTURA.into(),
             fim: false,
         });
         let r = a.recuperar_ao_abrir(&cfg.abertura);
@@ -504,14 +829,11 @@ fn laco(
                 enviar(Evento::Iniciado { id });
                 // Um scan cancelado antes deixa o controle em "cancelado"; cada novo trabalho
                 // começa do zero.
-                if let Some(a) = &alca {
-                    a.reiniciar();
+                if let Some(Alca::Local(c)) = &alca {
+                    c.reiniciar();
                 }
                 let resposta = match &mut destino {
                     Destino::Sessao(a) => a.executar_pedido(pedido),
-                    Destino::Servico(c) => c
-                        .enviar(pedido, &mut |p| enc.encaminhar(p))
-                        .unwrap_or_else(|e| e.para_resposta()),
                     Destino::Nenhum => Resposta::Erro {
                         codigo: "worker_indisponivel".into(),
                         mensagem: match &modo {
@@ -535,7 +857,7 @@ fn laco(
 mod testes {
     use super::*;
     use dag_agent::GuardaEscritor;
-    use dag_core::ModoVarredura;
+    use dag_core::{ModoVarredura, OrigemJob};
     use std::fs;
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
@@ -573,6 +895,44 @@ mod testes {
             .unwrap();
     }
 
+    /// Worker em processo (`--sem-agente`), como nos testes que não sobem agente.
+    fn em_processo(catalogo: &Path, raiz: &Path) -> Worker {
+        Worker::iniciar(
+            ConfigWorker {
+                caminho: catalogo.to_path_buf(),
+                volumes_fixos: Some(vec![volume_de(raiz)]),
+                socket: Some(sem_socket()),
+                abertura: dag_agent::PoliticaAbertura::desligada(),
+                sem_agente: true,
+                lancamento: None,
+            },
+            Acordador::default(),
+        )
+    }
+
+    /// Worker cliente de um agente já de pé.
+    fn cliente_do_agente(catalogo: &Path, socket: &Path) -> Worker {
+        Worker::iniciar(
+            ConfigWorker {
+                caminho: catalogo.to_path_buf(),
+                volumes_fixos: None,
+                socket: Some(socket.to_path_buf()),
+                abertura: dag_agent::PoliticaAbertura::desligada(),
+                sem_agente: false,
+                lancamento: Some(OpcoesLancamento {
+                    catalogo: catalogo.to_path_buf(),
+                    socket: socket.to_path_buf(),
+                    // Nunca lança de verdade nos testes: o agente é o do próprio teste.
+                    executavel: Some(PathBuf::from("/nonexistent/dag")),
+                    usar_systemd: false,
+                    espera: Duration::from_millis(300),
+                    argumentos_agente: Vec::new(),
+                }),
+            },
+            Acordador::default(),
+        )
+    }
+
     /// Espera o evento que satisfaz `pred`, acumulando os anteriores.
     fn esperar_ate(w: &mut Worker, pred: impl Fn(&Evento) -> bool) -> (Evento, Vec<Evento>) {
         let fim = Instant::now() + T;
@@ -599,32 +959,56 @@ mod testes {
         (tmp, raiz, catalogo)
     }
 
+    fn cenario_grande() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let c = cenario();
+        for d in 0..120 {
+            for f in 0..60 {
+                escrever(&c.1.join(format!("g{d}/f{f}.txt")), 64 + f);
+            }
+        }
+        c
+    }
+
+    fn scan(raiz: &Path, sem_hash: bool) -> Comando {
+        Comando::IniciarScan {
+            modo: ModoVarredura::FullScan,
+            raizes: vec![raiz.to_str().unwrap().into()],
+            sem_hash,
+            elevar: false,
+            releitura_total: false,
+            threads_por_disco: None,
+            max_discos: None,
+        }
+    }
+
+    fn servidor(raiz: &Path, catalogo: &Path, socket: &Path) -> dag_agent::Servidor {
+        let mut cfg = dag_agent::ConfigServidor::novo(catalogo, socket);
+        cfg.monitor = false;
+        cfg.volumes_fixos = Some(vec![volume_de(raiz)]);
+        dag_agent::Servidor::iniciar(cfg).unwrap()
+    }
+
+    fn resposta_de(w: &mut Worker, id: u64) -> Resposta {
+        let (e, _) = esperar_ate(
+            w,
+            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
+        );
+        let Evento::Resposta { resposta, .. } = e else {
+            unreachable!()
+        };
+        *resposta
+    }
+
     #[test]
     fn worker_executa_full_scan_com_progresso_e_conclusao() {
         let (_tmp, raiz, catalogo) = cenario();
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo.clone(),
-                volumes_fixos: Some(vec![volume_de(&raiz)]),
-                socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
+        let mut w = em_processo(&catalogo, &raiz);
         let (e, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
         assert!(matches!(e, Evento::Modo(ModoWorker::Escritor)));
         assert!(w.modo().pode_escrever());
         assert!(w.estado_controle().is_some());
 
-        let id = w.enviar(Comando::IniciarScan {
-            modo: ModoVarredura::FullScan,
-            raizes: vec![raiz.to_str().unwrap().into()],
-            sem_hash: false,
-            elevar: false,
-            releitura_total: false,
-            threads_por_disco: None,
-            max_discos: None,
-        });
+        let id = w.enviar(scan(&raiz, false));
         let (fim, antes) = esperar_ate(
             &mut w,
             |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
@@ -646,13 +1030,11 @@ mod testes {
             !progressos.is_empty(),
             "sem eventos de progresso: {antes:?}"
         );
-        let ultimo = progressos.last().unwrap();
-        assert_eq!(ultimo.arquivos, 4);
+        assert_eq!(progressos.last().unwrap().arquivos, 4);
         let Evento::Resposta { resposta, .. } = fim else {
             unreachable!()
         };
-        let resposta = *resposta;
-        match resposta {
+        match *resposta {
             Resposta::ScanConcluido {
                 desfecho,
                 arquivos,
@@ -675,25 +1057,9 @@ mod testes {
     #[test]
     fn worker_responde_volumes_e_erro_de_comando_invalido() {
         let (_tmp, raiz, catalogo) = cenario();
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo,
-                volumes_fixos: Some(vec![volume_de(&raiz)]),
-                socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
+        let mut w = em_processo(&catalogo, &raiz);
         let id = w.enviar(Comando::ListarVolumes);
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
-        match resposta {
+        match resposta_de(&mut w, id) {
             Resposta::Volumes { volumes, .. } => assert_eq!(volumes.len(), 1),
             outra => panic!("{outra:?}"),
         }
@@ -706,15 +1072,7 @@ mod testes {
             threads_por_disco: None,
             max_discos: None,
         });
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
-        assert!(matches!(resposta, Resposta::Erro { .. }));
+        assert!(matches!(resposta_de(&mut w, id), Resposta::Erro { .. }));
         w.encerrar();
     }
 
@@ -723,15 +1081,7 @@ mod testes {
         let (_tmp, raiz, catalogo) = cenario();
         // Outro "processo" (aqui, outra abertura do mesmo arquivo de trava) é o escritor.
         let dono = Agente::abrir(&catalogo).unwrap().silencioso();
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo.clone(),
-                volumes_fixos: Some(vec![volume_de(&raiz)]),
-                socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
+        let mut w = em_processo(&catalogo, &raiz);
         let (e, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
         let Evento::Modo(m) = e else { unreachable!() };
         assert!(matches!(m, ModoWorker::SomenteLeitura { .. }), "{m:?}");
@@ -739,25 +1089,11 @@ mod testes {
         assert!(!m.pode_escrever());
         // Comando de escrita é recusado; leitura funciona.
         let id = w.enviar(Comando::ListarVolumes);
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
-        assert!(matches!(resposta, Resposta::Erro { .. }), "{resposta:?}");
+        let r = resposta_de(&mut w, id);
+        assert!(matches!(r, Resposta::Erro { .. }), "{r:?}");
         let id = w.enviar(Comando::Status { execucao: None });
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
-        assert!(matches!(resposta, Resposta::Status { .. }), "{resposta:?}");
+        let r = resposta_de(&mut w, id);
+        assert!(matches!(r, Resposta::Status { .. }), "{r:?}");
         w.encerrar();
         drop(dono);
         let _ = GuardaEscritor::adquirir(&catalogo).unwrap();
@@ -773,7 +1109,9 @@ mod testes {
                 caminho: catalogo,
                 volumes_fixos: None,
                 socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::desligada(),
+                abertura: dag_agent::PoliticaAbertura::desligada(),
+                sem_agente: true,
+                lancamento: None,
             },
             Acordador::default(),
         );
@@ -781,16 +1119,8 @@ mod testes {
         let Evento::Modo(m) = e else { unreachable!() };
         assert!(matches!(m, ModoWorker::Falhou { .. }), "{m:?}");
         let id = w.enviar(Comando::ListarVolumes);
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
         assert!(
-            matches!(resposta, Resposta::Erro { codigo, .. } if codigo == "worker_indisponivel")
+            matches!(resposta_de(&mut w, id), Resposta::Erro { codigo, .. } if codigo == "worker_indisponivel")
         );
         w.encerrar();
     }
@@ -802,179 +1132,29 @@ mod testes {
         for i in 0..300 {
             escrever(&raiz.join(format!("d{}/f{i}.txt", i % 30)), 10);
         }
-        let catalogo = tmp.path().join("c.sqlite");
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo,
-                volumes_fixos: Some(vec![volume_de(&raiz)]),
-                socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
+        let mut w = em_processo(&tmp.path().join("c.sqlite"), &raiz);
         esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
         w.cancelar();
         // Cancelamento antes do início vale para o scan em curso; o worker reinicia o controle
         // ao começar cada pedido, então este roda normalmente.
-        let id = w.enviar(Comando::IniciarScan {
-            modo: ModoVarredura::FullScan,
-            raizes: vec![raiz.to_str().unwrap().into()],
-            sem_hash: true,
-            elevar: false,
-            releitura_total: false,
-            threads_por_disco: None,
-            max_discos: None,
-        });
-        let (e, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = e else {
-            unreachable!()
-        };
-        let resposta = *resposta;
+        let id = w.enviar(scan(&raiz, true));
+        let r = resposta_de(&mut w, id);
         assert!(
-            matches!(&resposta, Resposta::ScanConcluido { desfecho, arquivos: 300, .. } if desfecho == "concluida"),
-            "{resposta:?}"
+            matches!(&r, Resposta::ScanConcluido { desfecho, arquivos: 300, .. } if desfecho == "concluida"),
+            "{r:?}"
         );
         w.encerrar();
     }
 
-    fn servidor(raiz: &Path, catalogo: &Path, socket: &Path) -> dag_agent::Servidor {
-        let mut cfg = dag_agent::ConfigServidor::novo(catalogo, socket);
-        cfg.monitor = false;
-        cfg.volumes_fixos = Some(vec![volume_de(raiz)]);
-        dag_agent::Servidor::iniciar(cfg).unwrap()
-    }
-
     #[test]
-    fn worker_conecta_ao_servico_sem_segundo_escritor_e_recebe_hash_com_bytes() {
-        let (tmp, raiz, catalogo) = cenario();
-        let socket = tmp.path().join("run/agente.sock");
-        let srv = servidor(&raiz, &catalogo, &socket);
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo.clone(),
-                volumes_fixos: None,
-                socket: Some(socket.clone()),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
-        let (e, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
-        let Evento::Modo(m) = e else { unreachable!() };
-        assert_eq!(m, ModoWorker::Servico);
-        assert_eq!(m.texto_status(), "Worker: serviço");
-        assert!(m.pode_escrever());
-        // A GUI não abriu um segundo escritor: a trava é do serviço.
-        assert!(matches!(
-            Agente::abrir(&catalogo).unwrap_err(),
-            ErroAgente::EscritorOcupado(_)
-        ));
-        let id = w.enviar(Comando::IniciarScan {
-            modo: ModoVarredura::FullScan,
-            raizes: vec![raiz.to_str().unwrap().into()],
-            sem_hash: false,
-            elevar: false,
-            releitura_total: false,
-            threads_por_disco: None,
-            max_discos: None,
-        });
-        let (fim, antes) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        assert!(antes.iter().any(|e| matches!(e, Evento::Progresso(_))));
-        let h: Vec<_> = antes
-            .iter()
-            .filter_map(|e| match e {
-                Evento::Hash(h) => Some(h),
-                _ => None,
-            })
-            .collect();
-        assert!(!h.is_empty(), "sem progresso de hash: {antes:?}");
-        assert!(h.last().unwrap().bytes_lidos > 0);
-        let Evento::Resposta { resposta, .. } = fim else {
-            unreachable!()
-        };
-        assert!(matches!(
-            *resposta,
-            Resposta::ScanConcluido { arquivos: 4, .. }
-        ));
-        w.encerrar();
-        srv.encerrar();
-    }
-
-    #[test]
-    fn pausar_e_cancelar_vao_pelo_socket_no_modo_servico() {
-        let (tmp, raiz, catalogo) = cenario();
-        for d in 0..120 {
-            for f in 0..60 {
-                escrever(&raiz.join(format!("g{d}/f{f}.txt")), 64 + f);
-            }
-        }
-        let socket = tmp.path().join("run/agente.sock");
-        let srv = servidor(&raiz, &catalogo, &socket);
-        let mut w = Worker::iniciar(
-            ConfigWorker {
-                caminho: catalogo,
-                volumes_fixos: None,
-                socket: Some(socket),
-                abertura: PoliticaAbertura::desligada(),
-            },
-            Acordador::default(),
-        );
-        esperar_ate(&mut w, |e| matches!(e, Evento::Modo(ModoWorker::Servico)));
-        let id = w.enviar(Comando::IniciarScan {
-            modo: ModoVarredura::FullScan,
-            raizes: vec![raiz.to_str().unwrap().into()],
-            sem_hash: false,
-            elevar: false,
-            releitura_total: false,
-            threads_por_disco: None,
-            max_discos: None,
-        });
-        // Pausa assim que o scan começa a reportar.
-        esperar_ate(&mut w, |e| matches!(e, Evento::Progresso(_)));
-        w.pausar();
-        assert_eq!(w.estado_controle(), Some(EstadoControle::Pausado));
-        esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Progresso(p) if p.fase == crate::progresso::FaseScan::Pausado),
-        );
-        w.cancelar();
-        let (fim, _) = esperar_ate(
-            &mut w,
-            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
-        );
-        let Evento::Resposta { resposta, .. } = fim else {
-            unreachable!()
-        };
-        assert!(
-            matches!(&*resposta, Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada"),
-            "{resposta:?}"
-        );
-        w.encerrar();
-        srv.encerrar();
-    }
-
-    #[test]
-    fn gui_escritora_retoma_a_execucao_interrompida_ao_abrir_e_avisa() {
+    fn gui_escritora_sem_agente_retoma_a_execucao_interrompida_ao_abrir_e_avisa() {
         let (_tmp, raiz, catalogo) = cenario();
         {
             let mut a = Agente::abrir(&catalogo)
                 .unwrap()
                 .silencioso()
                 .com_volumes_fixos(vec![volume_de(&raiz)]);
-            let r = a.executar(Comando::IniciarScan {
-                modo: dag_core::ModoVarredura::FullScan,
-                raizes: vec![raiz.to_str().unwrap().into()],
-                sem_hash: false,
-                elevar: false,
-                releitura_total: false,
-                threads_por_disco: None,
-                max_discos: None,
-            });
+            let r = a.executar(scan(&raiz, false));
             assert!(matches!(r, Resposta::ScanConcluido { .. }), "{r:?}");
         }
         // Processo morto no meio do hash.
@@ -996,7 +1176,9 @@ mod testes {
                 caminho: catalogo.clone(),
                 volumes_fixos: Some(vec![volume_de(&raiz)]),
                 socket: Some(sem_socket()),
-                abertura: PoliticaAbertura::default(),
+                abertura: dag_agent::PoliticaAbertura::default(),
+                sem_agente: true,
+                lancamento: None,
             },
             Acordador::default(),
         );
@@ -1016,5 +1198,178 @@ mod testes {
             .query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))
             .unwrap();
         assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn worker_e_cliente_do_agente_sem_segundo_escritor_e_recebe_hash_com_bytes() {
+        let (tmp, raiz, catalogo) = cenario();
+        let socket = tmp.path().join("run/agente.sock");
+        let srv = servidor(&raiz, &catalogo, &socket);
+        let mut w = cliente_do_agente(&catalogo, &socket);
+        let (e, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
+        let Evento::Modo(m) = e else { unreachable!() };
+        assert_eq!(m, ModoWorker::Servico);
+        assert_eq!(m.texto_status(), "Agente: conectado");
+        assert!(m.pode_escrever());
+        // A GUI não abriu um segundo escritor: a trava é do agente.
+        assert!(matches!(
+            Agente::abrir(&catalogo).unwrap_err(),
+            ErroAgente::EscritorOcupado(_)
+        ));
+        let id = w.enviar(scan(&raiz, false));
+        let (fim, antes) = esperar_ate(
+            &mut w,
+            |e| matches!(e, Evento::Resposta { id: i, .. } if *i == id),
+        );
+        assert!(antes.iter().any(|e| matches!(e, Evento::Progresso(_))));
+        let h: Vec<_> = antes
+            .iter()
+            .filter_map(|e| match e {
+                Evento::Hash(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert!(!h.is_empty(), "sem progresso de hash: {antes:?}");
+        assert!(h.last().unwrap().bytes_lidos > 0);
+        // O job que a GUI iniciou aparece com a origem dela.
+        assert!(antes.iter().any(|e| matches!(e, Evento::Jobs(j)
+            if j.iter().any(|j| j.origem == OrigemJob::Gui && j.tipo == TipoJob::FullScan))));
+        let Evento::Resposta { resposta, .. } = fim else {
+            unreachable!()
+        };
+        assert!(matches!(
+            *resposta,
+            Resposta::ScanConcluido { arquivos: 4, .. }
+        ));
+        w.encerrar();
+        srv.encerrar();
+    }
+
+    #[test]
+    fn gui_ve_o_job_da_cli_com_progresso_e_o_pausa_retoma_e_cancela() {
+        let (tmp, raiz, catalogo) = cenario_grande();
+        let socket = tmp.path().join("run/agente.sock");
+        let srv = servidor(&raiz, &catalogo, &socket);
+        let mut w = cliente_do_agente(&catalogo, &socket);
+        esperar_ate(&mut w, |e| matches!(e, Evento::Modo(ModoWorker::Servico)));
+
+        // Outro cliente (a CLI) inicia a varredura; a GUI não pediu nada.
+        let (s, c) = (socket.clone(), scan(&raiz, false));
+        let cli = std::thread::spawn(move || {
+            Cliente::conectar(&s)
+                .unwrap()
+                .enviar(
+                    Pedido {
+                        autor: Autor::Cli,
+                        comando: c,
+                    },
+                    &mut |_| {},
+                )
+                .unwrap()
+        });
+        esperar_ate(&mut w, |e| {
+            matches!(e, Evento::Jobs(j) if j.iter().any(|j| j.origem == OrigemJob::Cli
+                && j.tipo == TipoJob::FullScan && j.estado == EstadoJob::Executando))
+        });
+        let foco = w.job_em_foco().unwrap().clone();
+        assert_eq!(foco.origem, OrigemJob::Cli);
+        esperar_ate(&mut w, |e| matches!(e, Evento::Progresso(_)));
+        assert_eq!(w.estado_controle(), Some(EstadoControle::Executando));
+
+        w.pausar();
+        esperar_ate(
+            &mut w,
+            |e| matches!(e, Evento::Jobs(j) if j.iter().any(|j| j.id == foco.id && j.estado == EstadoJob::Pausado)),
+        );
+        assert_eq!(w.estado_controle(), Some(EstadoControle::Pausado));
+        w.continuar();
+        esperar_ate(
+            &mut w,
+            |e| matches!(e, Evento::Jobs(j) if j.iter().any(|j| j.id == foco.id && j.estado == EstadoJob::Executando)),
+        );
+        w.cancelar();
+        let (fim, _) = esperar_ate(&mut w, |e| matches!(e, Evento::JobFinalizado { .. }));
+        let Evento::JobFinalizado { job, desfecho, .. } = fim else {
+            unreachable!()
+        };
+        assert_eq!((job.id, desfecho.as_str()), (foco.id, "cancelada"));
+        assert!(matches!(
+            cli.join().unwrap(),
+            Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada"
+        ));
+        assert!(w.job_em_foco().is_none());
+        w.encerrar();
+        srv.encerrar();
+    }
+
+    #[test]
+    fn pausar_e_cancelar_o_proprio_scan_vao_pelo_agente() {
+        let (tmp, raiz, catalogo) = cenario_grande();
+        let socket = tmp.path().join("run/agente.sock");
+        let srv = servidor(&raiz, &catalogo, &socket);
+        let mut w = cliente_do_agente(&catalogo, &socket);
+        esperar_ate(&mut w, |e| matches!(e, Evento::Modo(ModoWorker::Servico)));
+        let id = w.enviar(scan(&raiz, false));
+        // Pausa assim que o scan começa a reportar.
+        esperar_ate(&mut w, |e| matches!(e, Evento::Progresso(_)));
+        w.pausar();
+        esperar_ate(
+            &mut w,
+            |e| matches!(e, Evento::Progresso(p) if p.fase == crate::progresso::FaseScan::Pausado),
+        );
+        assert_eq!(w.estado_controle(), Some(EstadoControle::Pausado));
+        w.cancelar();
+        let r = resposta_de(&mut w, id);
+        assert!(
+            matches!(&r, Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada"),
+            "{r:?}"
+        );
+        w.encerrar();
+        srv.encerrar();
+    }
+
+    #[test]
+    fn a_gui_reconecta_quando_o_agente_reinicia() {
+        let (tmp, raiz, catalogo) = cenario();
+        let socket = tmp.path().join("run/agente.sock");
+        let srv = servidor(&raiz, &catalogo, &socket);
+        let mut w = cliente_do_agente(&catalogo, &socket);
+        esperar_ate(&mut w, |e| matches!(e, Evento::Modo(ModoWorker::Servico)));
+        srv.encerrar();
+        let (e, _) = esperar_ate(&mut w, |e| {
+            matches!(e, Evento::Modo(ModoWorker::Reconectando { .. }))
+        });
+        let Evento::Modo(m) = e else { unreachable!() };
+        assert_eq!(m.texto_status(), "Agente desconectado, reconectando…");
+        assert!(!w.modo().pode_escrever());
+        // Pedidos durante a queda recebem erro claro, sem travar.
+        let id = w.enviar(Comando::ListarVolumes);
+        assert!(matches!(
+            resposta_de(&mut w, id),
+            Resposta::Erro { codigo, .. } if codigo == "agente_indisponivel"
+        ));
+        let srv = servidor(&raiz, &catalogo, &socket);
+        esperar_ate(&mut w, |e| matches!(e, Evento::Modo(ModoWorker::Servico)));
+        let id = w.enviar(Comando::ListarVolumes);
+        assert!(matches!(resposta_de(&mut w, id), Resposta::Volumes { .. }));
+        w.encerrar();
+        srv.encerrar();
+    }
+
+    #[test]
+    fn sem_o_executavel_dag_a_gui_falha_com_mensagem_clara_e_sugere_sem_agente() {
+        let (tmp, _raiz, catalogo) = cenario();
+        let socket = tmp.path().join("run/agente.sock");
+        let mut w = cliente_do_agente(&catalogo, &socket);
+        let (e, _) = esperar_ate(&mut w, |e| matches!(e, Evento::Modo(_)));
+        let Evento::Modo(ModoWorker::Falhou { motivo }) = e else {
+            panic!("{e:?}")
+        };
+        assert!(
+            motivo.contains("não encontrei o executável `dag`"),
+            "{motivo}"
+        );
+        assert!(motivo.contains("--sem-agente"), "{motivo}");
+        w.encerrar();
     }
 }

@@ -6,11 +6,14 @@ use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-use dag_core::{Autor, Comando, Pedido, Progresso, Resposta};
+use std::time::Duration;
+
+use dag_core::{Autor, Comando, EventoAgente, Pedido, Progresso, Resposta};
 use dag_scanner::ControleScan;
 
 use crate::agente::{Agente, somente_leitura};
 use crate::erro::ErroAgente;
+use crate::lancar::{OpcoesLancamento, garantir_agente, sem_agente_do_ambiente};
 use crate::protocolo::{InfoServidor, Quadro, Requisicao, ler_quadro, linha};
 
 /// Variável de ambiente que escolhe o socket do agente.
@@ -112,6 +115,7 @@ impl Cliente {
             id,
             pedido: Some(pedido),
             ola: false,
+            assinar: false,
         });
         if let Err(e) = envio {
             return self.recusa_pendente().ok_or(e);
@@ -140,6 +144,7 @@ impl Cliente {
             id,
             pedido: None,
             ola: true,
+            assinar: false,
         });
         if let Err(e) = envio {
             return Err(match self.recusa_pendente() {
@@ -156,6 +161,38 @@ impl Cliente {
                 return Err(ErroAgente::Ipc(mensagem));
             }
         }
+    }
+
+    /// Assina o fluxo de eventos do agente (ADR 0004): consome esta conexão, que passa a só
+    /// receber. O primeiro evento é sempre o [`EventoAgente::Instantaneo`].
+    ///
+    /// # Errors
+    /// [`ErroAgente::Ipc`] se o envio falhar.
+    pub fn assinar(mut self) -> Result<Assinatura, ErroAgente> {
+        let id = self.novo_id();
+        let envio = self.escrever(&Requisicao {
+            id,
+            pedido: None,
+            ola: false,
+            assinar: true,
+        });
+        if let Err(e) = envio {
+            return Err(match self.recusa_pendente() {
+                Some(Resposta::Erro { mensagem, .. }) => ErroAgente::Ipc(mensagem),
+                _ => e,
+            });
+        }
+        Ok(Assinatura {
+            socket: self.socket,
+            leitor: self.leitor,
+            buf: Vec::new(),
+        })
+    }
+
+    /// O agente ainda responde? (Uma volta de ida e volta barata.)
+    #[must_use]
+    pub fn viva(&mut self) -> bool {
+        self.info().is_ok()
     }
 
     /// Uma recusa do agente (uid não autorizado) que chegou antes de o envio falhar.
@@ -186,6 +223,57 @@ impl Cliente {
     }
 }
 
+/// Fluxo de eventos de um agente (resultado de [`Cliente::assinar`]).
+#[derive(Debug)]
+pub struct Assinatura {
+    socket: PathBuf,
+    leitor: BufReader<UnixStream>,
+    buf: Vec<u8>,
+}
+
+impl Assinatura {
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Espera o próximo evento por até `espera`. `Ok(None)` = nada chegou nesse tempo.
+    ///
+    /// # Errors
+    /// [`ErroAgente::Ipc`] se o agente fechar a conexão (encerrou ou desligou este assinante por
+    /// lentidão) ou violar o protocolo: o cliente deve reassinar.
+    pub fn proximo(&mut self, espera: Duration) -> Result<Option<EventoAgente>, ErroAgente> {
+        let _ = self
+            .leitor
+            .get_ref()
+            .set_read_timeout(Some(espera.max(Duration::from_millis(1))));
+        loop {
+            let bytes = match ler_quadro(&mut self.leitor, &mut self.buf) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Err(ErroAgente::Ipc("o agente encerrou a conexão".into())),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(ErroAgente::Ipc(format!("leitura: {e}"))),
+            };
+            let q: Quadro = serde_json::from_slice(&bytes)
+                .map_err(|e| ErroAgente::Ipc(format!("quadro inválido: {e}")))?;
+            if let Some(e) = q.evento {
+                return Ok(Some(e));
+            }
+            if let Some(Resposta::Erro { mensagem, .. }) = q.resposta {
+                return Err(ErroAgente::Ipc(mensagem));
+            }
+        }
+    }
+}
+
 /// Pede o cancelamento do trabalho em andamento (Ctrl-C), seja em processo ou no agente.
 #[derive(Debug, Clone)]
 pub enum Cancelador {
@@ -209,6 +297,26 @@ impl Cancelador {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Como o cliente chega ao agente (ADR 0004).
+#[derive(Debug, Clone, Default)]
+pub struct OpcoesConexao {
+    /// Sem agente: abre o Catálogo em processo (a sessão vira o escritor). `--sem-agente`.
+    pub sem_agente: bool,
+    /// Como lançar o agente; `None` = valores do ambiente.
+    pub lancamento: Option<OpcoesLancamento>,
+}
+
+impl OpcoesConexao {
+    /// `sem_agente` vem da flag ou de `DAG_SEM_AGENTE`.
+    #[must_use]
+    pub fn novo(flag_sem_agente: bool) -> Self {
+        Self {
+            sem_agente: flag_sem_agente || sem_agente_do_ambiente(),
+            lancamento: None,
         }
     }
 }
@@ -259,6 +367,9 @@ impl Conexao {
             Comando::Pausar { .. }
                 | Comando::Cancelar { .. }
                 | Comando::Retomar { execucao: None, .. }
+                | Comando::PausarJob { .. }
+                | Comando::RetomarJob { .. }
+                | Comando::CancelarJob { .. }
         ) {
             // Só atuam sobre um agente em segundo plano; nada a abrir (nem criar) sem ele.
             return tentar_agente(catalogo, socket)
@@ -278,6 +389,51 @@ impl Conexao {
         }
         // Escrita sem agente: a sessão precisa ser o escritor (ou falha com `escritor_ocupado`).
         Ok(Conexao::Sessao(Agente::abrir(catalogo)?.silencioso()))
+    }
+
+    /// Como [`abrir_para`](Self::abrir_para), mas o agente em segundo plano é a regra (ADR 0004):
+    /// o que escreve ou varre sobe o agente se não houver um (`opcoes.lancamento`) e só cai no
+    /// modo em processo com `opcoes.sem_agente`. Leituras e o controle de trabalhos não lançam
+    /// nada: sem agente, as leituras abrem o Catálogo só para leitura e o controle diz `sem_agente`.
+    ///
+    /// # Errors
+    /// Falhas ao abrir o Catálogo ou ao lançar o agente.
+    pub fn abrir_para_com(
+        catalogo: &Path,
+        socket: &Path,
+        comando: &Comando,
+        opcoes: &OpcoesConexao,
+    ) -> Result<Conexao, ErroAgente> {
+        if opcoes.sem_agente {
+            return Self::abrir_para_sem_agente(catalogo, socket, comando);
+        }
+        let controle = matches!(
+            comando,
+            Comando::Pausar { .. }
+                | Comando::Cancelar { .. }
+                | Comando::Retomar { execucao: None, .. }
+                | Comando::PausarJob { .. }
+                | Comando::RetomarJob { .. }
+                | Comando::CancelarJob { .. }
+        );
+        if controle || somente_leitura(comando) {
+            return Self::abrir_para(catalogo, socket, comando);
+        }
+        let lanc = opcoes
+            .lancamento
+            .clone()
+            .unwrap_or_else(|| OpcoesLancamento::do_ambiente(catalogo, socket));
+        garantir_agente(&lanc).map(Conexao::Daemon)
+    }
+
+    /// O comportamento anterior ao agente único: agente em segundo plano se houver, senão sessão
+    /// em processo (`--sem-agente`, testes, máquinas sem como subir um processo).
+    fn abrir_para_sem_agente(
+        catalogo: &Path,
+        socket: &Path,
+        comando: &Comando,
+    ) -> Result<Conexao, ErroAgente> {
+        Self::abrir_para(catalogo, socket, comando)
     }
 
     /// Executa o pedido. Na sessão, o trabalho roda numa thread e o progresso chega aqui.
@@ -320,10 +476,18 @@ impl Conexao {
 }
 
 /// Conecta e confere que o agente serve este Catálogo.
-fn tentar_agente(catalogo: &Path, socket: &Path) -> Option<Cliente> {
+pub(crate) fn tentar_agente(catalogo: &Path, socket: &Path) -> Option<Cliente> {
+    tentar_agente_com_info(catalogo, socket).map(|(c, _)| c)
+}
+
+/// Como [`tentar_agente`], devolvendo também a identificação do agente.
+pub(crate) fn tentar_agente_com_info(
+    catalogo: &Path,
+    socket: &Path,
+) -> Option<(Cliente, InfoServidor)> {
     let mut c = Cliente::conectar(socket).ok()?;
     let info = c.info().ok()?;
-    mesmo_arquivo(Path::new(&info.catalogo), catalogo).then_some(c)
+    mesmo_arquivo(Path::new(&info.catalogo), catalogo).then_some((c, info))
 }
 
 /// Compara caminhos mesmo que o arquivo ainda não exista (resolve o diretório pai).
@@ -352,7 +516,12 @@ fn executar_na_sessao(
 ) -> Resposta {
     if matches!(
         pedido.comando,
-        Comando::Pausar { .. } | Comando::Cancelar { .. } | Comando::Retomar { execucao: None, .. }
+        Comando::Pausar { .. }
+            | Comando::Cancelar { .. }
+            | Comando::Retomar { execucao: None, .. }
+            | Comando::PausarJob { .. }
+            | Comando::RetomarJob { .. }
+            | Comando::CancelarJob { .. }
     ) {
         return ErroAgente::SemAgente.para_resposta();
     }

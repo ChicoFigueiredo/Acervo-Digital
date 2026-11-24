@@ -5,11 +5,16 @@
 //! exatamente um `{"id": N, "resposta": {...}}`. Um cliente atende um pedido por vez por
 //! conexão (abra outra conexão para controlar um trabalho em andamento). Extensão opcional:
 //! `{"id": N, "ola": true}` devolve `{"id": N, "servidor": {...}}` (qual catálogo é servido).
+//!
+//! Assinatura (ADR 0004): `{"id": N, "assinar": true}` transforma a conexão num fluxo de
+//! `{"id": N, "evento": {...}}`: primeiro o `instantaneo` (tudo o que está em andamento) e depois
+//! cada mudança, mais uma `batida` a cada poucos segundos. A conexão assinante só recebe; para
+//! pedir algo, abra outra.
 //! Recusas de conexão chegam como `{"id": 0, "resposta": {"resposta": "erro", ...}}`.
 
 use std::io::{self, BufRead, Read};
 
-use dag_core::{Pedido, Progresso, Resposta};
+use dag_core::{EventoAgente, Pedido, Progresso, Resposta};
 use serde::{Deserialize, Serialize};
 
 /// Maior quadro aceito (bytes), contra entrada malformada ou hostil.
@@ -24,6 +29,9 @@ pub struct Requisicao {
     /// Pede só a identificação do servidor.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ola: bool,
+    /// Assina o fluxo de eventos do agente.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assinar: bool,
 }
 
 /// Quem responde: qual Catálogo o agente serve.
@@ -36,7 +44,7 @@ pub struct InfoServidor {
     pub monitor: bool,
 }
 
-/// Quadro do agente. Exatamente um dos três campos vem preenchido.
+/// Quadro do agente. Exatamente um dos quatro campos vem preenchido.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quadro {
     pub id: u64,
@@ -46,6 +54,8 @@ pub struct Quadro {
     pub resposta: Option<Resposta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub servidor: Option<InfoServidor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evento: Option<EventoAgente>,
 }
 
 impl Quadro {
@@ -56,6 +66,18 @@ impl Quadro {
             progresso: Some(p),
             resposta: None,
             servidor: None,
+            evento: None,
+        }
+    }
+
+    #[must_use]
+    pub fn de_evento(id: u64, e: EventoAgente) -> Self {
+        Self {
+            id,
+            progresso: None,
+            resposta: None,
+            servidor: None,
+            evento: Some(e),
         }
     }
 
@@ -66,6 +88,7 @@ impl Quadro {
             progresso: None,
             resposta: Some(r),
             servidor: None,
+            evento: None,
         }
     }
 
@@ -76,6 +99,7 @@ impl Quadro {
             progresso: None,
             resposta: None,
             servidor: Some(s),
+            evento: None,
         }
     }
 }
@@ -128,6 +152,7 @@ mod testes {
                 comando: Comando::Status { execucao: None },
             }),
             ola: false,
+            assinar: false,
         };
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
         assert_eq!(v["id"], 7);

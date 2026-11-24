@@ -502,3 +502,104 @@ fn abertura_retoma_hash_do_binario_antigo_e_a_gui_termina_ociosa() {
         .unwrap();
     assert_eq!(n, 2, "a abertura retomou o hash pendente");
 }
+
+/// A GUI é só cliente do agente (ADR 0004): vê e controla a varredura que a CLI iniciou.
+#[test]
+fn gui_cliente_do_agente_ve_e_cancela_a_varredura_iniciada_pela_cli() {
+    use dag_core::{Autor, Comando, ModoVarredura, OrigemJob, Pedido, Resposta};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(tmp.path()).unwrap();
+    let raiz = base.join("arvore");
+    for d in 0..120 {
+        for f in 0..60 {
+            escrever(&raiz.join(format!("g{d}/f{f}.txt")), &[b'x'; 80]);
+        }
+    }
+    let catalogo = base.join("dados/catalogo.sqlite");
+    let socket = base.join("run/agente.sock");
+    let mut cfg_srv = dag_agent::ConfigServidor::novo(&catalogo, &socket);
+    cfg_srv.monitor = false;
+    cfg_srv.abertura = dag_agent::PoliticaAbertura::desligada();
+    cfg_srv.volumes_fixos = Some(vec![volume_de(&raiz)]);
+    let srv = dag_agent::Servidor::iniciar(cfg_srv).unwrap();
+
+    let mut cfg = ConfigApp::com_caminho(catalogo);
+    cfg.socket = Some(socket.clone());
+    cfg.sem_agente = false;
+    let casca = montar(cfg).unwrap();
+    let mut a = Ambiente {
+        _tmp: tmp,
+        raiz: raiz.clone(),
+        casca,
+        ctx: egui::Context::default(),
+    };
+    a.ate("GUI conectar ao agente", |app| {
+        *app.worker.modo() == ModoWorker::Servico
+    });
+    assert!(!a.casca.app.scan_ativo());
+
+    // A CLI inicia uma varredura por outra conexão; a GUI não pediu nada.
+    let cli = std::thread::spawn({
+        let (socket, raiz) = (socket.clone(), raiz.clone());
+        move || {
+            dag_agent::Cliente::conectar(&socket)
+                .unwrap()
+                .enviar(
+                    Pedido {
+                        autor: Autor::Cli,
+                        comando: Comando::IniciarScan {
+                            modo: ModoVarredura::FullScan,
+                            raizes: vec![raiz.to_str().unwrap().into()],
+                            sem_hash: false,
+                            elevar: false,
+                            releitura_total: false,
+                            threads_por_disco: None,
+                            max_discos: None,
+                        },
+                    },
+                    &mut |_| {},
+                )
+                .unwrap()
+        }
+    });
+    a.ate("varredura da CLI aparecer na GUI com progresso", |app| {
+        app.scan
+            .as_ref()
+            .is_some_and(|s| s.origem_externa() == Some(OrigemJob::Cli) && s.progresso.is_some())
+    });
+    // A barra de status e a página Varredura dizem de quem é a varredura.
+    let status = a.casca.app.segmentos_de_status();
+    let fase = status.iter().find(|s| s.id == "fase").unwrap();
+    assert!(fase.texto.contains("[iniciada por cli]"), "{}", fase.texto);
+    a.abrir("varredura");
+    a.quadro();
+    // Escrita pela GUI fica bloqueada enquanto há varredura, com o motivo.
+    assert!(a.casca.app.motivo_sem_escrita().is_some());
+
+    // Pausar e cancelar pela GUI agem sobre o trabalho da CLI.
+    a.casca.app.alternar_pausa();
+    a.ate("varredura pausada", |app| {
+        app.estado_do_scan() == Some(dag_scanner::EstadoControle::Pausado)
+    });
+    a.casca.app.alternar_pausa();
+    a.ate("varredura retomada", |app| {
+        app.estado_do_scan() == Some(dag_scanner::EstadoControle::Executando)
+    });
+    a.casca.app.worker.cancelar();
+    a.ate("varredura cancelada", |app| {
+        app.scan.is_none() && app.ultimo_scan.is_some()
+    });
+    assert_eq!(
+        a.casca.app.ultimo_scan.as_ref().unwrap().desfecho,
+        "cancelada"
+    );
+    assert!(matches!(
+        cli.join().unwrap(),
+        Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada"
+    ));
+    // A GUI continua usando o mesmo agente (um só escritor).
+    assert!(a.casca.app.pode_escrever());
+    drop(a);
+    srv.encerrar();
+}

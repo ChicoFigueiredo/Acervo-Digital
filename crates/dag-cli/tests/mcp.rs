@@ -18,6 +18,7 @@ fn mcp_scan_full_e_listar_duplicados() {
 
     let mut filho = Command::new(env!("CARGO_BIN_EXE_dag"))
         .arg("mcp")
+        .env("DAG_SEM_AGENTE", "1")
         .env("DAG_CATALOGO", tmp.path().join("cat.sqlite"))
         .env("DAG_SOCKET", tmp.path().join("sem-agente.sock"))
         .stdin(Stdio::piped())

@@ -1051,6 +1051,34 @@ pub fn explorar(
     s
 }
 
+/// Tabela dos trabalhos do agente (qualquer cliente que os tenha iniciado).
+pub fn jobs(jobs: &[dag_core::JobInfo]) -> String {
+    if jobs.is_empty() {
+        return "Trabalhos do agente: nenhum\n".into();
+    }
+    let linhas: Vec<Vec<String>> = jobs
+        .iter()
+        .map(|j| {
+            vec![
+                j.id.to_string(),
+                j.tipo.rotulo().to_string(),
+                j.origem.rotulo().to_string(),
+                j.estado.rotulo().to_string(),
+                j.execucao.map_or_else(|| "-".into(), |e| e.to_string()),
+                j.resumo_progresso(),
+            ]
+        })
+        .collect();
+    format!(
+        "Trabalhos do agente\n{}",
+        tabela(
+            &["JOB", "TIPO", "ORIGEM", "ESTADO", "EXECUÇÃO", "ANDAMENTO"],
+            &[true, false, false, false, true, false],
+            &linhas,
+        )
+    )
+}
+
 /// Imprime a resposta em texto: dados em stdout, erros em stderr.
 pub fn imprimir(r: &Resposta, todos: bool) {
     match r {
@@ -1078,6 +1106,7 @@ pub fn imprimir(r: &Resposta, todos: bool) {
             }
         }
         Resposta::SaudeMonitor { saude } => print!("{}", saude_monitor(saude)),
+        Resposta::Jobs { jobs: j } => print!("{}", jobs(j)),
         Resposta::Eventos { eventos: e } => print!("{}", eventos(e)),
         Resposta::MonitorEncerrado { resumo } => print!("{}", monitor_encerrado(resumo)),
         Resposta::ScanConcluido {

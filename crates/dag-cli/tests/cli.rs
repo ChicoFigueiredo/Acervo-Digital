@@ -5,6 +5,7 @@ use std::process::Command;
 
 fn dag(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env("DAG_SEM_AGENTE", "1")
         .env_remove("DAG_CATALOGO")
         .args(args)
         .output()
@@ -284,6 +285,7 @@ fn catalogo_por_variavel_de_ambiente_e_precedencia_da_flag() {
     let flag_cat = tmp.path().join("flag.sqlite");
     let status = |extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_dag"))
+            .env("DAG_SEM_AGENTE", "1")
             .env("DAG_CATALOGO", &env_cat)
             .args(extra)
             .arg("--json")
@@ -374,6 +376,7 @@ fn monitorar_roda_ate_sinal_e_resume() {
             .success()
     );
     let filho = Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env("DAG_SEM_AGENTE", "1")
         .env_remove("DAG_CATALOGO")
         .args([
             "--catalogo",
@@ -431,6 +434,7 @@ fn servico_estado_em_instalacao_limpa() {
     let tmp = tempfile::tempdir().unwrap();
     let cat = tmp.path().join("nao-criar/c.sqlite");
     let o = Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env("DAG_SEM_AGENTE", "1")
         .env_remove("DAG_CATALOGO")
         .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
         .env("HOME", tmp.path())

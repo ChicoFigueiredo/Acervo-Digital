@@ -5,11 +5,12 @@
 //! Códigos de saída: 0 ok; 1 erro; 2 ainda não implementado; 130 varredura cancelada (Ctrl-C).
 
 mod saida;
+mod seguir;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dag_agent::{
-    Cancelador, Conexao, ConfigServidor, ExibidorStderr, Servidor, caminho_catalogo_do_ambiente,
-    caminho_socket_padrao, incremento_pendente,
+    Cancelador, Conexao, ConfigServidor, ExibidorStderr, OpcoesConexao, Servidor,
+    caminho_catalogo_do_ambiente, caminho_socket_padrao, incremento_pendente,
 };
 use dag_core::{
     AcaoServico, Alvo, ArquivoId, Autor, Comando, ExecucaoId, GrupoId, MarcacaoId, ModoVarredura,
@@ -35,6 +36,11 @@ struct Cli {
     /// Socket do agente em segundo plano (padrão: $DAG_SOCKET, senão $XDG_RUNTIME_DIR/dag/agente.sock)
     #[arg(long, global = true, value_name = "ARQUIVO")]
     socket: Option<PathBuf>,
+    /// Não usa o agente em segundo plano: executa em processo e vira o escritor do Catálogo
+    /// (testes e máquinas sem como subir um processo; também `DAG_SEM_AGENTE=1`). Não enxerga nem
+    /// controla o que outros processos fazem
+    #[arg(long, global = true)]
+    sem_agente: bool,
     #[command(subcommand)]
     comando: Sub,
 }
@@ -44,6 +50,27 @@ struct ExecArg {
     /// Id da execução (padrão: a única em andamento)
     #[arg(long)]
     execucao: Option<i64>,
+}
+
+/// Qual trabalho do agente controlar: a execução ou o id do trabalho (`dag jobs`).
+#[derive(Args, Debug)]
+struct ControleArg {
+    /// Id da execução (padrão: a única em andamento)
+    #[arg(long, conflicts_with = "job")]
+    execucao: Option<i64>,
+    /// Id do trabalho do agente, como aparece em `dag jobs` (inclui os que ainda estão na fila)
+    #[arg(long)]
+    job: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+struct StatusArg {
+    /// Id da execução (padrão: as mais recentes)
+    #[arg(long)]
+    execucao: Option<i64>,
+    /// Fica acompanhando o fluxo de eventos do agente (trabalhos, progresso, monitor) até Ctrl-C
+    #[arg(long, conflicts_with = "execucao")]
+    seguir: bool,
 }
 
 /// Alvo de uma Marcação: exatamente um dos quatro.
@@ -224,14 +251,19 @@ enum Sub {
         #[arg(long)]
         cursor: Option<String>,
     },
-    /// Pausa uma varredura
-    Pausar(ExecArg),
+    /// Pausa uma varredura (de qualquer cliente: GUI, CLI, MCP ou a abertura do agente)
+    Pausar(ControleArg),
     /// Retoma uma varredura pausada
-    Retomar(ExecArg),
-    /// Cancela uma varredura
-    Cancelar(ExecArg),
-    /// Mostra o progresso das varreduras
-    Status(ExecArg),
+    Retomar(ControleArg),
+    /// Cancela uma varredura (ou um trabalho ainda na fila)
+    Cancelar(ControleArg),
+    /// Mostra o progresso das varreduras (`--seguir` acompanha os eventos do agente)
+    Status(StatusArg),
+    /// Acompanha os eventos do agente: trabalhos iniciados por qualquer cliente, progresso,
+    /// monitor e Ponto de Confiança (o mesmo que `status --seguir`)
+    Acompanhar,
+    /// Lista os trabalhos do agente (em andamento e na fila) e quem os iniciou
+    Jobs,
     /// Lista Grupos de Duplicados (maior espaço recuperável primeiro)
     Duplicados {
         /// Só grupos com cópia neste Volume (id, rótulo ou ponto de montagem)
@@ -394,7 +426,7 @@ fn parse_intervalo(t: &str) -> Result<u64, String> {
         .ok_or_else(|| "intervalo grande demais".to_string())
 }
 
-fn exec(a: &ExecArg) -> Option<ExecucaoId> {
+fn exec_controle(a: &ControleArg) -> Option<ExecucaoId> {
     a.execucao.map(ExecucaoId)
 }
 
@@ -451,14 +483,30 @@ fn montar(sub: Sub) -> Option<Comando> {
             limite,
             cursor,
         },
-        Sub::Pausar(a) => Comando::Pausar { execucao: exec(&a) },
-        Sub::Retomar(a) => Comando::Retomar {
-            execucao: exec(&a),
-            threads_por_disco: None,
-            max_discos: None,
+        Sub::Pausar(a) => match a.job {
+            Some(job) => Comando::PausarJob { job },
+            None => Comando::Pausar {
+                execucao: exec_controle(&a),
+            },
         },
-        Sub::Cancelar(a) => Comando::Cancelar { execucao: exec(&a) },
-        Sub::Status(a) => Comando::Status { execucao: exec(&a) },
+        Sub::Retomar(a) => match a.job {
+            Some(job) => Comando::RetomarJob { job },
+            None => Comando::Retomar {
+                execucao: exec_controle(&a),
+                threads_por_disco: None,
+                max_discos: None,
+            },
+        },
+        Sub::Cancelar(a) => match a.job {
+            Some(job) => Comando::CancelarJob { job },
+            None => Comando::Cancelar {
+                execucao: exec_controle(&a),
+            },
+        },
+        Sub::Status(a) => Comando::Status {
+            execucao: a.execucao.map(ExecucaoId),
+        },
+        Sub::Jobs => Comando::ListarJobs,
         Sub::Duplicados {
             volume,
             min_tamanho,
@@ -544,7 +592,7 @@ fn montar(sub: Sub) -> Option<Comando> {
             },
         },
         Sub::Catalogo(Catalogo::Backup { destino }) => Comando::BackupCatalogo { destino },
-        Sub::Mcp | Sub::Agente { .. } => return None,
+        Sub::Mcp | Sub::Agente { .. } | Sub::Acompanhar => return None,
     })
 }
 
@@ -579,12 +627,15 @@ struct Execucao {
     resposta: Resposta,
     /// `Some(None)`: sem agente (sessão); `Some(Some(..))`: agente em segundo plano.
     agente: Option<Option<dag_agent::InfoServidor>>,
+    /// Só em `dag status` com agente: os trabalhos dele.
+    jobs: Option<Vec<dag_core::JobInfo>>,
 }
 
 fn executar(cli: Cli) -> Execucao {
     let sem = |resposta| Execucao {
         resposta,
         agente: None,
+        jobs: None,
     };
     let Some(comando) = montar(cli.comando) else {
         return sem(Resposta::Erro {
@@ -608,7 +659,8 @@ fn executar(cli: Cli) -> Execucao {
         return sem(dag_agent::servico::executar_avulso(*acao, &caminho));
     }
     let socket = cli.socket.unwrap_or_else(caminho_socket_padrao);
-    let mut conexao = match Conexao::abrir_para(&caminho, &socket, &comando) {
+    let opcoes = OpcoesConexao::novo(cli.sem_agente);
+    let mut conexao = match Conexao::abrir_para_com(&caminho, &socket, &comando, &opcoes) {
         Ok(c) => c,
         Err(e) => return sem(e.para_resposta()),
     };
@@ -626,7 +678,29 @@ fn executar(cli: Cli) -> Execucao {
         Err(e) => e.para_resposta(),
     };
     let agente = eh_status.then(|| conexao.info_daemon());
-    Execucao { resposta, agente }
+    // O estado de um agente inclui o que ele está fazendo, seja quem for que pediu.
+    let jobs = (eh_status && conexao.eh_daemon())
+        .then(|| {
+            conexao
+                .enviar(
+                    Pedido {
+                        autor: Autor::Cli,
+                        comando: Comando::ListarJobs,
+                    },
+                    &mut |_| {},
+                )
+                .ok()
+        })
+        .flatten()
+        .and_then(|r| match r {
+            Resposta::Jobs { jobs } => Some(jobs),
+            _ => None,
+        });
+    Execucao {
+        resposta,
+        agente,
+        jobs,
+    }
 }
 
 /// `dag agente`: roda o agente em primeiro plano até SIGTERM/SIGINT e encerra com checkpoint.
@@ -679,7 +753,11 @@ fn rodar_agente(
 }
 
 /// `dag mcp`: servidor MCP por stdio (só quadros do protocolo no stdout; logs no stderr).
-fn servir_mcp(catalogo: Option<&std::path::Path>, socket: Option<PathBuf>) -> ExitCode {
+fn servir_mcp(
+    catalogo: Option<&std::path::Path>,
+    socket: Option<PathBuf>,
+    sem_agente: bool,
+) -> ExitCode {
     let caminho = match caminho_catalogo_do_ambiente(catalogo) {
         Ok(c) => c,
         Err(e) => {
@@ -688,8 +766,23 @@ fn servir_mcp(catalogo: Option<&std::path::Path>, socket: Option<PathBuf>) -> Ex
         }
     };
     let socket = socket.unwrap_or_else(caminho_socket_padrao);
-    match dag_mcp::servir_stdio(&caminho, &socket) {
+    match dag_mcp::servir_stdio_com(&caminho, &socket, OpcoesConexao::novo(sem_agente)) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("erro: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `dag status --seguir` e `dag acompanhar`.
+fn acompanhar(
+    catalogo: Option<&std::path::Path>,
+    socket: Option<&std::path::Path>,
+    json: bool,
+) -> ExitCode {
+    match caminho_catalogo_do_ambiente(catalogo) {
+        Ok(c) => ExitCode::from(seguir::seguir(&c, socket, json)),
         Err(e) => {
             eprintln!("erro: {e}");
             ExitCode::from(1)
@@ -724,7 +817,7 @@ fn agente_texto(info: Option<&dag_agent::InfoServidor>) -> String {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if matches!(cli.comando, Sub::Mcp) {
-        return servir_mcp(cli.catalogo.as_deref(), cli.socket);
+        return servir_mcp(cli.catalogo.as_deref(), cli.socket, cli.sem_agente);
     }
     if let Sub::Agente {
         sem_monitor,
@@ -749,8 +842,17 @@ fn main() -> ExitCode {
         );
     }
     let json = cli.json;
+    if matches!(cli.comando, Sub::Acompanhar)
+        || matches!(cli.comando, Sub::Status(StatusArg { seguir: true, .. }))
+    {
+        return acompanhar(cli.catalogo.as_deref(), cli.socket.as_deref(), json);
+    }
     let todos = matches!(cli.comando, Sub::Volumes { todos: true });
-    let Execucao { resposta, agente } = executar(cli);
+    let Execucao {
+        resposta,
+        agente,
+        jobs,
+    } = executar(cli);
     let codigo = codigo_de_saida(&resposta);
     if json {
         let mut valor = match serde_json::to_value(&resposta) {
@@ -763,6 +865,12 @@ fn main() -> ExitCode {
         if let (Some(info), Some(obj)) = (&agente, valor.as_object_mut()) {
             obj.insert("agente".into(), agente_json(info.as_ref()));
         }
+        if let (Some(j), Some(obj)) = (&jobs, valor.as_object_mut()) {
+            obj.insert(
+                "jobs".into(),
+                serde_json::to_value(j).unwrap_or(serde_json::Value::Null),
+            );
+        }
         println!("{valor}");
         if let Resposta::Erro { mensagem, .. } = &resposta {
             eprintln!("erro: {mensagem}");
@@ -772,6 +880,9 @@ fn main() -> ExitCode {
             println!("{}", agente_texto(info.as_ref()));
         }
         saida::imprimir(&resposta, todos);
+        if let Some(j) = &jobs {
+            print!("\n{}", saida::jobs(j));
+        }
     }
     ExitCode::from(codigo)
 }

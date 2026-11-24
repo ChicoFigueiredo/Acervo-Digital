@@ -54,7 +54,7 @@ dag scan --full --elevar /mnt/dados             # pastas sem permissão: pede o 
 claude mcp add dag -- dag mcp                    # registra o MCP no Claude Code (docs/MCP.md)
 ```
 
-O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite`. Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`, `duplicados`, a GUI) funcionam durante uma varredura.
+O Catálogo fica em `--catalogo <arquivo>`, senão em `$DAG_CATALOGO`, senão em `~/.local/share/dag/catalogo.sqlite`. O escritor único é o agente: CLI, GUI e MCP o lançam sozinhos se não houver um (`--sem-agente` ou `DAG_SEM_AGENTE=1` mantém o modo antigo em processo) e qualquer cliente vê e controla os trabalhos dos outros: `dag jobs`, `dag status --seguir` (ou `dag acompanhar`), `dag pausar|retomar|cancelar --job N` ([ADR 0004](docs/adr/0004-agente-escritor-unico-e-assinatura-de-eventos.md)). Ao atualizar, feche a GUI antiga antes (ela segura a trava); o agente retoma o hash interrompido. Só um processo escreve por vez; um segundo recebe "outro processo do DAG já é o escritor deste catálogo". Leituras (`explorar`, `status`, `duplicados`, a GUI) funcionam durante uma varredura.
 
 O Hash Completo lê **um disco físico por thread, todos os discos ao mesmo tempo** (volumes do mesmo disco ficam em sequência). Se o processo morrer ou a execução for cancelada no meio do hash, `dag scan --retomar <id>` continua só o que falta: a fila é refeita a partir dos hashes já gravados, sem reler nada e sem mudar o Catálogo.
 

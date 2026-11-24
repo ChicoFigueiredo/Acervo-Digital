@@ -2,7 +2,7 @@
 
 use crate::ferramentas::{montar, todas};
 use crate::resumo::{resumir, texto_progresso};
-use dag_agent::cliente::Conexao;
+use dag_agent::cliente::{Conexao, OpcoesConexao};
 use dag_core::{Autor, Pedido, Progresso, Resposta};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -181,27 +181,37 @@ fn inicializar() -> Value {
     })
 }
 
-/// Servidor stdio completo: conecta ao worker sob demanda (a primeira chamada de ferramenta) e
-/// atende stdin/stdout até o fim da entrada.
+/// Servidor stdio completo: conecta ao agente sob demanda (a cada chamada de ferramenta) e
+/// atende stdin/stdout até o fim da entrada. Sobe o agente se não houver (ADR 0004).
 ///
 /// # Errors
 /// Falha de E/S no stdin/stdout.
 pub fn servir_stdio(catalogo: &Path, socket: &Path) -> io::Result<()> {
+    servir_stdio_com(catalogo, socket, OpcoesConexao::novo(false))
+}
+
+/// Como [`servir_stdio`], com as opções de conexão (`--sem-agente`, lançamento do agente).
+///
+/// # Errors
+/// Falha de E/S no stdin/stdout.
+pub fn servir_stdio_com(catalogo: &Path, socket: &Path, opcoes: OpcoesConexao) -> io::Result<()> {
     let enc = ConexaoPreguicosa {
         catalogo: catalogo.to_path_buf(),
         socket: socket.to_path_buf(),
-        conexao: None,
+        opcoes,
     };
     servir(enc, io::stdin().lock(), io::stdout().lock())
 }
 
-/// Abre a [`Conexao`] ao worker só quando preciso: `initialize` e `tools/list` funcionam mesmo
-/// sem Catálogo.
+/// Liga-se ao agente só quando preciso: `initialize` e `tools/list` funcionam mesmo sem
+/// Catálogo. Cada chamada decide a conexão pelo comando (o agente pode ter reiniciado desde a
+/// anterior): escrita e varredura usam o agente (lançado se faltar), leitura usa o agente ou o
+/// Catálogo somente leitura, e o controle de trabalhos exige o agente.
 #[derive(Debug)]
 struct ConexaoPreguicosa {
     catalogo: PathBuf,
     socket: PathBuf,
-    conexao: Option<Conexao>,
+    opcoes: OpcoesConexao,
 }
 
 impl Encaminhador for ConexaoPreguicosa {
@@ -210,13 +220,9 @@ impl Encaminhador for ConexaoPreguicosa {
         pedido: Pedido,
         progresso: &mut dyn FnMut(&Progresso),
     ) -> Result<Resposta, String> {
-        if self.conexao.is_none() {
-            let c = Conexao::abrir(&self.catalogo, &self.socket).map_err(|e| e.to_string())?;
-            self.conexao = Some(c);
-        }
-        let Some(c) = self.conexao.as_mut() else {
-            return Err("sem conexão".into());
-        };
+        let mut c =
+            Conexao::abrir_para_com(&self.catalogo, &self.socket, &pedido.comando, &self.opcoes)
+                .map_err(|e| e.to_string())?;
         c.enviar(pedido, progresso).map_err(|e| e.to_string())
     }
 }

@@ -106,6 +106,14 @@ pub enum Comando {
     },
     /// Cancela uma execução.
     Cancelar { execucao: Option<ExecucaoId> },
+    /// Lista os trabalhos do agente (em andamento e na fila), seja quem for que os iniciou.
+    ListarJobs,
+    /// Pausa o trabalho `job` (id do agente, como em `ListarJobs`).
+    PausarJob { job: u64 },
+    /// Retoma o trabalho pausado `job`.
+    RetomarJob { job: u64 },
+    /// Cancela o trabalho `job`, em andamento ou ainda na fila.
+    CancelarJob { job: u64 },
     /// Consulta progresso das execuções.
     Status { execucao: Option<ExecucaoId> },
     /// Lista Grupos de Duplicados, paginado por cursor (keyset). `volume` filtra grupos com
@@ -327,7 +335,7 @@ pub struct EntradaExploracao {
 }
 
 /// Resposta do worker a um [`Comando`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "resposta", rename_all = "snake_case")]
 pub enum Resposta {
     /// Comando executado, sem dados a devolver.
@@ -425,6 +433,10 @@ pub enum Resposta {
     },
     Verificacao {
         resumo: ResumoVerificacao,
+    },
+    /// Trabalhos do agente (em andamento e na fila).
+    Jobs {
+        jobs: Vec<crate::JobInfo>,
     },
     /// Paralelismo do Hash Completo persistido (já com os padrões aplicados).
     ConfigHash {

@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 
 fn dag(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dag"))
+        .env("DAG_SEM_AGENTE", "1")
         .env_remove("DAG_CATALOGO")
         .args(args)
         .output()

@@ -46,6 +46,13 @@ fn execucao() -> Value {
     json!({"execucao": {"type": "integer", "description": "Id da execução (padrão: a única em andamento)"}})
 }
 
+fn execucao_ou_job() -> Value {
+    json!({
+        "execucao": {"type": "integer", "description": "Id da execução (padrão: a única em andamento)"},
+        "job": {"type": "integer", "minimum": 1, "description": "Id do trabalho do agente (veja `jobs`), inclusive os que ainda estão na fila. Não combina com `execucao`"}
+    })
+}
+
 fn opcoes_hash() -> Value {
     json!({
         "threads_por_disco": {"type": "integer", "minimum": 1, "maximum": 8,
@@ -119,26 +126,32 @@ pub fn todas() -> Vec<Ferramenta> {
     v.push(f(
         "retomar",
         "retomar",
-        "Retoma uma execução de varredura pausada, cancelada ou interrompida. Para execução gravada no Catálogo, `threads_por_disco`/`max_discos` valem a partir desta retomada.",
-        objeto(com_hash(execucao()), &[]),
+        "Retoma uma varredura pausada (de qualquer cliente: GUI, CLI, MCP ou abertura do agente) ou uma execução cancelada/interrompida do Catálogo. Para execução gravada, `threads_por_disco`/`max_discos` valem a partir desta retomada. Com `job`, retoma o trabalho pausado do agente.",
+        objeto(com_hash(execucao_ou_job()), &[]),
     ));
     v.push(f(
         "pausar",
         "pausar",
-        "Pausa uma varredura em andamento.",
-        objeto(execucao(), &[]),
+        "Pausa uma varredura em andamento, seja quem for que a iniciou (GUI, CLI, MCP ou abertura do agente). Aceita `execucao` ou `job`.",
+        objeto(execucao_ou_job(), &[]),
     ));
     v.push(f(
         "cancelar",
         "cancelar",
-        "Cancela uma varredura (fica retomável). Não toca nos arquivos do acervo.",
-        objeto(execucao(), &[]),
+        "Cancela uma varredura de qualquer cliente (fica retomável) ou um trabalho ainda na fila (`job`). Não toca nos arquivos do acervo.",
+        objeto(execucao_ou_job(), &[]),
     ));
     v.push(f(
         "status",
         "status",
         "Progresso das varreduras, totais do Catálogo e saúde do monitor.",
         objeto(execucao(), &[]),
+    ));
+    v.push(f(
+        "jobs",
+        "listar_jobs",
+        "Lista os trabalhos do agente (varreduras, retomadas, verificações, a abertura e o monitor), em andamento e na fila, com quem os iniciou (gui, cli, mcp, abertura, monitor), a execução e o progresso. É a visão de tudo o que roda, não só do que este cliente pediu.",
+        objeto(json!({}), &[]),
     ));
     let mut ex =
         json!({"pasta": {"type": "string", "description": "Pasta catalogada (padrão: as Raízes)"}})
@@ -368,6 +381,14 @@ pub fn montar(nome: &str, args: &Value) -> Result<Comando, String> {
         }
         "config_hash_definir" if obj.is_empty() => {
             return Err("informe `threads_por_disco` e/ou `max_discos`".into());
+        }
+        "pausar" | "retomar" | "cancelar" if obj.contains_key("job") => {
+            if obj.keys().any(|k| k != "job") {
+                return Err("`job` não combina com outros argumentos".into());
+            }
+            obj.insert("comando".into(), json!(format!("{}_job", ferr.tag)));
+            return serde_json::from_value(Value::Object(obj))
+                .map_err(|e| format!("argumentos inválidos: {e}"));
         }
         _ => {}
     }

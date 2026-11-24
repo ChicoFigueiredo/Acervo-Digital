@@ -11,7 +11,7 @@ use bancada_casca::{
     ItemNavegacao, Local, Rota, SegmentoStatus, Tom,
 };
 use dag_agent::{ErroAgente, caminho_catalogo_do_ambiente, caminho_do_lock};
-use dag_core::{Comando, ModoVarredura, Resposta, VolumeDescoberto};
+use dag_core::{Comando, JobInfo, ModoVarredura, OrigemJob, Resposta, TipoJob, VolumeDescoberto};
 use dag_scanner::EstadoControle;
 use dag_store::consulta_gui::{self, TotaisCatalogo};
 
@@ -32,6 +32,7 @@ const TEMAS: &str = include_str!("../dados/temas.json");
 pub const MOTIVO_FUTURO: &str = "Chega em um incremento posterior";
 const MOTIVO_SEM_ESCRITA: &str = "Este processo não é o escritor do Catálogo";
 const MOTIVO_SCAN_ATIVO: &str = "Há uma varredura em andamento";
+const MOTIVO_RECONECTANDO: &str = "O agente está desconectado; a GUI está reconectando";
 
 /// Quantos avisos ficam na faixa de mensagens.
 const MAX_AVISOS: usize = 4;
@@ -40,17 +41,32 @@ const MAX_AVISOS: usize = 4;
 #[derive(Debug, Clone)]
 pub struct ConfigApp {
     pub caminho: PathBuf,
-    /// Volumes fixos em vez da descoberta do sistema (testes).
+    /// Volumes fixos em vez da descoberta do sistema (testes; só no modo em processo).
     pub volumes_fixos: Option<Vec<VolumeDescoberto>>,
+    /// Não usa o agente em segundo plano: a GUI abre o Catálogo em processo (`--sem-agente`,
+    /// `DAG_SEM_AGENTE=1`, testes). O padrão é a GUI ser só cliente do agente (ADR 0004).
+    pub sem_agente: bool,
+    /// Socket do agente; `None` = o padrão (`$DAG_SOCKET`, `$XDG_RUNTIME_DIR`).
+    pub socket: Option<PathBuf>,
 }
 
 impl ConfigApp {
-    /// Catálogo padrão (`DAG_CATALOGO`, depois `$XDG_DATA_HOME/dag/catalogo.sqlite`).
+    /// Catálogo padrão (`DAG_CATALOGO`, depois `$XDG_DATA_HOME/dag/catalogo.sqlite`); `--sem-agente`
+    /// nos argumentos do processo (ou `DAG_SEM_AGENTE`) liga o modo em processo.
     ///
     /// # Errors
     /// Se não há como achar o diretório de dados.
     pub fn do_ambiente() -> Result<Self, ErroAgente> {
-        Ok(Self::com_caminho(caminho_catalogo_do_ambiente(None)?))
+        let mut c = Self::com_caminho(caminho_catalogo_do_ambiente(None)?);
+        c.sem_agente = std::env::args().any(|a| a == "--sem-agente");
+        Ok(c)
+    }
+
+    /// Modo em processo (sem agente): a GUI abre o Catálogo ela mesma.
+    #[must_use]
+    pub fn em_processo(mut self) -> Self {
+        self.sem_agente = true;
+        self
     }
 
     #[must_use]
@@ -58,12 +74,16 @@ impl ConfigApp {
         Self {
             caminho,
             volumes_fixos: None,
+            sem_agente: dag_agent::sem_agente_do_ambiente(),
+            socket: None,
         }
     }
 }
 
 /// Prefixo das mensagens da recuperação ao abrir (a faixa mantém só a mais recente).
 const PREFIXO_ABERTURA: &str = "Abertura:";
+/// Prefixo dos avisos de conexão com o agente.
+const PREFIXO_AGENTE: &str = "Agente:";
 
 /// Mensagem na faixa no topo da página.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +118,9 @@ pub struct ScanAtivo {
     /// Etapa da recuperação ao abrir (retomada de execução interrompida, verificação); `Some`
     /// só no pseudo-pedido [`PEDIDO_ABERTURA`].
     pub abertura: Option<String>,
+    /// O trabalho do agente que esta varredura é (quem o iniciou, estado, execução). `None` no
+    /// modo em processo ou enquanto o pedido ainda não chegou ao agente.
+    pub job: Option<JobInfo>,
 }
 
 /// Id do pseudo-pedido que representa a recuperação ao abrir (os pedidos reais começam em 1).
@@ -113,7 +136,33 @@ impl ScanAtivo {
             bytes_hash: None,
             amostras_hash: Vec::new(),
             abertura: None,
+            job: None,
         }
+    }
+
+    /// Varredura de um trabalho que a GUI não pediu (CLI, MCP, abertura do agente...).
+    fn do_job(job: JobInfo) -> Self {
+        let mut s = Self::novo(PEDIDO_ABERTURA, false);
+        s.job = Some(job);
+        s
+    }
+
+    /// O progresso em foco é desta varredura? Uma varredura da GUI que ainda espera na fila do
+    /// agente não deve mostrar o progresso do trabalho que está na frente dela.
+    fn do_foco(&self, foco: Option<u64>) -> bool {
+        match (&self.job, foco) {
+            (Some(j), Some(f)) => j.id == f,
+            _ => true,
+        }
+    }
+
+    /// Quem iniciou, quando o agente informou e não foi a própria GUI.
+    #[must_use]
+    pub fn origem_externa(&self) -> Option<OrigemJob> {
+        self.job
+            .as_ref()
+            .map(|j| j.origem)
+            .filter(|o| *o != OrigemJob::Gui)
     }
 
     /// Fase atual do scanner, se já reportou alguma.
@@ -170,6 +219,10 @@ pub struct AppDag {
     pub avisos: Vec<Aviso>,
     pub pedidos: HashMap<u64, Proposito>,
     pub scan: Option<ScanAtivo>,
+    /// Trabalho do agente em foco (o que o progresso recebido descreve).
+    foco: Option<u64>,
+    /// A conexão com o agente caiu e a GUI está reconectando.
+    reconectando: bool,
     pub ultimo_scan: Option<ResumoScan>,
     pub totais: Carga<TotaisCatalogo>,
     totais_geracao: u64,
@@ -213,12 +266,16 @@ impl AppDag {
                 Some(rx)
             }
         };
+        let has_fixos = cfg.volumes_fixos.is_some();
         let worker = Worker::iniciar(
             ConfigWorker {
                 caminho: cfg.caminho.clone(),
                 volumes_fixos: cfg.volumes_fixos,
-                socket: None,
+                socket: cfg.socket,
                 abertura: dag_agent::PoliticaAbertura::default(),
+                // Volumes fixos só existem no modo em processo.
+                sem_agente: cfg.sem_agente || has_fixos,
+                lancamento: None,
             },
             acordador.clone(),
         );
@@ -232,6 +289,8 @@ impl AppDag {
             avisos: Vec::new(),
             pedidos: HashMap::new(),
             scan: None,
+            foco: None,
+            reconectando: false,
             ultimo_scan: None,
             totais: Carga::default(),
             totais_geracao: 0,
@@ -262,7 +321,9 @@ impl AppDag {
     /// Por que uma escrita não pode ser feita agora; `None` se pode.
     #[must_use]
     pub fn motivo_sem_escrita(&self) -> Option<&'static str> {
-        if !self.pode_escrever() {
+        if self.reconectando {
+            Some(MOTIVO_RECONECTANDO)
+        } else if !self.pode_escrever() {
             Some(MOTIVO_SEM_ESCRITA)
         } else if self.scan_ativo() {
             Some(MOTIVO_SCAN_ATIVO)
@@ -275,7 +336,11 @@ impl AppDag {
     /// terminar; o valor vale da próxima execução em diante).
     #[must_use]
     pub fn motivo_sem_escrita_config(&self) -> Option<&'static str> {
-        (!self.pode_escrever()).then_some(MOTIVO_SEM_ESCRITA)
+        if self.reconectando {
+            Some(MOTIVO_RECONECTANDO)
+        } else {
+            (!self.pode_escrever()).then_some(MOTIVO_SEM_ESCRITA)
+        }
     }
 
     /// Grava o paralelismo do hash (1..=8 threads por disco, 1..=16 discos).
@@ -440,11 +505,39 @@ impl AppDag {
                         ModoWorker::Falhou { motivo } => {
                             self.aviso(Tom::Perigo, format!("O worker não abriu o Catálogo: {motivo}"));
                         }
+                        ModoWorker::Reconectando { .. } => {
+                            self.reconectando = true;
+                            self.avisos.retain(|a| !a.texto.starts_with(PREFIXO_AGENTE));
+                            self.aviso(
+                                Tom::Aviso,
+                                format!("{PREFIXO_AGENTE} desconectado, reconectando…"),
+                            );
+                        }
+                        ModoWorker::Servico if self.reconectando => {
+                            self.reconectando = false;
+                            self.avisos.retain(|a| !a.texto.starts_with(PREFIXO_AGENTE));
+                            self.aviso(Tom::Sucesso, format!("{PREFIXO_AGENTE} reconectado."));
+                        }
                         _ => {}
                     }
                     self.invalidar();
                 }
                 Evento::Iniciado { .. } => {}
+                Evento::Jobs(jobs) => self.aplicar_jobs(&jobs),
+                Evento::JobFinalizado { job, resposta, .. } => {
+                    // O que a GUI pediu chega pela resposta do pedido; o resto (CLI, MCP...) só por
+                    // aqui.
+                    let propria = job.origem == OrigemJob::Gui
+                        && self
+                            .scan
+                            .as_ref()
+                            .is_some_and(|s| s.pedido != PEDIDO_ABERTURA);
+                    if !propria {
+                        self.tratar_resposta(PEDIDO_ABERTURA, *resposta);
+                    }
+                    self.invalidar();
+                }
+                Evento::Monitor(_) | Evento::Confianca(_) => {}
                 Evento::Abertura { texto, fim } => {
                     // A recuperação ao abrir é uma execução em andamento para a GUI: aparece em
                     // Varredura e na barra de status, e Pausar/Cancelar valem para ela.
@@ -474,12 +567,14 @@ impl AppDag {
                     self.invalidar();
                 }
                 Evento::Progresso(p) => {
-                    if let Some(s) = self.scan.as_mut() {
+                    let foco = self.foco;
+                    if let Some(s) = self.scan.as_mut().filter(|s| s.do_foco(foco)) {
                         s.progresso = Some(p);
                     }
                 }
                 Evento::Hash(h) => {
-                    if let Some(s) = self.scan.as_mut() {
+                    let foco = self.foco;
+                    if let Some(s) = self.scan.as_mut().filter(|s| s.do_foco(foco)) {
                         s.amostras_hash.push((
                             AndamentoHash {
                                 total: h.arquivos_total,
@@ -504,6 +599,54 @@ impl AppDag {
             );
         }
         self.totais.atualizar();
+    }
+
+    /// Reflete os trabalhos do agente na varredura mostrada: a GUI vê o que qualquer cliente
+    /// iniciou (e a abertura do próprio agente) e atribui à sua varredura o trabalho que ela pediu.
+    fn aplicar_jobs(&mut self, jobs: &[JobInfo]) {
+        let foco = dag_core::job_em_foco(jobs);
+        self.foco = foco.map(|j| j.id);
+        let visivel = |j: &&JobInfo| j.eh_varredura() || j.tipo == TipoJob::Abertura;
+        let mut limpar = false;
+        if let Some(s) = self.scan.as_mut() {
+            if s.pedido == PEDIDO_ABERTURA {
+                // Varredura de outro cliente: acompanha o trabalho em foco (ou some com ele).
+                match foco.filter(visivel) {
+                    Some(j) if s.job.as_ref().is_none_or(|a| a.id == j.id) => {
+                        s.job = Some(j.clone());
+                    }
+                    Some(j) => *s = ScanAtivo::do_job(j.clone()),
+                    None => limpar = true,
+                }
+            } else {
+                // Varredura pedida por esta GUI: guarda o trabalho dela, na fila ou rodando.
+                let meu = match &s.job {
+                    Some(a) => jobs.iter().find(|j| j.id == a.id),
+                    None => jobs
+                        .iter()
+                        .find(|j| j.origem == OrigemJob::Gui && j.eh_varredura()),
+                };
+                if let Some(j) = meu {
+                    s.job = Some(j.clone());
+                }
+            }
+        } else if let Some(j) = foco.filter(visivel) {
+            let mut s = ScanAtivo::do_job(j.clone());
+            if j.tipo == TipoJob::Abertura {
+                s.abertura = Some(
+                    j.etapa
+                        .as_deref()
+                        .and_then(|e| e.strip_prefix("abertura: "))
+                        .unwrap_or("conferindo o Catálogo")
+                        .to_string(),
+                );
+            }
+            self.scan = Some(s);
+        }
+        if limpar {
+            self.scan = None;
+        }
+        self.invalidar();
     }
 
     fn tratar_resposta(&mut self, id: u64, resposta: Resposta) {
@@ -786,11 +929,13 @@ impl AppDag {
         let tom = match modo {
             ModoWorker::Escritor | ModoWorker::Servico => Tom::Sucesso,
             ModoWorker::Iniciando | ModoWorker::Encerrado => Tom::Neutro,
-            ModoWorker::SomenteLeitura { .. } => Tom::Aviso,
+            ModoWorker::SomenteLeitura { .. } | ModoWorker::Reconectando { .. } => Tom::Aviso,
             ModoWorker::Falhou { .. } => Tom::Perigo,
         };
         let dica_worker = match modo {
-            ModoWorker::SomenteLeitura { motivo } | ModoWorker::Falhou { motivo } => {
+            ModoWorker::SomenteLeitura { motivo }
+            | ModoWorker::Falhou { motivo }
+            | ModoWorker::Reconectando { motivo } => {
                 format!("{motivo}\n{}", self.caminho.display())
             }
             _ => format!("Catálogo: {}", self.caminho.display()),
@@ -853,7 +998,10 @@ impl AppDag {
             ),
             _ => String::new(),
         };
-        SegmentoStatus::novo("fase", format!("Varredura: {fase}{detalhe}"))
+        let origem = s
+            .origem_externa()
+            .map_or_else(String::new, |o| format!(" [iniciada por {}]", o.rotulo()));
+        SegmentoStatus::novo("fase", format!("Varredura: {fase}{detalhe}{origem}"))
             .tom(if pausado { Tom::Aviso } else { Tom::Info })
             .dica("Veja a página Varredura para os detalhes")
     }
@@ -1005,7 +1153,8 @@ mod testes {
 
     fn app() -> (tempfile::TempDir, AppDag) {
         let tmp = tempfile::tempdir().unwrap();
-        let app = AppDag::novo(ConfigApp::com_caminho(tmp.path().join("dados/c.sqlite")));
+        let app =
+            AppDag::novo(ConfigApp::com_caminho(tmp.path().join("dados/c.sqlite")).em_processo());
         (tmp, app)
     }
 
@@ -1164,12 +1313,12 @@ mod testes {
         let s = app.segmentos_de_status();
         assert!(
             s.iter()
-                .any(|s| s.id == "worker" && s.texto == "Worker: iniciando…")
+                .any(|s| s.id == "worker" && s.texto == "Agente: iniciando…")
         );
         esperar_worker(&mut app);
         let s = app.segmentos_de_status();
         let worker = s.iter().find(|s| s.id == "worker").unwrap();
-        assert_eq!(worker.texto, "Worker: escritor (esta sessão)");
+        assert_eq!(worker.texto, "Worker: escritor (sem agente)");
         assert!(
             s.iter()
                 .any(|s| s.id == "fase" && s.texto == "Varredura: ociosa")
@@ -1185,7 +1334,7 @@ mod testes {
         let tmp = tempfile::tempdir().unwrap();
         let caminho = tmp.path().join("c.sqlite");
         let dono = dag_agent::Agente::abrir(&caminho).unwrap().silencioso();
-        let mut app = AppDag::novo(ConfigApp::com_caminho(caminho));
+        let mut app = AppDag::novo(ConfigApp::com_caminho(caminho).em_processo());
         esperar_worker(&mut app);
         let s = app.segmentos_de_status();
         let worker = s.iter().find(|s| s.id == "worker").unwrap();

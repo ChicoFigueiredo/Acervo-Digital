@@ -1,6 +1,6 @@
 # Servidor MCP do DAG
 
-`dag mcp` é um servidor [Model Context Protocol](https://modelcontextprotocol.io) (versão `2025-06-18`) por **stdio**: JSON-RPC 2.0, uma mensagem por linha. O stdout carrega só quadros do protocolo; logs vão para o stderr. O MCP não toca no Catálogo: repassa cada operação ao worker (único escritor), identificando o autor como `mcp` nas Marcações.
+`dag mcp` é um servidor [Model Context Protocol](https://modelcontextprotocol.io) (versão `2025-06-18`) por **stdio**: JSON-RPC 2.0, uma mensagem por linha. O stdout carrega só quadros do protocolo; logs vão para o stderr. O MCP não toca no Catálogo: repassa cada operação ao agente (único escritor, [ADR 0004](adr/0004-agente-escritor-unico-e-assinatura-de-eventos.md)), identificando o autor como `mcp` nas Marcações.
 
 Decisão: [ADR 0002](adr/0002-mcp-com-todas-as-operacoes.md). Requisitos: A-35 e CA-A28.
 
@@ -24,7 +24,9 @@ Claude Desktop (`claude_desktop_config.json`):
 
 Para usar outro Catálogo, defina `DAG_CATALOGO` no ambiente do servidor (`"env": {"DAG_CATALOGO": "/caminho/catalogo.sqlite"}`) ou passe `--catalogo` antes do subcomando.
 
-Com o serviço (daemon) ativo, o MCP conversa com ele pelo socket local. Sem daemon, o MCP abre uma sessão própria como escritor do Catálogo; com GUI e MCP abertos ao mesmo tempo existe um único escritor.
+O MCP conversa com o agente pelo socket local e abre uma conexão por chamada. Se não há agente, a primeira ferramenta de escrita o lança destacado (systemd de usuário se instalado, senão `dag` ao lado do executável ou no PATH; erro claro se não achar). Escritas funcionam com a GUI aberta, porque a GUI também é só cliente. `dag --sem-agente mcp` (ou `DAG_SEM_AGENTE=1`) volta ao modo antigo, com sessão própria.
+
+Ferramenta `jobs`: lista todos os trabalhos do agente (qualquer origem, com progresso). `pausar`, `retomar` e `cancelar` aceitam `job` (id do job) além de `execucao`.
 
 ## Garantias
 

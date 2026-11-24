@@ -11,4 +11,6 @@ mod resumo;
 mod servidor;
 
 pub use ferramentas::{Ferramenta, montar, todas};
-pub use servidor::{Encaminhador, Servidor, VERSAO_PROTOCOLO, servir, servir_stdio};
+pub use servidor::{
+    Encaminhador, Servidor, VERSAO_PROTOCOLO, servir, servir_stdio, servir_stdio_com,
+};

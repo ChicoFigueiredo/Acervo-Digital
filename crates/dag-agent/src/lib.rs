@@ -21,7 +21,10 @@ mod erro;
 mod exibir;
 mod explorar;
 mod finalidade;
+pub mod lancar;
+pub mod observador;
 pub mod protocolo;
+mod registro;
 pub mod servico;
 pub mod servidor;
 mod trava;
@@ -33,10 +36,13 @@ pub use caminho::{
 };
 pub use classificador::ClassificadorPorExtensao;
 pub use cliente::{
-    Cancelador, Cliente, Conexao, VAR_SOCKET, caminho_socket_padrao, resolver_caminho_socket,
+    Assinatura, Cancelador, Cliente, Conexao, OpcoesConexao, VAR_SOCKET, caminho_socket_padrao,
+    resolver_caminho_socket,
 };
 pub use erro::ErroAgente;
 pub use exibir::ExibidorStderr;
+pub use lancar::{OpcoesLancamento, garantir_agente, localizar_dag, sem_agente_do_ambiente};
+pub use observador::{EventoObservado, Observador, OpcoesObservador};
 pub use protocolo::InfoServidor;
 pub use servidor::{ConfigServidor, Servidor, uid_autorizado};
 pub use trava::GuardaEscritor;

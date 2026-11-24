@@ -122,7 +122,7 @@ pub fn informacoes_da_sessao(ui: &mut egui::Ui, app: &AppDag) {
                     .to_string(),
             );
             ui.end_row();
-            ui.label("Worker");
+            ui.label("Agente");
             ui.label(app.worker.modo().texto_status());
             ui.end_row();
             if let ModoWorker::SomenteLeitura { motivo } | ModoWorker::Falhou { motivo } =

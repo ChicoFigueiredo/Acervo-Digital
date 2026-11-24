@@ -75,8 +75,20 @@ Condição de um arquivo que tem ao menos uma cópia com Marcação de Backup em
 _Avoid_: protegido, redundante
 
 **Marcação para Deleção**:
-Decisão registrada no Catálogo de que uma cópia é candidata a descarte. Não apaga nem move nada.
-_Avoid_: excluir, lixo
+Primeiro nível da Lixeira: decisão registrada no Catálogo de que uma cópia é candidata a descarte. Não apaga nem move nada.
+_Avoid_: excluir, lixo, lixeira lógica
+
+**Lixeira do Volume**:
+Pasta na raiz de cada Volume para onde o DAG move cópias com Marcação para Deleção. O DAG só move para ela e de volta; esvaziá-la é sempre ato do usuário, fora do DAG.
+_Avoid_: lixeira do HD, lixeira do sistema, trash
+
+**Na Lixeira**:
+Segundo nível da Lixeira: cópia com Marcação para Deleção que já foi movida para a Lixeira do Volume em que estava. O Catálogo guarda o caminho de origem para restaurá-la.
+_Avoid_: deletado, excluído, descartado
+
+**Descartado**:
+Registro histórico de uma cópia que estava Na Lixeira e deixou de existir porque o usuário esvaziou a Lixeira do Volume. Guarda o que era e quando sumiu; não faz mais parte do acervo.
+_Avoid_: deletado, perdido, removido (remoção comum não é descarte)
 
 **Única Cópia**:
 Arquivo cujo conteúdo não existe em nenhum outro arquivo físico do Catálogo.
@@ -90,6 +102,11 @@ _Avoid_: marcação inválida, expirada
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
 - Qualquer arquivo pode ter **Marcação para Deleção**; se não houver outra cópia, ele recebe alerta de **Única Cópia**.
+- Só uma cópia com **Marcação para Deleção** pode ir para a **Lixeira do Volume**, e sempre para a do próprio **Volume**, nunca de outro.
+- Uma **Única Cópia** pode ir para a **Lixeira do Volume**, mas só com confirmação extra que diga que é a última cópia.
+- Uma cópia **Na Lixeira** não conta como outra cópia: não evita o alerta de **Única Cópia** nem dá **Cobertura**.
+- O usuário também pode mover à mão: o que ele põe na **Lixeira do Volume** passa a ter **Marcação para Deleção** e ficar **Na Lixeira**; o que ele tira volta a ser cópia comum, sem marcação.
+- Só vira **Descartado** o que estava **Na Lixeira** e sumiu; arquivo que some de outro lugar é remoção comum.
 - Uma cópia pode ter **Marcação de Backup** ou **Marcação para Deleção**, nunca as duas.
 - **Cobertura** só existe quando a cópia marcada está em outro **Dispositivo Físico**; outra partição do mesmo disco não conta.
 - Um **Dispositivo Físico** hospeda um ou mais **Volumes**.

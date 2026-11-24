@@ -1057,7 +1057,7 @@ struct Limitador {
 impl Limitador {
     fn permitir(&mut self, p: &Progresso) -> bool {
         let (slot, importante) = match p {
-            Progresso::Mensagem { .. } => return true,
+            Progresso::Mensagem { .. } | Progresso::Passo(_) => return true,
             Progresso::Inventario(i) => {
                 let novo = self.fase[0] != Some(i.fase);
                 self.fase[0] = Some(i.fase);
@@ -1068,13 +1068,18 @@ impl Limitador {
                 self.fase[1] = Some(i.fase);
                 (1, novo)
             }
+            // A montagem da fila e o primeiro quadro com os totais definitivos passam sempre.
             Progresso::Hash(h) => (
                 2,
-                h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total,
+                h.preparando
+                    || h.janela_ms == 0
+                    || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total),
             ),
             Progresso::Verificacao(h) => (
                 3,
-                h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total,
+                h.preparando
+                    || h.janela_ms == 0
+                    || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total),
             ),
         };
         let agora = Instant::now();

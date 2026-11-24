@@ -43,7 +43,7 @@ pub fn resumir(r: &Resposta) -> String {
             confianca,
             ..
         } => format!(
-            "{} execução(ões){}{}{}; Catálogo: {} volume(s), {} pasta(s), {} arquivo(s), {}.",
+            "{} execução(ões){}{}{}; Catálogo: {} volume(s), {} pasta(s), {} arquivo(s) ({} com hash), {}.",
             execucoes.len(),
             execucoes
                 .iter()
@@ -75,6 +75,7 @@ pub fn resumir(r: &Resposta) -> String {
             catalogo.volumes,
             catalogo.pastas,
             catalogo.arquivos,
+            catalogo.arquivos_com_hash,
             bytes(catalogo.bytes_logicos)
         ),
         Resposta::Jobs { jobs } => {
@@ -84,15 +85,17 @@ pub fn resumir(r: &Resposta) -> String {
                 let itens: Vec<String> = jobs
                     .iter()
                     .map(|j| {
-                        let andamento = j.resumo_progresso();
+                        let p = j.painel(j.onde_no_agente(), None, None);
+                        let andamento = p.resumo();
                         format!(
-                            "#{} {} ({}, {}{}){}",
+                            "#{} {} (iniciado por {}, {}{}) {}{}",
                             j.id,
-                            j.tipo.rotulo(),
+                            p.titulo,
                             j.origem.rotulo(),
                             j.estado.rotulo(),
                             j.execucao
                                 .map_or(String::new(), |e| format!(", execução {e}")),
+                            p.onde.texto(),
                             if andamento.is_empty() {
                                 String::new()
                             } else {
@@ -167,13 +170,43 @@ pub fn texto_progresso(p: &Progresso) -> String {
             bytes(i.bytes_logicos),
             i.erros
         ),
-        Progresso::Hash(h) | Progresso::Verificacao(h) => format!(
-            "hash: {}/{} arquivo(s), {}/{}",
-            h.arquivos_feitos,
-            h.arquivos_total,
-            bytes(h.bytes_lidos),
-            bytes(h.bytes_total)
-        ),
+        Progresso::Hash(h) | Progresso::Verificacao(h) if h.preparando => {
+            "hash: montando a fila de hash…".into()
+        }
+        Progresso::Hash(h) | Progresso::Verificacao(h) => {
+            let eta = dag_core::painel::eta_s(
+                h.bytes_total.saturating_sub(h.bytes_lidos),
+                h.bytes_por_seg,
+                h.janela_ms,
+            );
+            format!(
+                "hash: {}/{} arquivo(s) ({}), {}/{}, {}/s, {} thread(s) por disco em até {} disco(s), {} disco(s) listados, tempo restante {}",
+                h.arquivos_feitos,
+                h.arquivos_total,
+                dag_core::painel::pct_texto(dag_core::painel::percentual(
+                    h.arquivos_feitos,
+                    h.arquivos_total
+                )),
+                bytes(h.bytes_lidos),
+                bytes(h.bytes_total),
+                bytes(h.bytes_por_seg as u64),
+                h.threads_por_disco,
+                h.max_discos,
+                h.discos.len(),
+                dag_core::painel::eta_texto(eta)
+            )
+        }
         Progresso::Mensagem { texto } => texto.clone(),
+        Progresso::Passo(p) => match p.tipo {
+            dag_core::TipoPasso::Retomada => format!(
+                "abertura: retomando a execução #{} ({})",
+                p.execucao.unwrap_or_default(),
+                p.modo
+            ),
+            dag_core::TipoPasso::Verificacao => format!(
+                "abertura: Fast Scan de verificação, passada {} de {}",
+                p.passada, p.de
+            ),
+        },
     }
 }

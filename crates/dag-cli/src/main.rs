@@ -897,7 +897,17 @@ fn main() -> ExitCode {
         }
         saida::imprimir(&resposta, todos);
         if let Some(j) = &jobs {
-            print!("\n{}", saida::jobs(j));
+            let catalogo = match &resposta {
+                Resposta::Status { catalogo, .. } => Some(dag_core::painel::TotaisCatalogoPainel {
+                    arquivos: catalogo.arquivos,
+                    com_hash: Some(catalogo.arquivos_com_hash),
+                }),
+                _ => None,
+            };
+            print!(
+                "\n{}",
+                saida::jobs_com_catalogo(j, catalogo, Some(saida::agora_s()))
+            );
         }
     }
     ExitCode::from(codigo)

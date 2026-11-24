@@ -37,6 +37,8 @@ impl ExibidorStderr {
     /// Mostra o evento (aplicando o limite de cadência).
     pub fn mostrar(&mut self, p: &Progresso) {
         let (slot, fim, linha) = match p {
+            // Dado estruturado para as interfaces; o texto da etapa já vai em `Mensagem`.
+            Progresso::Passo(_) => return,
             Progresso::Mensagem { texto } => {
                 let mut e = std::io::stderr().lock();
                 if self.linha_aberta {
@@ -100,25 +102,50 @@ fn linha_inventario(rotulo: &str, i: &ProgressoInventario) -> String {
 }
 
 fn linha_hash(rotulo: &str, p: &ProgressoHash) -> String {
+    if p.preparando {
+        return format!(
+            "[{rotulo}] montando a fila de hash (pode levar minutos em Catálogos grandes)…"
+        );
+    }
     let ativos: Vec<String> = p
         .discos
         .iter()
         .filter(|d| d.ativo)
-        .map(|d| format!("{} {}/s", d.disco, bytes_humanos(d.bytes_por_seg as u64)))
+        .map(|d| {
+            format!(
+                "{} {}/s ({}/{} thr)",
+                d.disco,
+                bytes_humanos(d.bytes_por_seg as u64),
+                d.leitores_ativos,
+                d.threads
+            )
+        })
         .collect();
     let discos = if ativos.is_empty() {
         String::new()
     } else {
         format!(" | discos: {}", ativos.join("; "))
     };
+    let faltam_bytes = p.bytes_total.saturating_sub(p.bytes_lidos);
+    let eta = match dag_core::painel::eta_s(faltam_bytes, p.bytes_por_seg, p.janela_ms) {
+        Some(s) => format!("faltam ~{}", dag_core::painel::duracao_curta(s)),
+        None => "estimando tempo…".into(),
+    };
     format!(
-        "[{rotulo}] {}/{} arquivos, {} de {} lidos | {}/s | {} reaproveitados{discos}",
+        "[{rotulo}] {}/{} arquivos ({}), {} de {} lidos | {}/s | {} reaproveitados | {} erros | {} thr/disco × {} discos | {eta}{discos}",
         inteiro_pt_br(p.arquivos_feitos),
         inteiro_pt_br(p.arquivos_total),
+        dag_core::painel::pct_texto(dag_core::painel::percentual(
+            p.arquivos_feitos,
+            p.arquivos_total
+        )),
         bytes_humanos(p.bytes_lidos),
         bytes_humanos(p.bytes_total),
         bytes_humanos(p.bytes_por_seg as u64),
         inteiro_pt_br(p.reaproveitados),
+        inteiro_pt_br(p.erros),
+        p.threads_por_disco,
+        p.max_discos,
     )
 }
 

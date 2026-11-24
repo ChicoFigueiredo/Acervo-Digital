@@ -74,6 +74,8 @@ impl Registro {
             etapa: None,
             progresso: Vec::new(),
             criado_em: agora(),
+            passo: None,
+            agente_pid: Some(std::process::id()),
         };
         let id = job.id;
         g.jobs.push(job.clone());

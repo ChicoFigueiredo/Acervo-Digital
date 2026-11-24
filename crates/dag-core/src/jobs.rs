@@ -7,8 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::formato::{bytes_humanos, inteiro_pt_br};
-use crate::{FaseInventario, Progresso, Resposta, SaudeMonitorInfo, StatusConfianca};
+use crate::painel::{ContagemInventario, EntradaPainel, Onde, PainelJob};
+use crate::{
+    PassoAbertura, Progresso, ProgressoHash, ProgressoInventario, Resposta, SaudeMonitorInfo,
+    StatusConfianca,
+};
 
 /// O que o trabalho faz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,19 +121,86 @@ pub struct JobInfo {
     pub progresso: Vec<Progresso>,
     /// Segundos Unix em que o trabalho entrou no agente.
     pub criado_em: i64,
+    /// Passo estruturado da rotina de abertura (retomada, passada de verificação).
+    #[serde(default)]
+    pub passo: Option<PassoAbertura>,
+    /// Pid do processo do agente que executa o trabalho.
+    #[serde(default)]
+    pub agente_pid: Option<u32>,
 }
 
 impl JobInfo {
-    /// Guarda `p` no lugar do último evento da mesma etapa.
+    /// Guarda `p` como o último evento da sua etapa (a mais recente fica por último). Um passo
+    /// novo da abertura zera o andamento dos passos anteriores.
     pub fn registrar_progresso(&mut self, p: &Progresso) {
-        if let Progresso::Mensagem { texto } = p {
-            self.etapa = Some(texto.clone());
-            return;
+        match p {
+            Progresso::Mensagem { texto } => {
+                self.etapa = Some(texto.clone());
+                return;
+            }
+            Progresso::Passo(x) => {
+                self.passo = Some(x.clone());
+                self.progresso.clear();
+                return;
+            }
+            _ => {}
         }
         let mesma = |q: &Progresso| std::mem::discriminant(q) == std::mem::discriminant(p);
-        match self.progresso.iter_mut().find(|q| mesma(q)) {
-            Some(q) => *q = p.clone(),
-            None => self.progresso.push(p.clone()),
+        self.progresso.retain(|q| !mesma(q));
+        self.progresso.push(p.clone());
+    }
+
+    /// Último progresso de hash (ou de verificação) e se é a verificação.
+    #[must_use]
+    pub fn hash_atual(&self) -> Option<(&ProgressoHash, bool)> {
+        self.progresso.iter().rev().find_map(|p| match p {
+            Progresso::Hash(h) => Some((h, false)),
+            Progresso::Verificacao(h) => Some((h, true)),
+            _ => None,
+        })
+    }
+
+    /// Último progresso de inventário (ou reconciliação) e se é a reconciliação.
+    #[must_use]
+    pub fn inventario_atual(&self) -> Option<(&ProgressoInventario, bool)> {
+        self.progresso.iter().rev().find_map(|p| match p {
+            Progresso::Inventario(i) => Some((i, false)),
+            Progresso::Reconciliacao(i) => Some((i, true)),
+            _ => None,
+        })
+    }
+
+    /// Painel do trabalho. `agora` são segundos Unix (só para o tempo decorrido; `None` omite).
+    #[must_use]
+    pub fn painel(
+        &self,
+        onde: Onde,
+        agora: Option<i64>,
+        catalogo: Option<crate::painel::TotaisCatalogoPainel>,
+    ) -> PainelJob {
+        let hash = self.hash_atual();
+        let inv = self.inventario_atual();
+        let mut e = EntradaPainel::vazia(onde);
+        e.tipo = Some(self.tipo);
+        e.origem = Some(self.origem);
+        e.estado = Some(self.estado);
+        e.execucao = self.execucao;
+        e.passo = self.passo.as_ref();
+        e.etapa_texto = self.etapa.as_deref();
+        e.hash = hash.map(|(h, _)| h);
+        e.verificacao = hash.is_some_and(|(_, v)| v);
+        e.inventario = inv.map(|(i, _)| ContagemInventario::from(i));
+        e.reconciliacao = inv.is_some_and(|(_, r)| r);
+        e.decorrido_s = agora.and_then(|a| u64::try_from(a - self.criado_em).ok());
+        e.catalogo = catalogo;
+        PainelJob::montar(&e)
+    }
+
+    /// Onde o trabalho roda, do ponto de vista de um cliente conectado ao agente.
+    #[must_use]
+    pub fn onde_no_agente(&self) -> Onde {
+        Onde::Agente {
+            pid: self.agente_pid,
         }
     }
 
@@ -138,41 +208,7 @@ impl JobInfo {
     /// verificação, depois inventário).
     #[must_use]
     pub fn resumo_progresso(&self) -> String {
-        let h = |p: &crate::ProgressoHash, nome: &str| {
-            format!(
-                "{nome} {}/{} arquivos, {} de {}",
-                inteiro_pt_br(p.arquivos_feitos),
-                inteiro_pt_br(p.arquivos_total),
-                bytes_humanos(p.bytes_lidos),
-                bytes_humanos(p.bytes_total)
-            )
-        };
-        let mut hash = None;
-        let mut verif = None;
-        let mut inv = None;
-        for p in &self.progresso {
-            match p {
-                Progresso::Hash(x) => hash = Some(h(x, "hash")),
-                Progresso::Verificacao(x) => verif = Some(h(x, "verificação")),
-                Progresso::Inventario(i) | Progresso::Reconciliacao(i) => {
-                    let pausa = if i.fase == FaseInventario::Pausado {
-                        " (pausado)"
-                    } else {
-                        ""
-                    };
-                    inv = Some(format!(
-                        "{} pastas, {} arquivos{pausa}",
-                        inteiro_pt_br(i.pastas),
-                        inteiro_pt_br(i.arquivos)
-                    ));
-                }
-                Progresso::Mensagem { .. } => {}
-            }
-        }
-        hash.or(verif)
-            .or(inv)
-            .or_else(|| self.etapa.clone())
-            .unwrap_or_default()
+        self.painel(self.onde_no_agente(), None, None).resumo()
     }
 
     /// Execuções que o usuário vê (varreduras e retomadas); fora o monitor e a abertura.
@@ -302,6 +338,8 @@ mod tests {
             etapa: None,
             progresso: Vec::new(),
             criado_em: 1,
+            passo: None,
+            agente_pid: None,
         }
     }
 
@@ -356,6 +394,48 @@ mod tests {
         assert_eq!(fim.unwrap().id, 1);
         assert_eq!(v.jobs.len(), 1);
         assert_eq!(v.em_foco().unwrap().id, 2);
+    }
+
+    #[test]
+    fn passo_novo_zera_o_andamento_do_passo_anterior() {
+        use crate::{PassoAbertura, ProgressoHash, TipoPasso};
+        let mut j = job(1, EstadoJob::Executando);
+        j.tipo = TipoJob::Abertura;
+        j.agente_pid = Some(10);
+        let passo = |tipo, passada| {
+            Progresso::Passo(PassoAbertura {
+                tipo,
+                execucao: Some(1),
+                modo: "Full Scan".into(),
+                no_inventario: false,
+                passada,
+                de: 3,
+            })
+        };
+        j.registrar_progresso(&passo(TipoPasso::Retomada, 0));
+        j.registrar_progresso(&Progresso::Hash(ProgressoHash {
+            arquivos_total: 10,
+            arquivos_feitos: 5,
+            ..ProgressoHash::default()
+        }));
+        let p = j.painel(j.onde_no_agente(), None, None);
+        assert_eq!(p.titulo, "Retomada do hash da execução #1 (Full Scan)");
+        j.registrar_progresso(&passo(TipoPasso::Verificacao, 1));
+        assert!(j.progresso.is_empty(), "o hash do passo anterior some");
+        let p = j.painel(j.onde_no_agente(), None, None);
+        assert_eq!(p.titulo, "Fast Scan de verificação, passada 1 de 3");
+        assert!(p.hash.is_none());
+        // Sem a abertura ter dado nenhum passo, o texto nunca fala de inventário no hash.
+        let mut k = job(2, EstadoJob::Executando);
+        k.registrar_progresso(&Progresso::Hash(ProgressoHash {
+            arquivos_total: 4,
+            ..ProgressoHash::default()
+        }));
+        assert_eq!(
+            k.painel(Onde::Janela, None, None).titulo,
+            "Hash Completo (Full Scan)"
+        );
+        assert!(k.resumo_progresso().starts_with("hash 0 de 4"));
     }
 
     #[test]

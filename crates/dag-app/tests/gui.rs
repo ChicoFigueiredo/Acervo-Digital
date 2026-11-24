@@ -63,6 +63,31 @@ impl Ambiente {
             .drop_without_applying_deltas();
     }
 
+    /// Desenha um quadro e devolve todo o texto que as formas dele contêm.
+    fn quadro_texto(&mut self) -> String {
+        fn coletar(f: &egui::Shape, t: &mut String) {
+            match f {
+                egui::Shape::Text(x) => {
+                    t.push_str(x.galley.text());
+                    t.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|x| coletar(x, t)),
+                _ => {}
+            }
+        }
+        let entrada = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+            ..Default::default()
+        };
+        let saida = self.ctx.run_ui(entrada, |ui| self.casca.desenhar(ui));
+        let mut t = String::new();
+        for c in &saida.shapes {
+            coletar(&c.shape, &mut t);
+        }
+        saida.drop_without_applying_deltas();
+        t
+    }
+
     fn abrir(&mut self, pagina: &str) {
         self.casca
             .abrir(&self.ctx, Rota::nova(pagina), Local::Centro);
@@ -602,4 +627,80 @@ fn gui_cliente_do_agente_ve_e_cancela_a_varredura_iniciada_pela_cli() {
     assert!(a.casca.app.pode_escrever());
     drop(a);
     srv.encerrar();
+}
+
+/// A retomada de hash da abertura aparece em palavras simples (nunca texto de inventário), com
+/// totais, threads e a tabela por disco, também na barra de status.
+#[test]
+fn painel_da_varredura_mostra_a_retomada_do_hash_com_dados_por_disco() {
+    use dag_app::app::ScanAtivo;
+    use dag_core::{PassoAbertura, ProgressoDiscoHash, ProgressoHash, TipoPasso};
+
+    let mut a = ambiente_populado();
+    let mut s = ScanAtivo::novo(dag_app::app::PEDIDO_ABERTURA, false);
+    s.abertura = Some("etapa 1 de 2: retomando a execução #1 (hash)".into());
+    s.passo = Some(PassoAbertura {
+        tipo: TipoPasso::Retomada,
+        execucao: Some(1),
+        modo: "Full Scan".into(),
+        no_inventario: false,
+        passada: 0,
+        de: 0,
+    });
+    s.bytes_hash = Some(ProgressoHash {
+        arquivos_feitos: 8_000_000,
+        arquivos_total: 19_700_000,
+        bytes_lidos: 5 << 40,
+        bytes_total: 12 << 40,
+        bytes_por_seg: 210.0 * 1_048_576.0,
+        reaproveitados: 7_900_000,
+        execucao: Some(1),
+        threads_por_disco: 1,
+        max_discos: 4,
+        erros: 2,
+        arquivos_por_seg: 205.0,
+        janela_ms: 30_000,
+        discos: vec![ProgressoDiscoHash {
+            disco: "WD Red 4TB".into(),
+            volumes: vec![1, 2],
+            threads: 1,
+            leitores_ativos: 1,
+            arquivos_feitos: 3_000_000,
+            arquivos_total: 9_000_000,
+            bytes_lidos: 2 << 40,
+            bytes_total: 6 << 40,
+            bytes_por_seg: 110.0 * 1_048_576.0,
+            ativo: true,
+            concluido: false,
+        }],
+        ..ProgressoHash::default()
+    });
+    a.casca.app.scan = Some(s);
+    a.abrir("varredura");
+    let t = a.quadro_texto();
+    for esperado in [
+        "Retomada do hash da execução #1 (Full Scan)",
+        "nesta janela (modo sem agente) — fechar interrompe",
+        "1 thread(s) por disco, até 4 disco(s) em paralelo",
+        "7.999.998 com hash de 19.700.000 arquivos (40,6%)",
+        "lidos nesta etapa",
+        "Por disco físico",
+        "WD Red 4TB",
+        "lendo",
+        "Tempo restante",
+    ] {
+        assert!(t.contains(esperado), "faltou {esperado:?} em:\n{t}");
+    }
+    assert!(!t.contains("Descobrindo volumes"), "{t}");
+    assert!(!t.contains("Sem percentual global"), "{t}");
+    let barra = a.casca.app.segmentos_de_status();
+    let fase = barra.iter().find(|s| s.id == "fase").unwrap();
+    assert!(
+        fase.texto.contains("Retomada do hash da execução #1") && fase.texto.contains("40,6%"),
+        "{}",
+        fase.texto
+    );
+    let totais = barra.iter().find(|s| s.id == "totais").unwrap();
+    assert!(totais.texto.contains("com hash"), "{}", totais.texto);
+    a.casca.app.scan = None;
 }

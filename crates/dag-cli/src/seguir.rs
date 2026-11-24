@@ -114,7 +114,7 @@ pub fn seguir(catalogo: &Path, socket: Option<&Path>, json: bool) -> u8 {
             }
             EventoObservado::Evento(e) => {
                 let fim = visao.aplicar(&e);
-                mostrar(&e, fim.as_ref(), &mut exibidor, &mut ultimo_monitor);
+                mostrar(&e, fim.as_ref(), &visao, &mut exibidor, &mut ultimo_monitor);
             }
         }
     }
@@ -125,6 +125,7 @@ pub fn seguir(catalogo: &Path, socket: Option<&Path>, json: bool) -> u8 {
 fn mostrar(
     e: &EventoAgente,
     fim: Option<&JobInfo>,
+    visao: &dag_core::VisaoJobs,
     exibidor: &mut ExibidorStderr,
     ultimo_monitor: &mut Option<(String, bool, u64, u64, Option<String>)>,
 ) {
@@ -151,6 +152,16 @@ fn mostrar(
         EventoAgente::JobIniciado { job } => println!("[{h}] {} iniciado", rotulo_job(job)),
         EventoAgente::JobAtualizado { job } => {
             println!("[{h}] {}: {}", rotulo_job(job), job.estado.rotulo());
+        }
+        EventoAgente::JobProgresso {
+            job,
+            progresso: dag_core::Progresso::Passo(_),
+        } => {
+            // Mudou o passo da abertura: diz em palavras o que roda agora e onde.
+            if let Some(j) = visao.job(*job) {
+                let p = j.painel(j.onde_no_agente(), None, None);
+                println!("[{h}] {} — {}", p.titulo, p.onde.texto());
+            }
         }
         EventoAgente::JobProgresso { progresso, .. } => exibidor.mostrar(progresso),
         EventoAgente::JobFinalizado { desfecho, .. } => {

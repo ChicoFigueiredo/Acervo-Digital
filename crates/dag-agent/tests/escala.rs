@@ -311,6 +311,7 @@ fn agente(marcas: &Arc<Marcas>) -> Agente {
                 Progresso::Hash(_) => "hash".to_string(),
                 Progresso::Verificacao(_) => "verificação".to_string(),
                 Progresso::Mensagem { texto } => texto.clone(),
+                Progresso::Passo(_) => "passo da abertura".to_string(),
             };
             let mut u = ultimo.lock().unwrap();
             if *u != nome {

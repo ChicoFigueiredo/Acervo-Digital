@@ -30,6 +30,7 @@
 //! * Abre com `O_RDONLY | O_NOATIME` (sem `NOATIME` se o kernel recusar com `EPERM`), nunca
 //!   escreve, não segue symlinks (`O_NOFOLLOW`).
 
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -88,7 +89,7 @@ impl Default for ConfigHash {
 }
 
 /// Andamento de um Dispositivo Físico (ou de um volume sem dispositivo conhecido).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProgressoDisco {
     /// Nome para exibição (rótulo, modelo ou identificador do dispositivo).
     pub disco: String,
@@ -104,10 +105,14 @@ pub struct ProgressoDisco {
     /// Já começou e ainda tem trabalho.
     pub ativo: bool,
     pub concluido: bool,
+    /// Threads de leitura deste disco (configuração em vigor).
+    pub threads: u32,
+    /// Leituras em curso agora (no máximo `threads`).
+    pub leitores_ativos: u32,
 }
 
 /// Instantâneo de progresso da etapa.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProgressoHash {
     /// Linhas de arquivo resolvidas (hasheadas, reaproveitadas ou com erro).
     pub arquivos_feitos: u64,
@@ -120,6 +125,20 @@ pub struct ProgressoHash {
     pub reaproveitados: u64,
     /// Um item por disco, na ordem em que foram agendados.
     pub discos: Vec<ProgressoDisco>,
+    /// Execução cuja fila está sendo processada.
+    pub execucao: i64,
+    pub threads_por_disco: u32,
+    pub max_discos: u32,
+    /// Arquivos com erro até agora.
+    pub erros: u64,
+    /// Arquivos resolvidos por segundo na janela móvel de `bytes_por_seg`.
+    pub arquivos_por_seg: f64,
+    /// Largura da janela móvel (ms).
+    pub janela_ms: u64,
+    /// Tempo desde o início da etapa (inclui a montagem da fila).
+    pub decorrido_ms: u64,
+    /// A fila ainda está sendo montada (totais provisórios).
+    pub preparando: bool,
 }
 
 /// Resultado da etapa de hash.
@@ -230,10 +249,22 @@ impl EtapaHash {
     /// # Errors
     /// Falha do Catálogo ou execução inexistente. Problemas com arquivos individuais não são
     /// erros: ficam em `scan_errors` e na contagem `erros`.
-    pub fn executar(self, cat: &mut Catalogo) -> Result<ResultadoHash, ErroScan> {
+    pub fn executar(mut self, cat: &mut Catalogo) -> Result<ResultadoHash, ErroScan> {
         let inicio = Instant::now();
         let run_id = self.execucao.0;
         let t = agora();
+        // Montar a fila de um Catálogo grande leva minutos: avisa já, para a interface mostrar
+        // "montando a fila" em vez de nada.
+        if let Some(cb) = self.progresso.as_mut() {
+            cb(&ProgressoHash {
+                execucao: run_id,
+                threads_por_disco: u32::try_from(self.config.threads_por_disco.max(1))
+                    .unwrap_or(u32::MAX),
+                max_discos: u32::try_from(self.config.max_discos.max(1)).unwrap_or(u32::MAX),
+                preparando: true,
+                ..ProgressoHash::default()
+            });
+        }
         let (fase_anterior, resumo) = cat.armazem_mut().transacao_imediata(
             |tx| -> Result<(String, hashes::ResumoFila), ErroScan> {
                 let fase = hashes::fase_da_execucao(tx, run_id)?
@@ -258,6 +289,8 @@ impl EtapaHash {
             arquivos_total: resumo.candidatos,
             bytes_total: resumo.bytes_total,
             reaproveitados: resumo.reaproveitados,
+            erros: 0,
+            amostras: VecDeque::new(),
         };
         let r = motor.rodar(cat, inicio)?;
         let desfecho = if r.cancelado {
@@ -424,6 +457,8 @@ impl VerificacaoIntegridade {
             arquivos_total: total.0,
             bytes_total: total.1,
             reaproveitados: 0,
+            erros: 0,
+            amostras: VecDeque::new(),
         };
         let r = motor.rodar(cat, inicio)?;
         let desfecho = if r.cancelado {
@@ -668,6 +703,82 @@ struct Motor {
     arquivos_total: u64,
     bytes_total: u64,
     reaproveitados: u64,
+    /// Erros até agora (para o progresso).
+    erros: u64,
+    /// Amostras recentes para as vazões de janela móvel.
+    amostras: VecDeque<Amostra>,
+}
+
+/// Largura da janela móvel das vazões.
+const JANELA_VAZAO: Duration = Duration::from_secs(30);
+
+/// Um instante da contagem acumulada, para medir a vazão recente.
+struct Amostra {
+    t: Instant,
+    bytes: u64,
+    feitos: u64,
+    por_disco: Vec<u64>,
+}
+
+/// Vazões da janela móvel.
+struct Vazao {
+    bytes_por_seg: f64,
+    arquivos_por_seg: f64,
+    por_disco: Vec<f64>,
+    janela_ms: u64,
+}
+
+impl Motor {
+    /// Registra a amostra de agora e calcula as vazões desde a mais antiga ainda na janela.
+    fn medir(&mut self, bytes: u64, feitos: u64, por_disco: Vec<u64>) -> Vazao {
+        let t = Instant::now();
+        while self
+            .amostras
+            .front()
+            .is_some_and(|a| t.duration_since(a.t) > JANELA_VAZAO)
+        {
+            self.amostras.pop_front();
+        }
+        let v = match self.amostras.front() {
+            Some(a) => {
+                let seg = t.duration_since(a.t).as_secs_f64();
+                if seg > 0.0 {
+                    Vazao {
+                        bytes_por_seg: bytes.saturating_sub(a.bytes) as f64 / seg,
+                        arquivos_por_seg: feitos.saturating_sub(a.feitos) as f64 / seg,
+                        por_disco: por_disco
+                            .iter()
+                            .zip(&a.por_disco)
+                            .map(|(n, antes)| n.saturating_sub(*antes) as f64 / seg)
+                            .collect(),
+                        janela_ms: u64::try_from(t.duration_since(a.t).as_millis())
+                            .unwrap_or(u64::MAX),
+                    }
+                } else {
+                    Vazao::zero(por_disco.len())
+                }
+            }
+            None => Vazao::zero(por_disco.len()),
+        };
+        self.amostras.push_back(Amostra {
+            t,
+            bytes,
+            feitos,
+            por_disco,
+        });
+        v
+    }
+}
+
+impl Vazao {
+    fn zero(discos: usize) -> Self {
+        Self {
+            bytes_por_seg: 0.0,
+            arquivos_por_seg: 0.0,
+            por_disco: vec![0.0; discos],
+            janela_ms: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -781,6 +892,16 @@ impl Motor {
         let mut ultimo = Instant::now()
             .checked_sub(self.config.intervalo_de_progresso)
             .unwrap_or_else(Instant::now);
+        // Totais definitivos já (antes de o primeiro arquivo terminar).
+        self.emitir(
+            &discos,
+            &bytes_disco,
+            feitos_linhas,
+            &bytes_lidos,
+            inicio,
+            &mut ultimo,
+            true,
+        );
 
         let resultado: Result<(), ErroScan> = std::thread::scope(|s| {
             let mut ativos: usize = 0;
@@ -909,6 +1030,7 @@ impl Motor {
                                 feitos_linhas += d.linhas;
                                 conta.feitos_ok += d.ok;
                                 conta.erros += d.erros;
+                                self.erros = conta.erros;
                                 conta.alterados += d.alterados;
                                 conta.divergentes.extend(d.divergentes);
                             }
@@ -989,46 +1111,62 @@ impl Motor {
         ultimo: &mut Instant,
         forcar: bool,
     ) {
-        let Some(cb) = self.progresso.as_mut() else {
+        if self.progresso.is_none() {
             return;
-        };
+        }
         if !forcar && ultimo.elapsed() < self.config.intervalo_de_progresso {
             return;
         }
         *ultimo = Instant::now();
         let lidos = bytes.load(Ordering::Relaxed);
-        let seg = inicio.elapsed().as_secs_f64();
+        let por_disco_bytes: Vec<u64> = bytes_disco
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .collect();
+        let v = self.medir(lidos, feitos, por_disco_bytes.clone());
         let por_disco = discos
             .iter()
-            .zip(bytes_disco)
-            .map(|(d, b)| {
-                let lidos_d = b.load(Ordering::Relaxed);
-                let seg_d = d.iniciado.map_or(0.0, |t| t.elapsed().as_secs_f64());
-                ProgressoDisco {
-                    disco: d.nome.clone(),
-                    volumes: d.volumes.clone(),
-                    arquivos_feitos: d.feitos,
-                    arquivos_total: d.arquivos_total,
-                    bytes_lidos: lidos_d,
-                    bytes_total: d.bytes_total,
-                    bytes_por_seg: if seg_d > 0.0 {
-                        lidos_d as f64 / seg_d
-                    } else {
-                        0.0
-                    },
-                    ativo: d.iniciado.is_some() && !d.encerrado,
-                    concluido: d.encerrado,
-                }
+            .zip(por_disco_bytes)
+            .zip(&v.por_disco)
+            .map(|((d, lidos_d), bps)| ProgressoDisco {
+                disco: d.nome.clone(),
+                volumes: d.volumes.clone(),
+                arquivos_feitos: d.feitos,
+                arquivos_total: d.arquivos_total,
+                bytes_lidos: lidos_d,
+                bytes_total: d.bytes_total,
+                bytes_por_seg: *bps,
+                ativo: d.iniciado.is_some() && !d.encerrado,
+                concluido: d.encerrado,
+                threads: u32::try_from(self.config.threads_por_disco.max(1)).unwrap_or(u32::MAX),
+                leitores_ativos: if d.iniciado.is_some() && !d.encerrado {
+                    u32::try_from(d.em_voo.min(self.config.threads_por_disco.max(1)))
+                        .unwrap_or(u32::MAX)
+                } else {
+                    0
+                },
             })
             .collect();
+        let Some(cb) = self.progresso.as_mut() else {
+            return;
+        };
         cb(&ProgressoHash {
             arquivos_feitos: feitos,
             arquivos_total: self.arquivos_total,
             bytes_lidos: lidos,
             bytes_total: self.bytes_total,
-            bytes_por_seg: if seg > 0.0 { lidos as f64 / seg } else { 0.0 },
+            bytes_por_seg: v.bytes_por_seg,
             reaproveitados: self.reaproveitados,
             discos: por_disco,
+            execucao: self.run_id,
+            threads_por_disco: u32::try_from(self.config.threads_por_disco.max(1))
+                .unwrap_or(u32::MAX),
+            max_discos: u32::try_from(self.config.max_discos.max(1)).unwrap_or(u32::MAX),
+            erros: self.erros,
+            arquivos_por_seg: v.arquivos_por_seg,
+            janela_ms: v.janela_ms,
+            decorrido_ms: u64::try_from(inicio.elapsed().as_millis()).unwrap_or(u64::MAX),
+            preparando: false,
         });
     }
 

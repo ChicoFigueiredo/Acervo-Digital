@@ -305,6 +305,9 @@ pub struct ResumoCatalogo {
     pub pastas: u64,
     pub arquivos: u64,
     pub bytes_logicos: u64,
+    /// Arquivos do Catálogo que já têm hash (contagem de `hashes`).
+    #[serde(default)]
+    pub arquivos_com_hash: u64,
 }
 
 /// Pasta ou arquivo.

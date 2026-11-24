@@ -6,13 +6,14 @@ use std::time::Duration;
 use super::tabela::{Coluna, tabela};
 use super::{DefAcao, DefGrupo, DefPagina, cabecalho, estado_da_carga};
 use crate::app::AppDag;
-use crate::formato::{bytes_humanos, data_s, duracao, inteiro_pt_br, percentual, taxa_itens};
+use crate::formato::{bytes_humanos, data_s, duracao, inteiro_pt_br, taxa_itens};
 use crate::leitor::{Carga, erro};
-use crate::progresso::{FaseScan, fase_texto, fracao_global};
 use crate::selecao::{
     aviso_raiz_sistema, normalizar_raiz, raiz_do_volume, raizes_dos_discos_fisicos,
 };
 use bancada_casca::{Tom, egui};
+use dag_core::PainelJob;
+use dag_core::painel::{self, EstadoDisco, EtapaPainel, PainelHash};
 use dag_scanner::EstadoControle;
 use dag_store::consulta_gui::{LinhaExecucao, ultimas_execucoes};
 
@@ -349,7 +350,7 @@ fn botoes(ui: &mut egui::Ui, app: &AppDag, agir: &mut Acao) {
 }
 
 fn progresso(ui: &mut egui::Ui, app: &AppDag) {
-    let Some(s) = &app.scan else {
+    if app.scan.is_none() {
         if let Some(r) = &app.ultimo_scan {
             ui.strong(format!("Última varredura desta sessão: #{}", r.execucao));
             ui.label(format!(
@@ -374,116 +375,187 @@ fn progresso(ui: &mut egui::Ui, app: &AppDag) {
             ui.weak("Nenhuma varredura em andamento.");
         }
         return;
-    };
-    let pausado = app.estado_do_scan() == Some(EstadoControle::Pausado);
-    let fase = match &s.abertura {
-        Some(etapa) => format!("Ao abrir: {etapa}"),
-        None => fase_texto(s.fase(), pausado, s.sem_hash).to_string(),
-    };
+    }
+    if let Some(p) = app.painel_do_scan() {
+        desenhar_painel(ui, &p);
+    }
+}
+
+/// Desenha o painel do trabalho em andamento: o que roda, onde, totais, discos e tempo restante.
+/// Pública para o teste de desenho sem display.
+pub fn desenhar_painel(ui: &mut egui::Ui, p: &PainelJob) {
     ui.horizontal(|ui| {
-        if !pausado {
+        if !p.pausado {
             ui.spinner();
         }
-        ui.strong(format!("Em andamento — {fase}"));
-        ui.weak(format!("({})", duracao(s.inicio.elapsed())));
-    });
-    if let Some(j) = &s.job {
-        let exec = j
-            .execucao
-            .map_or_else(String::new, |e| format!(" · execução #{e}"));
-        ui.weak(format!(
-            "Trabalho #{} · {} · iniciado por {}{exec}",
-            j.id,
-            j.tipo.rotulo(),
-            j.origem.rotulo()
+        ui.strong(format!(
+            "Em andamento — {}{}",
+            p.titulo,
+            if p.pausado { " (pausado)" } else { "" }
         ));
-    }
-    let hash = s.andamento_hash();
-    match fracao_global(s.fase(), s.sem_hash, hash.as_ref()) {
-        Some(f) => {
-            let h = hash.unwrap_or_default();
-            ui.add(egui::ProgressBar::new(f).desired_width(480.0).text(format!(
-                "{} de {} arquivos ({})",
-                inteiro_pt_br(h.concluidos),
-                inteiro_pt_br(h.total),
-                percentual(Some(f64::from(f) * 100.0))
-            )));
-            let mut linha = Vec::new();
-            if let Some(b) = &s.bytes_hash {
-                linha.push(format!(
-                    "{} de {} lidos",
-                    bytes_humanos(b.bytes_lidos),
-                    bytes_humanos(b.bytes_total)
-                ));
-            }
-            if let Some(t) = s.taxa_hash() {
-                linha.push(taxa_itens(t, "arquivos"));
-            }
-            if let Some(r) = s.restante_hash() {
-                linha.push(format!("restante estimado: {} (estimativa)", duracao(r)));
-            }
-            if !linha.is_empty() {
-                ui.weak(linha.join(" · "));
-            }
-            if let Some(b) = &s.bytes_hash {
-                // Um disco físico por thread: mostra o andamento de cada disco.
-                for d in &b.discos {
-                    ui.weak(format!(
-                        "Disco {}: {} de {} lidos ({}/s){}",
-                        d.disco,
-                        bytes_humanos(d.bytes_lidos),
-                        bytes_humanos(d.bytes_total),
-                        bytes_humanos(d.bytes_por_seg as u64),
-                        if d.concluido { " — concluído" } else { "" }
-                    ));
-                }
-            }
+        if let Some(s) = p.decorrido_s {
+            ui.weak(format!("há {}", painel::duracao_curta(s)));
         }
-        None => {
+    });
+    ui.label(format!(
+        "Onde: {}{}",
+        p.onde.texto(),
+        p.quem
+            .map_or_else(String::new, |q| format!(" · iniciado por: {q}"))
+    ));
+    match p.etapa {
+        EtapaPainel::NaFila => {
+            ui.weak("Na fila do agente, esperando o trabalho em curso.");
+        }
+        EtapaPainel::Preparando => {
+            ui.weak(match &p.etapa_texto {
+                Some(t) => format!("Preparando: {t}"),
+                None => "Preparando: descobrindo volumes e conferindo o Catálogo…".to_string(),
+            });
+        }
+        EtapaPainel::PreparandoHash => {
             ui.weak(
-                "Sem percentual global: o total de diretórios ainda não é conhecido durante \
-                 o inventário. Os números abaixo são contagens reais.",
+                "Montando a fila de hash (pode levar vários minutos em Catálogos grandes). \
+                 Os totais aparecem em seguida.",
             );
         }
+        _ => {}
     }
-    if let Some(p) = &s.progresso {
-        egui::Grid::new("progresso-scan")
+    if let Some(h) = &p.hash {
+        painel_hash(ui, h);
+    }
+    if let Some(i) = &p.inventario {
+        ui.weak(
+            "Sem percentual global: o total ainda não é conhecido durante o inventário. \
+             Os números abaixo são o que já foi encontrado.",
+        );
+        egui::Grid::new("progresso-inventario")
             .num_columns(4)
             .show(ui, |ui| {
-                ui.label("Diretórios");
-                ui.strong(inteiro_pt_br(p.pastas));
-                ui.label("Arquivos");
-                ui.strong(inteiro_pt_br(p.arquivos));
+                ui.label("Pastas encontradas");
+                ui.strong(inteiro_pt_br(i.pastas));
+                ui.label("Arquivos encontrados");
+                ui.strong(inteiro_pt_br(i.arquivos));
                 ui.end_row();
-                ui.label("Bytes inventariados");
-                ui.strong(bytes_humanos(p.bytes_logicos));
-                ui.label("Entradas especiais");
-                ui.strong(inteiro_pt_br(p.especiais));
-                ui.end_row();
+                ui.label("Bytes encontrados");
+                ui.strong(bytes_humanos(i.bytes));
                 ui.label("Velocidade");
-                ui.strong(taxa_itens(p.itens_por_s, "itens"));
-                ui.label("Fila (diretórios pendentes)");
-                ui.strong(inteiro_pt_br(p.pendentes));
+                ui.strong(taxa_itens(i.itens_por_s, "itens"));
                 ui.end_row();
-                ui.label("Ignorados");
-                ui.strong(inteiro_pt_br(p.ignorados));
+                ui.label("Pastas por visitar");
+                ui.strong(inteiro_pt_br(i.pendentes));
                 ui.label("Erros");
-                ui.strong(inteiro_pt_br(p.erros));
-                ui.end_row();
-                ui.label("Volume atual");
-                ui.strong("—");
-                ui.label("Duração do inventário");
-                ui.strong(duracao(p.decorrido));
+                ui.strong(inteiro_pt_br(i.erros));
                 ui.end_row();
             });
-        if s.fase() == Some(FaseScan::Concluido) && !s.sem_hash && hash.is_none() {
-            ui.weak(
-                "Preparando a fila de Hash Completo… (a contagem de arquivos aparece em instantes)",
-            );
-        }
-    } else {
-        ui.weak("Descobrindo volumes e preparando o inventário…");
     }
+    if let Some(c) = &p.catalogo {
+        ui.weak(format!(
+            "Catálogo: {} arquivos{}",
+            inteiro_pt_br(c.arquivos),
+            c.com_hash.map_or_else(String::new, |h| format!(
+                ", {} com hash ({})",
+                inteiro_pt_br(h),
+                painel::pct_texto(painel::percentual(h, c.arquivos))
+            ))
+        ));
+    }
+}
+
+fn painel_hash(ui: &mut egui::Ui, h: &PainelHash) {
+    if h.threads_por_disco > 0 || h.max_discos > 0 {
+        ui.label(format!(
+            "Configuração em vigor: {} thread(s) por disco, até {} disco(s) em paralelo",
+            h.threads_por_disco, h.max_discos
+        ));
+    }
+    if h.arquivos_total == 0 {
+        return;
+    }
+    let f = h.pct_arquivos.map_or(0.0, |p| (p / 100.0) as f32);
+    ui.add(egui::ProgressBar::new(f).desired_width(520.0).text(format!(
+        "{} com hash de {} arquivos ({})",
+        inteiro_pt_br(h.com_hash),
+        inteiro_pt_br(h.arquivos_total),
+        painel::pct_texto(h.pct_arquivos)
+    )));
+    let fb = h.pct_bytes.map_or(0.0, |p| (p / 100.0) as f32);
+    ui.add(
+        egui::ProgressBar::new(fb)
+            .desired_width(520.0)
+            .text(format!(
+                "{} de {} lidos nesta etapa ({})",
+                bytes_humanos(h.bytes_lidos),
+                bytes_humanos(h.bytes_total),
+                painel::pct_texto(h.pct_bytes)
+            )),
+    );
+    egui::Grid::new("progresso-hash")
+        .num_columns(4)
+        .show(ui, |ui| {
+            ui.label("Pendentes");
+            ui.strong(inteiro_pt_br(h.pendentes));
+            ui.label("Hashes reaproveitados");
+            ui.strong(inteiro_pt_br(h.reaproveitados));
+            ui.end_row();
+            ui.label("Erros");
+            ui.strong(inteiro_pt_br(h.erros));
+            ui.label("Vazão");
+            ui.strong(format!(
+                "{} · {}",
+                h.arquivos_por_min.map_or_else(
+                    || "estimando arquivos/min…".to_string(),
+                    |a| format!("{} arquivos/min", inteiro_pt_br(a as u64))
+                ),
+                painel::vazao_texto(h.bytes_por_seg)
+            ));
+            ui.end_row();
+            ui.label("Tempo restante");
+            ui.strong(painel::eta_texto(h.eta_s));
+            ui.end_row();
+        });
+    if h.discos.is_empty() {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.strong("Por disco físico");
+    egui::Grid::new("progresso-discos")
+        .num_columns(8)
+        .striped(true)
+        .show(ui, |ui| {
+            for c in [
+                "Disco", "Volumes", "Threads", "Arquivos", "%", "MB/s", "Estado", "Restante",
+            ] {
+                ui.strong(c);
+            }
+            ui.end_row();
+            for d in &h.discos {
+                ui.label(&d.nome);
+                ui.label(
+                    d.volumes
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                ui.label(format!("{}/{}", d.leitores_ativos, d.threads));
+                ui.label(format!(
+                    "{} / {}",
+                    inteiro_pt_br(d.feitos),
+                    inteiro_pt_br(d.total)
+                ));
+                ui.label(painel::pct_texto(d.pct));
+                ui.label(format!("{:.1}", d.bytes_por_seg / (1024.0 * 1024.0)).replace('.', ","));
+                ui.label(d.estado.rotulo());
+                ui.label(match d.estado {
+                    EstadoDisco::Concluido => "—".to_string(),
+                    _ => d
+                        .eta_s
+                        .map_or_else(|| "estimando…".to_string(), painel::duracao_curta),
+                });
+                ui.end_row();
+            }
+        });
 }
 
 /// Todos os trabalhos do agente (qualquer cliente os pode ter iniciado), com Cancelar para os

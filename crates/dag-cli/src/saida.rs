@@ -166,10 +166,15 @@ fn estado(e: &StatusExecucao) -> String {
 
 pub fn status(execs: &[StatusExecucao], cat: &dag_core::ResumoCatalogo) -> String {
     let mut s = format!(
-        "Catálogo: {} volume(s), {} pastas, {} arquivos, {} (tamanho lógico)\n",
+        "Catálogo: {} volume(s), {} pastas, {} arquivos ({} com hash, {}), {} (tamanho lógico)\n",
         inteiro_pt_br(cat.volumes),
         inteiro_pt_br(cat.pastas),
         inteiro_pt_br(cat.arquivos),
+        inteiro_pt_br(cat.arquivos_com_hash),
+        dag_core::painel::pct_texto(dag_core::painel::percentual(
+            cat.arquivos_com_hash,
+            cat.arquivos
+        )),
         bytes_humanos(cat.bytes_logicos),
     );
     if execs.is_empty() {
@@ -1051,8 +1056,24 @@ pub fn explorar(
     s
 }
 
-/// Tabela dos trabalhos do agente (qualquer cliente que os tenha iniciado).
+/// Tabela dos trabalhos do agente (qualquer cliente que os tenha iniciado), seguida do painel de
+/// cada trabalho em execução: o que faz, onde roda, totais, threads e andamento por disco.
 pub fn jobs(jobs: &[dag_core::JobInfo]) -> String {
+    jobs_com_catalogo(jobs, None, Some(agora_s()))
+}
+
+pub fn agora_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+}
+
+/// Como [`jobs`], com os totais do Catálogo no painel e o relógio (segundos Unix) injetado.
+pub fn jobs_com_catalogo(
+    jobs: &[dag_core::JobInfo],
+    catalogo: Option<dag_core::painel::TotaisCatalogoPainel>,
+    agora: Option<i64>,
+) -> String {
     if jobs.is_empty() {
         return "Trabalhos do agente: nenhum\n".into();
     }
@@ -1069,14 +1090,26 @@ pub fn jobs(jobs: &[dag_core::JobInfo]) -> String {
             ]
         })
         .collect();
-    format!(
+    let mut s = format!(
         "Trabalhos do agente\n{}",
         tabela(
             &["JOB", "TIPO", "ORIGEM", "ESTADO", "EXECUÇÃO", "ANDAMENTO"],
             &[true, false, false, false, true, false],
             &linhas,
         )
-    )
+    );
+    for j in jobs
+        .iter()
+        .filter(|j| j.tipo != dag_core::TipoJob::Monitor)
+        .filter(|j| j.estado != dag_core::EstadoJob::Enfileirado)
+    {
+        s.push_str(&format!("\n[job {}]\n", j.id));
+        for l in j.painel(j.onde_no_agente(), agora, catalogo).linhas() {
+            s.push_str(&l);
+            s.push('\n');
+        }
+    }
+    s
 }
 
 /// Imprime a resposta em texto: dados em stdout, erros em stderr.
@@ -1267,5 +1300,131 @@ mod testes_status_hash {
         assert!(t.contains("WDC-1") && t.contains("SEA-2"), "{t}");
         assert!(t.contains("1,2"), "{t}");
         assert!(t.contains("/s"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod testes_painel {
+    use super::*;
+    use dag_core::painel::TotaisCatalogoPainel;
+    use dag_core::{
+        EstadoJob, JobInfo, OrigemJob, PassoAbertura, Progresso, ProgressoDiscoHash, ProgressoHash,
+        TipoJob, TipoPasso,
+    };
+
+    fn job_de_hash() -> JobInfo {
+        let mut j = JobInfo {
+            id: 3,
+            tipo: TipoJob::Abertura,
+            origem: OrigemJob::Abertura,
+            raizes: vec!["/dados".into()],
+            estado: EstadoJob::Executando,
+            execucao: Some(1),
+            etapa: None,
+            progresso: Vec::new(),
+            criado_em: 1_000,
+            passo: None,
+            agente_pid: Some(4242),
+        };
+        j.registrar_progresso(&Progresso::Passo(PassoAbertura {
+            tipo: TipoPasso::Retomada,
+            execucao: Some(1),
+            modo: "Full Scan".into(),
+            no_inventario: false,
+            passada: 0,
+            de: 0,
+        }));
+        j.registrar_progresso(&Progresso::Hash(ProgressoHash {
+            arquivos_feitos: 8_000_000,
+            arquivos_total: 19_700_000,
+            bytes_lidos: 5 << 40,
+            bytes_total: 12 << 40,
+            bytes_por_seg: 210.0 * 1048576.0,
+            reaproveitados: 7_900_000,
+            execucao: Some(1),
+            threads_por_disco: 1,
+            max_discos: 4,
+            erros: 3,
+            arquivos_por_seg: 205.0,
+            janela_ms: 30_000,
+            discos: vec![
+                ProgressoDiscoHash {
+                    disco: "WD Red 4TB".into(),
+                    volumes: vec![1, 2],
+                    threads: 1,
+                    leitores_ativos: 1,
+                    arquivos_feitos: 3_000_000,
+                    arquivos_total: 9_000_000,
+                    bytes_lidos: 2 << 40,
+                    bytes_total: 6 << 40,
+                    bytes_por_seg: 110.0 * 1048576.0,
+                    ativo: true,
+                    concluido: false,
+                },
+                ProgressoDiscoHash {
+                    disco: "Seagate Barracuda".into(),
+                    volumes: vec![3],
+                    threads: 1,
+                    leitores_ativos: 0,
+                    arquivos_feitos: 40,
+                    arquivos_total: 40,
+                    bytes_lidos: 1 << 30,
+                    bytes_total: 1 << 30,
+                    bytes_por_seg: 0.0,
+                    ativo: false,
+                    concluido: true,
+                },
+            ],
+            ..ProgressoHash::default()
+        }));
+        j
+    }
+
+    #[test]
+    fn jobs_mostra_o_painel_do_hash_em_palavras_simples() {
+        let t = jobs_com_catalogo(
+            &[job_de_hash()],
+            Some(TotaisCatalogoPainel {
+                arquivos: 19_700_000,
+                com_hash: Some(8_100_000),
+            }),
+            Some(1_000 + 4272),
+        );
+        println!("{t}");
+        for esperado in [
+            "Em andamento: Retomada do hash da execução #1 (Full Scan) — há 1h 11min",
+            "no agente em segundo plano (pid 4242) — pode fechar a janela",
+            "iniciado por: abertura do agente",
+            "1 thread(s) por disco, até 4 disco(s) em paralelo",
+            "7.999.997 com hash de 19.700.000",
+            "pendentes 11.700.000",
+            "reaproveitados 7.900.000",
+            "erros 3",
+            "Bytes lidos nesta etapa: 5,0 TiB de 12,0 TiB",
+            "arquivos/min",
+            "tempo restante: 9h",
+            "WD Red 4TB",
+            "Seagate Barracuda",
+            "lendo",
+            "concluído",
+            "Catálogo: 19.700.000 arquivos, 8.100.000 com hash",
+        ] {
+            assert!(t.contains(esperado), "faltou {esperado:?} em:\n{t}");
+        }
+        assert!(!t.contains("Encontrados até agora"), "{t}");
+        assert!(!t.contains("Descobrindo volumes"), "{t}");
+    }
+
+    #[test]
+    fn status_mostra_o_catalogo_com_hash() {
+        let cat = dag_core::ResumoCatalogo {
+            volumes: 4,
+            pastas: 10,
+            arquivos: 200,
+            bytes_logicos: 1 << 30,
+            arquivos_com_hash: 50,
+        };
+        let t = status(&[], &cat);
+        assert!(t.contains("200 arquivos (50 com hash, 25,0%)"), "{t}");
     }
 }

@@ -507,3 +507,90 @@ fn raiz_de_execucao_retomada_e_da_politica_entra_uma_vez_so() {
     let (execs, _) = status(&mut a);
     assert!(execs.iter().all(|e| e.estado == EstadoExecucao::Concluida));
 }
+
+#[test]
+fn retomada_de_hash_na_abertura_emite_progresso_de_hash_por_disco() {
+    use dag_core::{JobInfo, Progresso, TipoPasso};
+    use std::sync::{Arc, Mutex};
+
+    let t = arvore();
+    let id = queda_no_hash(&t);
+    let eventos: Arc<Mutex<Vec<Progresso>>> = Arc::default();
+    let destino = Arc::clone(&eventos);
+    let mut a = Agente::abrir(&t.catalogo)
+        .unwrap()
+        .com_progresso(move |p| destino.lock().unwrap().push(p.clone()))
+        .com_volumes_fixos(vec![volume(&t.raiz)]);
+    let rel = a.recuperar_ao_abrir(&politica(false)).unwrap();
+    assert_eq!(rel.retomadas, vec![id]);
+    let eventos = eventos.lock().unwrap().clone();
+
+    // O passo estruturado diz que é a retomada do hash da execução.
+    let passo = eventos
+        .iter()
+        .find_map(|e| match e {
+            Progresso::Passo(p) if p.tipo == TipoPasso::Retomada => Some(p.clone()),
+            _ => None,
+        })
+        .expect("passo de retomada");
+    assert_eq!(passo.execucao, Some(id));
+    assert!(!passo.no_inventario);
+
+    // A etapa de hash da retomada emite ProgressoHash completo, com dados por disco.
+    // (só os eventos do passo da retomada: a verificação seguinte tem os seus.)
+    let fim_do_passo = eventos
+        .iter()
+        .position(|e| matches!(e, Progresso::Passo(p) if p.tipo == TipoPasso::Verificacao))
+        .unwrap_or(eventos.len());
+    let hashes: Vec<_> = eventos[..fim_do_passo]
+        .iter()
+        .filter_map(|e| match e {
+            Progresso::Hash(h) => Some(h),
+            _ => None,
+        })
+        .collect();
+    assert!(hashes.first().is_some_and(|h| h.preparando), "{hashes:?}");
+    let ultimo = hashes.last().unwrap();
+    assert!(!ultimo.preparando);
+    assert_eq!(ultimo.execucao, Some(id));
+    assert_eq!(ultimo.arquivos_total, 4);
+    assert_eq!(ultimo.arquivos_feitos, 4);
+    assert_eq!(ultimo.reaproveitados, 2);
+    assert!(ultimo.threads_por_disco >= 1 && ultimo.max_discos >= 1);
+    assert!(!ultimo.discos.is_empty(), "um item por disco físico");
+    let d = &ultimo.discos[0];
+    assert!(!d.disco.is_empty() && !d.volumes.is_empty());
+    assert_eq!(d.threads, ultimo.threads_por_disco);
+    assert!(d.concluido && d.arquivos_total == 2, "{d:?}");
+
+    // Um cliente que só aplica os eventos ao trabalho vê o painel certo (sem inventário).
+    let mut job = JobInfo {
+        id: 1,
+        tipo: dag_core::TipoJob::Abertura,
+        origem: dag_core::OrigemJob::Abertura,
+        raizes: Vec::new(),
+        estado: dag_core::EstadoJob::Executando,
+        execucao: None,
+        etapa: None,
+        progresso: Vec::new(),
+        criado_em: 0,
+        passo: None,
+        agente_pid: Some(77),
+    };
+    for e in &eventos {
+        if matches!(e, Progresso::Passo(p) if p.tipo == TipoPasso::Verificacao) {
+            break;
+        }
+        job.registrar_progresso(e);
+    }
+    let painel = job.painel(job.onde_no_agente(), None, None);
+    assert!(
+        painel.titulo.starts_with("Retomada do hash da execução #"),
+        "{}",
+        painel.titulo
+    );
+    assert!(painel.inventario.is_none());
+    let texto = painel.linhas().join("\n");
+    assert!(texto.contains("(pid 77)"), "{texto}");
+    assert!(texto.contains("thread(s) por disco"), "{texto}");
+}

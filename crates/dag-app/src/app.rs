@@ -11,7 +11,11 @@ use bancada_casca::{
     ItemNavegacao, Local, Rota, SegmentoStatus, Tom,
 };
 use dag_agent::{ErroAgente, caminho_catalogo_do_ambiente, caminho_do_lock};
-use dag_core::{Comando, JobInfo, ModoVarredura, OrigemJob, Resposta, TipoJob, VolumeDescoberto};
+use dag_core::painel::{ContagemInventario, TotaisCatalogoPainel};
+use dag_core::{
+    Comando, EntradaPainel, JobInfo, ModoVarredura, Onde, OrigemJob, PainelJob, Resposta, TipoJob,
+    VolumeDescoberto,
+};
 use dag_scanner::EstadoControle;
 use dag_store::consulta_gui::{self, TotaisCatalogo};
 
@@ -33,6 +37,9 @@ pub const MOTIVO_FUTURO: &str = "Chega em um incremento posterior";
 const MOTIVO_SEM_ESCRITA: &str = "Este processo não é o escritor do Catálogo";
 const MOTIVO_SCAN_ATIVO: &str = "Há uma varredura em andamento";
 const MOTIVO_RECONECTANDO: &str = "O agente está desconectado; a GUI está reconectando";
+
+/// De quanto em quanto tempo os totais do Catálogo são relidos enquanto há um trabalho.
+const INTERVALO_TOTAIS: Duration = Duration::from_secs(30);
 
 /// Quantos avisos ficam na faixa de mensagens.
 const MAX_AVISOS: usize = 4;
@@ -121,13 +128,16 @@ pub struct ScanAtivo {
     /// O trabalho do agente que esta varredura é (quem o iniciou, estado, execução). `None` no
     /// modo em processo ou enquanto o pedido ainda não chegou ao agente.
     pub job: Option<JobInfo>,
+    /// Passo estruturado da abertura (retomada, passada de verificação), quando há um.
+    pub passo: Option<dag_core::PassoAbertura>,
 }
 
 /// Id do pseudo-pedido que representa a recuperação ao abrir (os pedidos reais começam em 1).
 pub const PEDIDO_ABERTURA: u64 = 0;
 
 impl ScanAtivo {
-    fn novo(pedido: u64, sem_hash: bool) -> Self {
+    #[must_use]
+    pub fn novo(pedido: u64, sem_hash: bool) -> Self {
         Self {
             pedido,
             sem_hash,
@@ -137,7 +147,59 @@ impl ScanAtivo {
             amostras_hash: Vec::new(),
             abertura: None,
             job: None,
+            passo: None,
         }
+    }
+
+    /// Painel do que roda agora, em palavras simples (modo, etapa, onde, totais, discos).
+    #[must_use]
+    pub fn painel(
+        &self,
+        onde: Onde,
+        pausado: bool,
+        catalogo: Option<TotaisCatalogoPainel>,
+    ) -> PainelJob {
+        let tipo = match &self.job {
+            Some(j) => Some(j.tipo),
+            None if self.abertura.is_some() => Some(TipoJob::Abertura),
+            None => Some(TipoJob::FullScan),
+        };
+        let mut e = EntradaPainel::vazia(onde);
+        e.tipo = tipo;
+        e.origem = self.job.as_ref().map(|j| j.origem);
+        e.estado = self.job.as_ref().map(|j| j.estado);
+        e.pausado = pausado;
+        e.execucao = self
+            .job
+            .as_ref()
+            .and_then(|j| j.execucao)
+            .or_else(|| self.progresso.as_ref().map(|p| p.execucao));
+        e.passo = self
+            .passo
+            .as_ref()
+            .or(self.job.as_ref().and_then(|j| j.passo.as_ref()));
+        e.etapa_texto = self.abertura.as_deref();
+        e.sem_hash = self.sem_hash;
+        e.hash = self.bytes_hash.as_ref();
+        e.verificacao = tipo == Some(TipoJob::VerificacaoIntegridade);
+        e.reconciliacao = tipo == Some(TipoJob::FastScan)
+            || e.passo
+                .is_some_and(|p| p.tipo == dag_core::TipoPasso::Verificacao);
+        e.inventario = self.progresso.as_ref().map(|p| ContagemInventario {
+            pastas: p.pastas,
+            arquivos: p.arquivos,
+            bytes: p.bytes_logicos,
+            pendentes: p.pendentes,
+            itens_por_s: p.itens_por_s,
+            erros: p.erros,
+            decorrido_ms: u64::try_from(p.decorrido.as_millis()).unwrap_or(u64::MAX),
+        });
+        e.decorrido_s = Some(match &self.job {
+            Some(j) => u64::try_from(agora_s() - j.criado_em).unwrap_or(0),
+            None => self.inicio.elapsed().as_secs(),
+        });
+        e.catalogo = catalogo;
+        PainelJob::montar(&e)
     }
 
     /// Varredura de um trabalho que a GUI não pediu (CLI, MCP, abertura do agente...).
@@ -192,6 +254,12 @@ impl ScanAtivo {
     }
 }
 
+fn agora_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+}
+
 /// Resumo da última varredura terminada nesta sessão.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumoScan {
@@ -226,6 +294,9 @@ pub struct AppDag {
     pub ultimo_scan: Option<ResumoScan>,
     pub totais: Carga<TotaisCatalogo>,
     totais_geracao: u64,
+    /// Quando os totais foram pedidos pela última vez (durante um trabalho, de tempos em tempos,
+    /// para a contagem de arquivos com hash acompanhar).
+    totais_pedidos_em: Option<Instant>,
     pub discos: discos::Estado,
     /// Classe dos volumes (física, imagem...), vinda de `ListarVolumes`.
     pub classificacao: Classificacao,
@@ -294,6 +365,7 @@ impl AppDag {
             ultimo_scan: None,
             totais: Carga::default(),
             totais_geracao: 0,
+            totais_pedidos_em: None,
             discos: discos::Estado::default(),
             classificacao,
             classificacao_pedida: false,
@@ -572,6 +644,20 @@ impl AppDag {
                         s.progresso = Some(p);
                     }
                 }
+                Evento::Passo(p) => {
+                    // Passo novo da abertura: o andamento do anterior (hash, inventário) não vale
+                    // mais e nunca deve aparecer no passo seguinte.
+                    let foco = self.foco;
+                    let s = self
+                        .scan
+                        .get_or_insert_with(|| ScanAtivo::novo(PEDIDO_ABERTURA, false));
+                    if s.do_foco(foco) {
+                        s.progresso = None;
+                        s.bytes_hash = None;
+                        s.amostras_hash.clear();
+                        s.passo = Some(p);
+                    }
+                }
                 Evento::Hash(h) => {
                     let foco = self.foco;
                     if let Some(s) = self.scan.as_mut().filter(|s| s.do_foco(foco)) {
@@ -591,8 +677,13 @@ impl AppDag {
                 Evento::Resposta { id, resposta } => self.tratar_resposta(id, *resposta),
             }
         }
-        if self.totais_geracao != self.geracao {
+        let renovar = self.scan.is_some()
+            && self
+                .totais_pedidos_em
+                .is_none_or(|t| t.elapsed() >= INTERVALO_TOTAIS);
+        if self.totais_geracao != self.geracao || renovar {
             self.totais_geracao = self.geracao;
+            self.totais_pedidos_em = Some(Instant::now());
             self.totais.pedir(
                 self.leitor
                     .consultar(|c| consulta_gui::totais_do_catalogo(c).map_err(erro)),
@@ -950,9 +1041,10 @@ impl AppDag {
             || "Catálogo: —".to_string(),
             |t| {
                 format!(
-                    "Catálogo: {} volume(s) · {} arquivo(s) · {}",
+                    "Catálogo: {} volume(s) · {} arquivo(s) · {} com hash · {}",
                     inteiro_pt_br(t.volumes),
                     inteiro_pt_br(t.arquivos),
+                    inteiro_pt_br(t.arquivos_com_hash),
                     bytes_humanos(t.bytes_logicos)
                 )
             },
@@ -965,45 +1057,59 @@ impl AppDag {
         v
     }
 
+    /// Onde o trabalho em andamento roda: no agente em segundo plano (pid, se o trabalho já o
+    /// informou) ou nesta janela (modo sem agente).
+    #[must_use]
+    pub fn onde_roda(&self) -> Onde {
+        match self.worker.modo() {
+            ModoWorker::Escritor => Onde::Janela,
+            _ => Onde::Agente {
+                pid: self
+                    .scan
+                    .as_ref()
+                    .and_then(|s| s.job.as_ref())
+                    .and_then(|j| j.agente_pid)
+                    .or_else(|| self.worker.jobs().iter().find_map(|j| j.agente_pid)),
+            },
+        }
+    }
+
+    /// Totais do Catálogo para o painel.
+    #[must_use]
+    pub fn totais_do_painel(&self) -> Option<TotaisCatalogoPainel> {
+        self.totais.dado.map(|t| TotaisCatalogoPainel {
+            arquivos: t.arquivos,
+            com_hash: Some(t.arquivos_com_hash),
+        })
+    }
+
+    /// O painel do trabalho em andamento, se há um.
+    #[must_use]
+    pub fn painel_do_scan(&self) -> Option<PainelJob> {
+        let s = self.scan.as_ref()?;
+        let pausado = self.estado_do_scan() == Some(EstadoControle::Pausado);
+        Some(s.painel(self.onde_roda(), pausado, self.totais_do_painel()))
+    }
+
     fn segmento_da_fase(&self) -> SegmentoStatus {
-        let Some(s) = &self.scan else {
+        let Some(p) = self.painel_do_scan() else {
             return SegmentoStatus::novo("fase", "Varredura: ociosa");
         };
-        let pausado = self.estado_do_scan() == Some(EstadoControle::Pausado);
-        if let Some(etapa) = &s.abertura {
-            let pct = s
-                .andamento_hash()
-                .filter(|h| h.total > 0)
-                .map(|h| format!(" ({}%)", h.concluidos * 100 / h.total))
-                .unwrap_or_default();
-            let t = format!(
-                "Varredura: {etapa}{pct}{}",
-                if pausado { " — pausada" } else { "" }
-            );
-            return SegmentoStatus::novo("fase", t)
-                .tom(if pausado { Tom::Aviso } else { Tom::Info })
-                .dica("Recuperação ao abrir o Catálogo; veja a página Varredura");
-        }
-        let fase = crate::progresso::fase_texto(s.fase(), pausado, s.sem_hash);
-        let detalhe = match (&s.progresso, s.andamento_hash()) {
-            (_, Some(h)) if s.fase() == Some(FaseScan::Concluido) && !s.sem_hash => format!(
-                " — {}/{} arquivos",
-                inteiro_pt_br(h.concluidos),
-                inteiro_pt_br(h.total)
-            ),
-            (Some(p), _) => format!(
-                " — {} pastas, {} arquivos",
-                inteiro_pt_br(p.pastas),
-                inteiro_pt_br(p.arquivos)
-            ),
-            _ => String::new(),
+        let onde = match self.onde_roda() {
+            Onde::Agente { .. } => " · no agente (pode fechar)",
+            Onde::Janela => " · nesta janela",
         };
-        let origem = s
-            .origem_externa()
+        let origem = self
+            .scan
+            .as_ref()
+            .and_then(ScanAtivo::origem_externa)
             .map_or_else(String::new, |o| format!(" [iniciada por {}]", o.rotulo()));
-        SegmentoStatus::novo("fase", format!("Varredura: {fase}{detalhe}{origem}"))
-            .tom(if pausado { Tom::Aviso } else { Tom::Info })
-            .dica("Veja a página Varredura para os detalhes")
+        SegmentoStatus::novo(
+            "fase",
+            format!("Varredura: {}{onde}{origem}", p.linha_status()),
+        )
+        .tom(if p.pausado { Tom::Aviso } else { Tom::Info })
+        .dica(p.linhas().join("\n"))
     }
 
     /// Ações da lista única, com o estado deste quadro.

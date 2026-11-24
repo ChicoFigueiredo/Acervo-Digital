@@ -14,6 +14,7 @@ pub mod formato;
 pub mod hash;
 pub mod ids;
 pub mod jobs;
+pub mod painel;
 pub mod plataforma;
 pub mod progresso;
 pub mod reconciliacao;
@@ -46,9 +47,11 @@ pub use duplicados::{
 pub use hash::{HashCompleto, HashInvalido};
 pub use ids::{ArquivoId, DispositivoId, ExecucaoId, GrupoId, MarcacaoId, PastaId, VolumeId};
 pub use jobs::{EstadoJob, EventoAgente, JobInfo, OrigemJob, TipoJob, VisaoJobs, job_em_foco};
+pub use painel::{EntradaPainel, Onde, PainelJob};
 pub use plataforma::{ErroPlataforma, Mecanismos, Plataforma, SistemaOperacional};
 pub use progresso::{
-    FaseInventario, Progresso, ProgressoDiscoHash, ProgressoHash, ProgressoInventario,
+    FaseInventario, PassoAbertura, Progresso, ProgressoDiscoHash, ProgressoHash,
+    ProgressoInventario, TipoPasso,
 };
 pub use reconciliacao::{EventoInfo, ResumoMonitorInfo, ResumoReconciliacao, SaudeMonitorInfo};
 pub use tipos::{

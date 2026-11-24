@@ -20,7 +20,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use dag_core::{ExecucaoId, OpcoesHash, Resposta};
+use dag_core::{ExecucaoId, OpcoesHash, PassoAbertura, Resposta, TipoPasso};
 use dag_store::inventario::{self, ExecucaoInterrompida};
 use dag_store::{confianca, reconciliacao};
 
@@ -202,6 +202,18 @@ impl Agente {
                 ));
                 continue;
             }
+            self.passo(PassoAbertura {
+                tipo: TipoPasso::Retomada,
+                execucao: Some(e.id),
+                modo: if e.modo == "fast" {
+                    "Fast Scan".into()
+                } else {
+                    "Full Scan".into()
+                },
+                no_inventario: e.no_inventario,
+                passada: 0,
+                de: 0,
+            });
             self.mensagem(format!(
                 "abertura: etapa 1 de 2: retomando a execução #{} ({})",
                 e.id,
@@ -283,6 +295,14 @@ impl Agente {
         };
         let mut convergiu = false;
         for n in 1..=teto {
+            self.passo(PassoAbertura {
+                tipo: TipoPasso::Verificacao,
+                execucao: None,
+                modo: "Fast Scan".into(),
+                no_inventario: false,
+                passada: n,
+                de: teto,
+            });
             self.mensagem(format!(
                 "abertura: etapa 2 de 2: passada {n}/{teto} de verificação (Fast Scan, hash só do que é novo ou mudou)"
             ));

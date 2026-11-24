@@ -115,6 +115,8 @@ pub struct TotaisCatalogo {
     pub pastas: u64,
     pub arquivos: u64,
     pub bytes_logicos: u64,
+    /// Arquivos do Catálogo com hash gravado (linhas de `hashes`).
+    pub arquivos_com_hash: u64,
 }
 
 /// Soma dos agregados por Volume.
@@ -129,11 +131,13 @@ pub fn totais_do_catalogo(conn: &Connection) -> Resultado<TotaisCatalogo> {
         [],
         |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
     )?;
+    let com_hash: i64 = conn.query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))?;
     Ok(TotaisCatalogo {
         volumes: n(volumes),
         pastas: n(pastas),
         arquivos: n(arquivos),
         bytes_logicos: n(bytes),
+        arquivos_com_hash: n(com_hash),
     })
 }
 

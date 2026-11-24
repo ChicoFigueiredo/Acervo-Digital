@@ -213,6 +213,13 @@ impl Agente {
         }
     }
 
+    /// Emite o passo estruturado da rotina de abertura (retomada, passada de verificação).
+    pub(crate) fn passo(&self, passo: dag_core::PassoAbertura) {
+        if let Some(p) = &self.progresso {
+            p(&Progresso::Passo(passo));
+        }
+    }
+
     /// Consolida o WAL no arquivo principal (encerramento limpo do serviço).
     pub fn checkpoint(&self) {
         let _ = self
@@ -1057,6 +1064,7 @@ impl Agente {
             |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?)),
         )?;
         let total: i64 = conn.query_row("SELECT COUNT(*) FROM volumes", [], |l| l.get(0))?;
+        let com_hash: i64 = conn.query_row("SELECT COUNT(*) FROM hashes", [], |l| l.get(0))?;
         let volumes = total - i64::try_from(ruido.len()).unwrap_or(0);
         let n = |x: i64| u64::try_from(x).unwrap_or(0);
         Ok(Resposta::Status {
@@ -1066,6 +1074,7 @@ impl Agente {
                 pastas: n(pastas),
                 arquivos: n(arquivos),
                 bytes_logicos: n(bytes),
+                arquivos_com_hash: n(com_hash),
             },
             monitor: Some(self.saude_monitor()?),
             confianca: self.status_confianca()?,
@@ -1374,11 +1383,22 @@ fn sink_hash(
             bytes_total: h.bytes_total,
             bytes_por_seg: h.bytes_por_seg,
             reaproveitados: h.reaproveitados,
+            execucao: Some(h.execucao),
+            threads_por_disco: h.threads_por_disco,
+            max_discos: h.max_discos,
+            erros: h.erros,
+            arquivos_por_seg: h.arquivos_por_seg,
+            janela_ms: h.janela_ms,
+            decorrido_ms: h.decorrido_ms,
+            preparando: h.preparando,
             discos: h
                 .discos
                 .iter()
                 .map(|d| dag_core::ProgressoDiscoHash {
                     disco: d.disco.clone(),
+                    volumes: d.volumes.clone(),
+                    threads: d.threads,
+                    leitores_ativos: d.leitores_ativos,
                     arquivos_feitos: d.arquivos_feitos,
                     arquivos_total: d.arquivos_total,
                     bytes_lidos: d.bytes_lidos,

@@ -120,6 +120,9 @@ pub enum Evento {
     /// Etapa de Hash Completo (ou verificação): arquivos e bytes reais, sem consultar o
     /// Catálogo.
     Hash(dag_core::ProgressoHash),
+    /// Passo estruturado da abertura (retomada, passada de verificação): zera o andamento dos
+    /// passos anteriores.
+    Passo(dag_core::PassoAbertura),
     /// Resposta ao pedido `id`.
     Resposta { id: u64, resposta: Box<Resposta> },
     /// Recuperação ao abrir (execução interrompida retomada, verificação das Raízes). `fim`
@@ -500,13 +503,17 @@ impl Encaminhador {
                 Evento::Progresso(ProgressoScan::from(i))
             }
             Progresso::Hash(h) | Progresso::Verificacao(h) => {
-                let fim = h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total;
+                // A montagem da fila e o primeiro quadro com os totais passam sempre.
+                let fim = h.preparando
+                    || h.janela_ms == 0
+                    || (h.arquivos_total > 0 && h.arquivos_feitos >= h.arquivos_total);
                 if !fim && g.ultimo_hash.elapsed() < CADENCIA {
                     return;
                 }
                 g.ultimo_hash = Instant::now();
                 Evento::Hash(h.clone())
             }
+            Progresso::Passo(p) => Evento::Passo(p.clone()),
             // Passos da recuperação ao abrir (retomada, passadas de verificação) viram o texto da
             // faixa/barra de status; as demais mensagens são só do terminal.
             Progresso::Mensagem { texto } => match texto.strip_prefix("abertura: ") {
@@ -540,6 +547,7 @@ impl Tradutor {
                 saida.push(Evento::Progresso(ProgressoScan::from(i)));
             }
             Progresso::Hash(h) | Progresso::Verificacao(h) => saida.push(Evento::Hash(h.clone())),
+            Progresso::Passo(p) => saida.push(Evento::Passo(p.clone())),
             Progresso::Mensagem { .. } => {}
         }
     }
@@ -585,6 +593,9 @@ impl Tradutor {
                     });
                 }
                 if let Some(f) = self.visao.em_foco() {
+                    if let Some(p) = &f.passo {
+                        out.push(Evento::Passo(p.clone()));
+                    }
                     for p in &f.progresso {
                         Self::progresso_de(p, out);
                     }
@@ -620,6 +631,10 @@ impl Tradutor {
                         texto: t.to_string(),
                         fim: false,
                     });
+                }
+                if matches!(p, Progresso::Passo(_)) {
+                    // O passo vive no trabalho: a GUI o lê da lista de trabalhos também.
+                    out.push(Evento::Jobs(self.visao.jobs.clone()));
                 }
                 if self.visao.em_foco().is_some_and(|f| f.id == *job) {
                     Self::progresso_de(p, out);

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::manual_is_multiple_of,
+    clippy::type_complexity
+)]
 //! VHDX e qcow2: discos virtuais fixos, dinâmicos, esparsos e comprimidos.
 
 mod common;

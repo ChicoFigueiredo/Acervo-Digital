@@ -7,6 +7,7 @@ pub mod fuzz;
 pub mod iso;
 pub mod ntfs;
 pub mod part;
+pub mod udf;
 pub mod virt;
 
 use dag_imagens::{Controle, Imagem, Resumo, TipoMembro, abrir};

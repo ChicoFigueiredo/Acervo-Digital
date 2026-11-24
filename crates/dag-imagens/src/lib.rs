@@ -1,3 +1,4 @@
+#![allow(clippy::chunks_exact_to_as_chunks)]
 //! Leitor somente leitura de Imagens de Disco, em Rust puro e sem `unsafe`.
 //!
 //! Nada é extraído, montado ou gravado: o conteúdo de cada membro é entregue em

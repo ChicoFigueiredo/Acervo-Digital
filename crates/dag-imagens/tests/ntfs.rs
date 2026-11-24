@@ -1,9 +1,10 @@
+#![allow(clippy::unwrap_used, clippy::manual_is_multiple_of)]
 mod common;
 
 use common::ntfs::{Opc, ntfs_img};
 use common::*;
 use dag_imagens::{Controle, SistemaArquivos, TipoMembro, abrir};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 fn arvore() -> Vec<(String, No)> {
     let mut a = exemplo();

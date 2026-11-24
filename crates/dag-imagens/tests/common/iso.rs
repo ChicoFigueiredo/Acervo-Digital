@@ -151,7 +151,7 @@ impl G {
         let pai_e = pai.unwrap_or((ext, tam as u32));
         // 2) gera os registros finais
         let mut bytes: Vec<u8> = Vec::new();
-        let mut colocar = |bytes: &mut Vec<u8>, r: Vec<u8>| {
+        let colocar = |bytes: &mut Vec<u8>, r: Vec<u8>| {
             if bytes.len() % S + r.len() > S {
                 let n = (bytes.len() / S + 1) * S;
                 bytes.resize(n, 0);

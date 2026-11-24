@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::manual_is_multiple_of)]
 mod common;
 
 use common::*;
@@ -50,7 +51,7 @@ fn arv_links() -> Vec<(String, No)> {
 #[test]
 fn iso9660_variantes() {
     for (joliet, rr) in [(false, false), (true, false), (false, true), (true, true)] {
-        let arv = if rr || joliet { exemplo() } else { exemplo() };
+        let arv = exemplo();
         let bytes = iso::iso_img(&arv, joliet, rr);
         assert_eq!(detectar(&mut Cursor::new(&bytes)), Some(FormatoImagem::Iso));
         let (sa, itens) = sistema_unico(bytes);

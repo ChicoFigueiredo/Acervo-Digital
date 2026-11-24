@@ -71,7 +71,7 @@ impl B {
     }
     fn dir(&mut self, entradas: &[(String, No)], chain: &[u32], pai: u32, raiz: bool) {
         let mut out: Vec<u8> = Vec::new();
-        let mut ent = |nome: &[u8; 11], attr: u8, cl: u32, tam: u32| {
+        let ent = |nome: &[u8; 11], attr: u8, cl: u32, tam: u32| {
             let mut e = [0u8; 32];
             e[..11].copy_from_slice(nome);
             e[11] = attr;

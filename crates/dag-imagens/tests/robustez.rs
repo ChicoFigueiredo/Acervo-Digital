@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::manual_is_multiple_of)]
 //! Testes estilo fuzz: imagens corrompidas nunca podem causar pânico nem laço infinito.
 
 mod common;

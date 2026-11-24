@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::manual_is_multiple_of)]
 //! Testes de ext2/3/4 com imagens geradas por `mke2fs -d` (sem root, sem montar).
 
 mod common;

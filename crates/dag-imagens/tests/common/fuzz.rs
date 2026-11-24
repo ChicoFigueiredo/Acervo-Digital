@@ -1,7 +1,7 @@
 //! Corrupção aleatória reutilizável.
 
 use dag_imagens::{Controle, abrir};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 struct Rng(u64);
 impl Rng {

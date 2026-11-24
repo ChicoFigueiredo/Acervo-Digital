@@ -18,9 +18,6 @@ pub(crate) fn le32(b: &[u8], o: usize) -> u32 {
 pub(crate) fn le64(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(campo(b, o))
 }
-pub(crate) fn be16(b: &[u8], o: usize) -> u16 {
-    u16::from_be_bytes(campo(b, o))
-}
 pub(crate) fn be32(b: &[u8], o: usize) -> u32 {
     u32::from_be_bytes(campo(b, o))
 }

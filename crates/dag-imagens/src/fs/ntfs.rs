@@ -12,7 +12,6 @@ use std::io::{Cursor, empty};
 
 const T_STD: u32 = 0x10;
 const T_LISTA: u32 = 0x20;
-const T_NOME: u32 = 0x30;
 const T_DADOS: u32 = 0x80;
 const T_RAIZ_IDX: u32 = 0x90;
 const T_ALOC_IDX: u32 = 0xA0;
@@ -169,7 +168,7 @@ fn parse_attrs(b: &[u8]) -> Result<Vec<Attr>> {
             break;
         }
         let len = le32(b, p + 4) as usize;
-        if len < 16 || p + len > usado || len % 8 != 0 {
+        if len < 16 || p + len > usado || !len.is_multiple_of(8) {
             return corrompido("NTFS: atributo com tamanho inválido");
         }
         let a = &b[p..p + len];

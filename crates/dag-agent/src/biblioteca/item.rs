@@ -946,7 +946,49 @@ impl Agente {
                 )?;
             }
         }
+        self.impressao_textual(e, agora)?;
         Ok(SaidaItem { usou_ia })
+    }
+
+    /// B-14: impressão digital do texto das páginas e hipótese de mesma Edição/Obra contra
+    /// itens parecidos já processados (pré-filtro LSH por índice, com teto: nunca quadrático).
+    /// É só evidência: o candidato nunca é Exata, tem `bytes = 0` e não autoriza descarte.
+    fn impressao_textual(&mut self, e: &EntradaItem<'_>, agora: i64) -> Result<(), ErroAgente> {
+        use dag_biblio::impressao::{calcular, hipotese, jaccard_estimado};
+        const TETO_CANDIDATOS: usize = 20;
+        const MIN_BANDAS: u32 = 3;
+        let Some(imp) = calcular(e.resultado.paginas.iter().map(|p| p.texto.as_str())) else {
+            return Ok(());
+        };
+        let file_id = e.info.file_id;
+        let conn = self.conexao();
+        store::gravar_impressao(conn, file_id, e.membro, &imp, agora)?;
+        for c in store::candidatos_por_impressao(conn, file_id, &imp, MIN_BANDAS, TETO_CANDIDATOS)?
+        {
+            let j = jaccard_estimado(&imp, &c.impressao);
+            let Some(h) = hipotese(j) else { continue };
+            store::registrar_candidato(
+                conn,
+                &store::NovoCandidato {
+                    file_id,
+                    alvo: store::AlvoDuplicidade::Arquivo(c.file_id),
+                    tipo: h.tipo,
+                    evidencias_json: serde_json::json!({
+                        "evidencias": [h.evidencia],
+                        "origem": "impressao_textual",
+                        "jaccard_estimado": j,
+                        "bandas_em_comum": c.bandas_em_comum,
+                        "membro": (!e.membro.is_empty()).then_some(e.membro),
+                        "membro_alvo": (!c.membro.is_empty()).then_some(c.membro.as_str()),
+                    })
+                    .to_string(),
+                    risco: risco_store(h.risco),
+                    bytes: 0,
+                },
+                agora,
+            )?;
+        }
+        Ok(())
     }
 }
 

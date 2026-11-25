@@ -72,6 +72,10 @@ pub const MIGRACOES: &[Migracao] = &[
         "Curadoria Bibliográfica: título principal normalizado do espelho (pré-filtro de identidade)",
         migrar_titulo_principal,
     ),
+    Migracao::sql(
+        "Curadoria Bibliográfica: impressão digital textual (MinHash/LSH) por item, evidência de mesma Edição",
+        include_str!("../migrations/0013_impressao_textual.sql"),
+    ),
 ];
 
 /// Migração 0012: coluna aditiva `titulo_principal` e preenchimento do que já está no espelho.

@@ -390,6 +390,13 @@ impl IaLocal {
             p.endpoint.clone_from(&cfg.ia.endpoint);
             modelos.push(p);
         }
+        // Qwen3 (e outros com "thinking") respondem direto no JSON Schema só com `think: false`.
+        for m in &mut modelos {
+            if m.nome.to_lowercase().starts_with("qwen3") {
+                m.extras
+                    .insert("think".into(), serde_json::Value::Bool(false));
+            }
+        }
         let ia_cfg = ConfigIa {
             modelos,
             ..ConfigIa::default()

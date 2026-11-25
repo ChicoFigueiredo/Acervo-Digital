@@ -191,7 +191,7 @@ arquivo de outros casos, `mesma_edicao_que`, `mesma_obra_que`, `obra_diferente_d
 
 ```
 dag biblioteca ouro avaliar --casos /mnt/e2/ouro
-dag modelos benchmark --casos /mnt/e2/ouro --modelo gemma3:12b qwen2.5:14b-instruct-q4_K_M --saida benchmark.md
+dag modelos benchmark --casos /mnt/e2/ouro --modelo gemma3:12b qwen3:14b --saida benchmark.md
 ```
 
 `ouro avaliar` compara o gabarito com as sugestões gravadas e mostra, por campo, precisão,

@@ -15,14 +15,15 @@
       "nota": "instalado no computador do Chico (Ollama 0.33.3)"
     },
     {
-      "nome": "qwen2.5:14b-instruct-q4_K_M",
+      "nome": "qwen3:14b",
       "quantizacao": "Q4_K_M",
       "contexto": 8192,
       "multimodal": false,
       "endpoint": "http://127.0.0.1:11434",
       "backend": "ollama",
       "papel": "secundario",
-      "nota": "a instalar pelo usuário: ollama pull qwen2.5:14b-instruct-q4_K_M (alternativa: qwen3:14b com extras {\"think\": false})"
+      "extras": { "think": false },
+      "nota": "a instalar pelo usuário: ollama pull qwen3:14b"
     },
     {
       "nome": "llama-server-local",

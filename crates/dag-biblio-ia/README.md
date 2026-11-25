@@ -112,7 +112,7 @@ estimativas de ordem de grandeza: medir no benchmark antes de decidir.** Verific
 | Candidato | Parâmetros | Papel sugerido | Pesos Q4_K_M | Q5_K_M | Q8_0 | Observações |
 |---|---|---|---|---|---|---|
 | `gemma3:12b` | ~12 B | primário (instalado) | ~7 GB | ~8 GB | ~12 GB | multimodal (visão); ver medição abaixo |
-| Qwen2.5 14B instruct (`qwen2.5:14b-instruct-q4_K_M`) | ~14,7 B | segundo parecer (**a instalar pelo usuário**) | ~9 GB | ~10 GB | ~15 GB | só texto; Q4 cabe em 16 GB com contexto moderado |
+| Qwen3 14B (`qwen3:14b`, Q4_K_M) | ~14,8 B | segundo parecer, escolhido pelo Chico (**a instalar pelo usuário**) | ~9,3 GB | ~10 GB | ~15 GB | só texto; `think: false` nos extras; Q4 cabe em 16 GB com contexto moderado |
 | Qwen3 14B (`qwen3:14b`) | ~14,8 B | alternativa de segundo parecer (**a instalar**) | ~9 GB | ~10 GB | ~15 GB | modo "thinking": usar `extras {"think": false}` |
 | Qwen2.5 / Qwen3 7B–8B instruct | 7–8 B | rápido / CPU | ~4–5 GB | ~5–6 GB | ~8 GB | bom para triagem e fallback CPU |
 | Llama 3.1 8B instruct | 8 B | candidato | ~5 GB | ~6 GB | ~8,5 GB | português razoável; licença própria |

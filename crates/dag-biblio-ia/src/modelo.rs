@@ -148,18 +148,18 @@ fn cpt_padrao() -> f32 {
 
 impl Default for ConfigIa {
     /// Padrão para o computador do Chico: `gemma3:12b` (Ollama, multimodal) como primário e um
-    /// 14B quantizado como segundo parecer, marcado "a instalar pelo usuário".
+    /// `qwen3:14b` (Q4_K_M, sem "thinking") como segundo parecer, marcado "a instalar pelo usuário".
     fn default() -> Self {
         let mut primario = PerfilModelo::ollama("gemma3:12b", true, PapelModelo::Primario);
         primario.nota = Some("instalado no computador do Chico".into());
-        let mut segundo = PerfilModelo::ollama(
-            "qwen2.5:14b-instruct-q4_K_M",
-            false,
-            PapelModelo::Secundario,
-        );
+        // Escolhido pelo Chico em 25/11/2026. O Qwen3 "pensa" antes de responder; `think: false`
+        // desliga isso no Ollama, para a saída sair direto no JSON Schema.
+        let mut segundo = PerfilModelo::ollama("qwen3:14b", false, PapelModelo::Secundario);
         segundo.quantizacao = Some("Q4_K_M".into());
-        segundo.nota =
-            Some("a instalar pelo usuário (`ollama pull`); alternativa: qwen3:14b".into());
+        segundo
+            .extras
+            .insert("think".into(), serde_json::Value::Bool(false));
+        segundo.nota = Some("a instalar pelo usuário: `ollama pull qwen3:14b`".into());
         Self {
             modelos: vec![primario, segundo],
             limiar_confianca: limiar_padrao(),
@@ -241,7 +241,12 @@ mod testes {
         let c = ConfigIa::default();
         assert_eq!(c.modelos[0].nome, "gemma3:12b");
         assert!(c.modelos[0].multimodal);
-        assert!(c.com_papel(PapelModelo::Secundario).is_some());
+        let seg = c.com_papel(PapelModelo::Secundario).unwrap();
+        assert_eq!(seg.nome, "qwen3:14b");
+        assert_eq!(
+            seg.extras.get("think"),
+            Some(&serde_json::Value::Bool(false))
+        );
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(ConfigIa::de_json(&json).unwrap(), c);
     }

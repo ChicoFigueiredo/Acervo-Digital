@@ -1,0 +1,21 @@
+[package]
+name = "dag-platform-linux"
+description = "Descoberta somente-leitura de Volumes e Dispositivos Físicos no Linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dag-core.workspace = true
+dag-privileged-helper = { path = "../dag-privileged-helper" }
+rustix = { workspace = true, features = ["process"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

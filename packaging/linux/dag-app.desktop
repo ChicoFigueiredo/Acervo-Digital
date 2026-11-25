@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DAG — Acervo Digital
+GenericName=Catalogador de acervo digital
+Comment=Cataloga e analisa o acervo digital de seus discos, somente leitura
+Comment[pt_BR]=Cataloga e analisa o acervo digital de seus discos, somente leitura
+Exec=@EXEC@
+Icon=dag-app
+Terminal=false
+StartupWMClass=dag-app
+StartupNotify=true
+Categories=Utility;System;FileTools;
+Keywords=acervo;catálogo;arquivos;discos;duplicados;hash;inventário;backup;
+Keywords[pt_BR]=acervo;catálogo;arquivos;discos;duplicados;hash;inventário;backup;

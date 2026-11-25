@@ -1,0 +1,20 @@
+# Exemplo do que `dag servico instalar` gera em ~/.config/systemd/user/dag-agente.service.
+# Não copie à mão: o DAG escreve a unidade com o caminho real do binário e dos diretórios.
+[Unit]
+Description=DAG - agente em segundo plano (catálogo de discos, somente leitura sobre o acervo)
+
+[Service]
+Type=simple
+ExecStart="/usr/bin/dag" agente
+Restart=on-failure
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths="%h/.local/share/dag" "%h/.local/state/dag" "%t/dag"
+
+[Install]
+WantedBy=default.target

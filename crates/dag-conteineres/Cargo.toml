@@ -1,0 +1,28 @@
+[package]
+name = "dag-conteineres"
+description = "Leitura de Contêineres (compactados) em fluxo, na memória, sem extrair nada em disco (ADR 0006)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake3.workspace = true
+dag-imagens.workspace = true
+bzip2.workspace = true
+flate2.workspace = true
+lzma-rust2.workspace = true
+rars.workspace = true
+ruzstd.workspace = true
+sevenz-rust2.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+rars = { workspace = true, features = ["write", "encryption"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

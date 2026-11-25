@@ -1,0 +1,23 @@
+[package]
+name = "dag-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bancada-casca.workspace = true
+dag-agent.workspace = true
+dag-core.workspace = true
+dag-platform-linux.workspace = true
+dag-scanner.workspace = true
+dag-store.workspace = true
+png = "0.18"
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+dag-agent = { path = "crates/dag-agent" }
+dag-conteineres = { path = "crates/dag-conteineres" }
+dag-imagens = { path = "crates/dag-imagens" }
+dag-core = { path = "crates/dag-core" }
+dag-mcp = { path = "crates/dag-mcp" }
+dag-monitor = { path = "crates/dag-monitor" }
+dag-platform-linux = { path = "crates/dag-platform-linux" }
+dag-scanner = { path = "crates/dag-scanner" }
+dag-store = { path = "crates/dag-store" }
+# Bancada fixada em commit (decisão do grilling de 23/11/2026). Atualizar = trocar o rev.
+bancada-armazem = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+bancada-casca = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+rustix = { version = "1", features = ["fs", "event", "net", "process"] }
+ctrlc = { version = "3", features = ["termination"] }
+blake3 = "1"
+# Leitura de Contêineres (ADR 0006): tudo Rust puro, só leitura em fluxo. Versões fixadas.
+zip = { version = "9.8.2", default-features = false, features = ["aes-crypto", "bzip2", "deflate", "deflate64", "lzma"] }
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["aes256", "bzip2", "compress"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1.11"
+bzip2 = "0.6.1"
+lzma-rust2 = "0.25.0"
+ruzstd = "0.9.1"
+rars = { version = "0.13.0", default-features = false, features = ["encryption"] }
+bancada-segredos = { git = "https://github.com/ChicoFigueiredo/bancada", rev = "94818fd95dc74b5a42a7757b1d258ed17822ed06" }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "getrandom"] }
+getrandom = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

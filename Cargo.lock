@@ -1110,6 +1110,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dag-biblio-ebook"
+version = "0.1.0"
+dependencies = [
+ "dag-biblio",
+ "dag-conteineres",
+ "rars",
+ "roxmltree",
+ "sevenz-rust2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "zip",
+]
+
+[[package]]
 name = "dag-biblio-ia"
 version = "0.1.0"
 dependencies = [
@@ -3446,6 +3460,15 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "rsqlite-vfs"

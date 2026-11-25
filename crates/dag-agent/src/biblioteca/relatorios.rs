@@ -234,9 +234,10 @@ impl Agente {
                     format!(
                         "estimativa: nada é apagado; o descarte exige Cobertura e dupla \
                          confirmação. Fora da conta: {espelhos} cópia(s) em espelhos ou cópias \
-                         antigas de biblioteca Calibre ({:.1} GiB), que são candidatas a \
+                         antigas de biblioteca Calibre ({} GiB), que são candidatas a \
                          Cobertura, não a descarte.",
-                        bytes_espelhos as f64 / f64::from(1u32 << 30)
+                        format!("{:.1}", bytes_espelhos as f64 / f64::from(1u32 << 30))
+                            .replace('.', ",")
                     )
                 },
             },

@@ -146,6 +146,16 @@ _Avoid_: erro silenciado, exceção
 Releitura única, no fim da etapa de Hash Completo, dos arquivos que mudaram ou sumiram durante a leitura. Estável: ganha hash e o problema some. Ainda mudando ou ausente: vira Erro Esperado.
 _Avoid_: segunda tentativa, rehash
 
+### Biblioteca
+
+**Biblioteca Homologada**:
+Biblioteca Calibre oficial do usuário, já curada. É a referência de autores, tags, séries e estantes; o DAG só a lê, e qualquer mudança nela exige aprovação explícita do usuário.
+_Avoid_: biblioteca oficial, biblioteca principal, Calibre (sozinho)
+
+**A Classificar**:
+Biblioteca Calibre separada, criada pelo DAG, onde entram os livros candidatos para revisão antes da homologação. É área de trabalho: estar nela não autoriza descartar nada.
+_Avoid_: pré-catálogo, staging, caixa de entrada
+
 ## Relationships
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
@@ -164,8 +174,11 @@ _Avoid_: segunda tentativa, rehash
 - Um **Membro** não recebe marcação própria; marcações valem para o **Contêiner** inteiro.
 - Uma execução termina `concluida` (nenhum problema), `concluida_com_avisos` (só avisos, **Erros Esperados** ou **Erros Aceitos**) ou `concluida_com_erros` (algum erro real).
 - Um **Contêiner** cifrado é tentado primeiro com a **Senha do Contêiner** já guardada, depois com o **Cofre de Senhas**; só se tudo falhar vira **Pedido de Serviço** de senha, e os **Membros** ficam não lidos até a resposta.
+- Um livro só é sugerido para a **Lixeira do Volume** se tiver **Cobertura** com hash conferido; o fluxo bibliográfico não cria outro conceito de backup.
+- A **Biblioteca Homologada** e **A Classificar** são bibliotecas Calibre independentes; nada da **A Classificar** entra na **Biblioteca Homologada** sem aprovação do usuário.
 
 ## Flagged ambiguities
 
 - "backup" foi usado para a cópia preservada e para a Fase C (backup gerenciado). Aqui, a cópia preservada é **Marcação de Backup**; a Fase C não está neste escopo.
 - "compactado" às vezes quer dizer qualquer coisa que se abre por dentro, inclusive imagens de disco. Aqui, o termo geral é **Contêiner**; **Compactado** e **Imagem de Disco** são os dois tipos.
+- "backup verificado" na spec da Fase B é a **Cobertura**; "lixeira" é a **Lixeira do Volume**.

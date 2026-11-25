@@ -11,6 +11,7 @@
 //! (a Biblioteca Homologada é somente leitura).
 
 pub mod alertas;
+pub mod apoio;
 pub mod bibliotecas;
 pub mod cadastros;
 pub mod catalogo;
@@ -26,6 +27,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use alertas::*;
+pub use apoio::*;
 pub use bibliotecas::*;
 pub use cadastros::*;
 pub use catalogo::*;

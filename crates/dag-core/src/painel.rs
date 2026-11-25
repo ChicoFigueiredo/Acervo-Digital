@@ -474,6 +474,7 @@ fn titulo(e: &EntradaPainel<'_>, etapa: EtapaPainel) -> String {
         Some(TipoJob::Monitor) => "Monitor".into(),
         Some(TipoJob::Duplicados) => "Agrupando duplicados".into(),
         Some(TipoJob::Conteineres) => "Conteúdo de contêineres".into(),
+        Some(TipoJob::Biblioteca) => "Curadoria bibliográfica".into(),
         Some(TipoJob::FullScan) | None => {
             if etapa == EtapaPainel::Verificacao {
                 "Verificação de integridade".into()

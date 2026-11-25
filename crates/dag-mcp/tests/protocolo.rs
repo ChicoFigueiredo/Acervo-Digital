@@ -431,3 +431,261 @@ fn descricao_do_mover_avisa_das_confirmacoes_e_so_o_usuario_esvazia() {
     assert!(m["inputSchema"]["properties"]["confirmacao_1"].is_object());
     assert!(m["inputSchema"]["properties"]["confirmacao_2"].is_object());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Curadoria Bibliográfica
+// ---------------------------------------------------------------------------------------------
+
+const FERRAMENTAS_BIBLIOTECA: [&str; 19] = [
+    "biblioteca_listar",
+    "biblioteca_perfil",
+    "biblioteca_duplicatas",
+    "biblioteca_espaco",
+    "biblioteca_fila",
+    "biblioteca_revisao",
+    "biblioteca_alertas",
+    "biblioteca_resumo",
+    "biblioteca_config_obter",
+    "biblioteca_registrar",
+    "biblioteca_sincronizar",
+    "biblioteca_enfileirar",
+    "biblioteca_processar",
+    "biblioteca_marcar_visto",
+    "biblioteca_decidir",
+    "biblioteca_desfazer",
+    "biblioteca_cadastrar",
+    "biblioteca_propor_homologacao",
+    "biblioteca_config_definir",
+];
+
+fn recusa_de(nome: &str, args: Value) -> String {
+    let mut f = Falso::default();
+    let r = rodar(&mut f, &[chamar(nome, args)]);
+    assert_eq!(r[0]["result"]["isError"], true, "{r:?}");
+    assert!(f.pedidos.is_empty(), "nada pode ir ao worker");
+    r[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn biblioteca_tools_list_com_schema_estrito() {
+    let mut f = Falso::default();
+    let r = rodar(
+        &mut f,
+        &[json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})],
+    );
+    let ts = r[0]["result"]["tools"].as_array().unwrap();
+    for nome in FERRAMENTAS_BIBLIOTECA {
+        let t = ts
+            .iter()
+            .find(|t| t["name"] == nome)
+            .unwrap_or_else(|| panic!("falta {nome}"));
+        let s = &t["inputSchema"];
+        assert_eq!(s["type"], "object");
+        assert_eq!(s["additionalProperties"], false, "{nome}");
+        for req in s["required"].as_array().unwrap() {
+            assert!(s["properties"].get(req.as_str().unwrap()).is_some());
+        }
+        assert!(!t["description"].as_str().unwrap().is_empty());
+    }
+    // Nenhuma ferramenta de descarte de livro nem de aprovação.
+    for t in ts {
+        let n = t["name"].as_str().unwrap();
+        if n.starts_with("biblioteca_") {
+            assert!(FERRAMENTAS_BIBLIOTECA.contains(&n), "{n}");
+            assert!(!n.contains("descart") && !n.contains("aprovar"), "{n}");
+            let props = t["inputSchema"]["properties"].as_object().unwrap();
+            assert!(!props.contains_key("aprovacao"), "{n}");
+        }
+    }
+    let d = |n: &str| {
+        ts.iter().find(|t| t["name"] == n).unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(d("biblioteca_revisao").contains("NÃO CONFIÁVEL"));
+    assert!(d("biblioteca_duplicatas").contains("não iniciam descarte"));
+    assert!(d("biblioteca_propor_homologacao").contains("--aprovado-por"));
+    assert!(d("biblioteca_decidir").contains("autor `mcp`"));
+}
+
+#[test]
+fn biblioteca_traduz_argumentos_para_comandos() {
+    use dag_core::{AcaoRevisao, AlvoRevisao, ItemDecisao, MotivoFila, PapelRegistro};
+    let (c, a) = comando_de("biblioteca_listar", json!({}));
+    assert_eq!((c, a), (Comando::BibliotecaListar, Autor::Mcp));
+    let (c, _) = comando_de("biblioteca_perfil", json!({"biblioteca": 3}));
+    assert_eq!(
+        c,
+        Comando::BibliotecaPerfil {
+            biblioteca: "3".into()
+        }
+    );
+    let (c, _) = comando_de(
+        "biblioteca_registrar",
+        json!({"caminho": "/l", "papel": "a_classificar"}),
+    );
+    assert_eq!(
+        c,
+        Comando::BibliotecaRegistrar {
+            caminho: "/l".into(),
+            papel: PapelRegistro::AClassificar,
+            nome: None
+        }
+    );
+    let (c, _) = comando_de(
+        "biblioteca_enfileirar",
+        json!({"raizes": ["/a"], "motivo": "reprocessar"}),
+    );
+    assert_eq!(
+        c,
+        Comando::BibliotecaEnfileirar {
+            raizes: vec!["/a".into()],
+            motivo: Some(MotivoFila::Reprocessar)
+        }
+    );
+    let (c, _) = comando_de("biblioteca_processar", json!({"limite": 5, "ia": true}));
+    assert_eq!(
+        c,
+        Comando::BibliotecaProcessar {
+            limite: Some(5),
+            ia: true
+        }
+    );
+    let (c, _) = comando_de("biblioteca_espaco", json!({"volume": "HD1"}));
+    assert_eq!(
+        c,
+        Comando::BibliotecaRelatorioEspaco {
+            volume: Some("HD1".into())
+        }
+    );
+    let (c, _) = comando_de(
+        "biblioteca_decidir",
+        json!({"lote": "L", "itens": [
+            {"alvo": {"tipo": "arquivo", "id": 9}, "campo": "titulo", "acao": "corrigir", "valor": "Dom Casmurro"}]}),
+    );
+    assert_eq!(
+        c,
+        Comando::BibliotecaDecidir {
+            itens: vec![ItemDecisao {
+                alvo: AlvoRevisao::Arquivo(9),
+                campo: "titulo".into(),
+                acao: AcaoRevisao::Corrigir,
+                valor: Some("Dom Casmurro".into())
+            }],
+            lote: Some("L".into())
+        }
+    );
+    let (c, _) = comando_de("biblioteca_desfazer", json!({"lote": "L"}));
+    assert_eq!(c, Comando::BibliotecaDesfazer { lote: "L".into() });
+    let (c, _) = comando_de("biblioteca_cadastrar", json!({"itens": [1, 2]}));
+    assert_eq!(c, Comando::BibliotecaCadastrar { itens: vec![1, 2] });
+    let (c, _) = comando_de("biblioteca_marcar_visto", json!({"ids": [4]}));
+    assert_eq!(c, Comando::BibliotecaMarcarVisto { ids: vec![4] });
+    let (c, _) = comando_de(
+        "biblioteca_alertas",
+        json!({"nao_vistos": true, "limite": 10}),
+    );
+    assert_eq!(
+        c,
+        Comando::BibliotecaAlertas {
+            nao_vistos: true,
+            limite: Some(10),
+            cursor: None
+        }
+    );
+    let (c, _) = comando_de("biblioteca_config_obter", json!({}));
+    assert_eq!(c, Comando::BibliotecaConfigObter);
+}
+
+#[test]
+fn biblioteca_valida_argumentos_obrigatorios() {
+    assert!(recusa_de("biblioteca_decidir", json!({"itens": []})).contains("itens"));
+    let t = recusa_de(
+        "biblioteca_decidir",
+        json!({"itens": [{"alvo": {"tipo": "obra", "id": 1}, "campo": "titulo", "acao": "corrigir"}]}),
+    );
+    assert!(t.contains("valor"), "{t}");
+    assert!(recusa_de("biblioteca_enfileirar", json!({"raizes": []})).contains("raizes"));
+    assert!(recusa_de("biblioteca_perfil", json!({"x": 1})).contains("desconhecido"));
+}
+
+#[test]
+fn propor_homologacao_nunca_envia_aprovacao() {
+    let (c, a) = comando_de("biblioteca_propor_homologacao", json!({"item": 4}));
+    assert_eq!(a, Autor::Mcp);
+    assert_eq!(
+        c,
+        Comando::BibliotecaHomologar {
+            item: 4,
+            aprovacao: None
+        }
+    );
+    for args in [
+        json!({"item": 4, "aprovacao": {"quem": "Chico"}}),
+        json!({"item": 4, "aprovado_por": "Chico"}),
+        json!({"item": 4, "quem": "Chico"}),
+    ] {
+        let t = recusa_de("biblioteca_propor_homologacao", args);
+        assert!(t.contains("só propõe") && t.contains("pessoa"), "{t}");
+    }
+}
+
+#[test]
+fn aprovacao_humana_exigida_vira_explicacao_clara() {
+    let mut f = Falso {
+        resposta: Some(Resposta::Erro {
+            codigo: "aprovacao_humana_exigida".into(),
+            mensagem: "x".into(),
+        }),
+        ..Default::default()
+    };
+    let r = rodar(
+        &mut f,
+        &[chamar("biblioteca_propor_homologacao", json!({"item": 4}))],
+    );
+    let t = r[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(t.contains("GUI") && t.contains("CLI") && t.contains("--aprovado-por"));
+}
+
+#[test]
+fn config_definir_recusa_chaves_sensiveis() {
+    for (alt, trecho) in [
+        (json!({"usar_unshare": true}), "usar_unshare"),
+        (json!({"homologacao": {"senha_env": "X"}}), "senha"),
+        (
+            json!({"ia": {"endpoint": "http://10.0.0.5:11434"}}),
+            "loopback",
+        ),
+        (
+            json!({"ia": {"endpoint": "http://127.0.0.1@evil.com:1"}}),
+            "loopback",
+        ),
+        (
+            json!({"homologacao": {"url": "http://exemplo.com:17790"}}),
+            "loopback",
+        ),
+    ] {
+        let t = recusa_de("biblioteca_config_definir", json!({"alteracoes": alt}));
+        assert!(t.contains(trecho) && t.contains("Nada foi alterado"), "{t}");
+    }
+    assert!(
+        recusa_de(
+            "biblioteca_config_definir",
+            json!({"alteracoes": {"inexistente": 1}})
+        )
+        .contains("desconhecido")
+    );
+    // O resto passa, inclusive loopback.
+    let (c, a) = comando_de(
+        "biblioteca_config_definir",
+        json!({"alteracoes": {"ia": {"ativa": true, "endpoint": "http://localhost:11434"},
+            "homologacao": {"modo": "servidor", "url": "http://127.0.0.1:17790"},
+            "usar_unshare": false, "debounce_s": 10}}),
+    );
+    assert_eq!(a, Autor::Mcp);
+    assert!(matches!(c, Comando::BibliotecaConfigDefinir { .. }));
+}

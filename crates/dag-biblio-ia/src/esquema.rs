@@ -136,12 +136,9 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
         // aceitou ~20% menos campos por item, quase sem ganho de tempo (medição de 25/11).
         props.insert(nome_campo(c), esquema_campo(valor, 2));
     }
-    // Só título e autores são obrigatórios: campo sem evidência é omitido (cada `null` com a
-    // lista de evidências vazia custa tokens de saída, e a saída é o que pesa na IA local).
-    let nomes: Vec<String> = [Campo::Titulo, Campo::Autores]
-        .iter()
-        .map(|c| nome_campo(*c))
-        .collect();
+    // Todos os campos são obrigatórios (valor ou null): com campos opcionais (prompt/5) o modelo
+    // passou a omitir data, tags, resumo e até título (medição de 25/11).
+    let nomes: Vec<String> = CAMPOS_IA.iter().map(|c| nome_campo(*c)).collect();
     json!({
         "type": "object",
         "properties": {
@@ -338,7 +335,7 @@ mod testes {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            14
         );
         assert_eq!(
             esquema_visao()["properties"]["campos"]["required"]

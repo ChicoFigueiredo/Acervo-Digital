@@ -4,6 +4,7 @@
 //!
 //! O worker é o único escritor; a GUI e a CLI leem pela conexão de leitura (WAL).
 
+pub mod biblioteca;
 pub mod confianca;
 pub mod configuracao;
 pub mod consulta_gui;
@@ -62,6 +63,10 @@ pub const MIGRACOES: &[Migracao] = &[
     Migracao::codigo(
         "erros esperados e aceitos: classe em scan_errors, regras do usuário e status concluida_com_avisos",
         migrar_erros_esperados,
+    ),
+    Migracao::sql(
+        "Curadoria Bibliográfica (Fase B): bibliotecas Calibre, espelho homologado, obras/edições, jobs, sugestões, duplicidade, alertas, A Classificar",
+        include_str!("../migrations/0011_biblioteca.sql"),
     ),
 ];
 

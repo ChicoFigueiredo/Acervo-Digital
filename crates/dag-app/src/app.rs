@@ -118,6 +118,8 @@ pub enum Proposito {
     LixeiraMover,
     /// Restaurar da Lixeira.
     LixeiraRestaurar,
+    /// Pedido da seção Biblioteca (consulta, escrita ou trabalho).
+    Biblioteca(paginas::biblioteca::PropBib),
 }
 
 /// Varredura em andamento, vista pela GUI.
@@ -322,6 +324,8 @@ pub struct AppDag {
     pub lixeira: crate::lixeira::Estado,
     pub fila: fila::Estado,
     pub configuracoes: configuracoes::Estado,
+    /// Seção Biblioteca (Curadoria Bibliográfica).
+    pub biblioteca: paginas::biblioteca::Estado,
 }
 
 impl AppDag {
@@ -393,6 +397,7 @@ impl AppDag {
             duplicados: duplicados::Estado::default(),
             fila: fila::Estado::default(),
             configuracoes: configuracoes::Estado::default(),
+            biblioteca: paginas::biblioteca::Estado::default(),
         }
     }
 
@@ -610,6 +615,9 @@ impl AppDag {
                         }
                         _ => {}
                     }
+                    if matches!(m, ModoWorker::Servico | ModoWorker::Escritor) {
+                        self.biblioteca.tudo_obsoleto();
+                    }
                     self.invalidar();
                 }
                 Evento::Iniciado { .. } => {}
@@ -617,17 +625,27 @@ impl AppDag {
                 Evento::JobFinalizado { job, resposta, .. } => {
                     // O que a GUI pediu chega pela resposta do pedido; o resto (CLI, MCP...) só por
                     // aqui.
+                    let biblioteca = job.tipo == TipoJob::Biblioteca;
+                    if biblioteca {
+                        self.biblioteca.job_terminou();
+                    }
                     let propria = job.origem == OrigemJob::Gui
-                        && self
-                            .scan
-                            .as_ref()
-                            .is_some_and(|s| s.pedido != PEDIDO_ABERTURA);
+                        && (biblioteca
+                            || self
+                                .scan
+                                .as_ref()
+                                .is_some_and(|s| s.pedido != PEDIDO_ABERTURA));
                     if !propria {
                         self.tratar_resposta(PEDIDO_ABERTURA, *resposta);
                     }
                     self.invalidar();
                 }
                 Evento::Monitor(_) | Evento::Confianca(_) => {}
+                Evento::Biblioteca(texto) => {
+                    if let Some((tom, t)) = self.biblioteca.mensagem(&texto) {
+                        self.aviso(tom, t);
+                    }
+                }
                 Evento::Versao(info) => {
                     let situacao =
                         dag_agent::comparar(&info, &dag_agent::IdentidadeBinario::propria());
@@ -790,6 +808,22 @@ impl AppDag {
         match resposta {
             Resposta::Erro { codigo, mensagem } => {
                 self.aviso(Tom::Perigo, format!("{mensagem} [{codigo}]"));
+                if let Some(Proposito::Biblioteca(p)) = proposito {
+                    for (tom, t) in self.biblioteca.falhou(p, &codigo, &mensagem) {
+                        self.aviso(tom, t);
+                    }
+                    self.invalidar();
+                }
+            }
+            Resposta::Biblioteca { dados } => {
+                let prop = match proposito {
+                    Some(Proposito::Biblioteca(p)) => Some(p),
+                    _ => None,
+                };
+                for (tom, t) in self.biblioteca.receber(dados, prop) {
+                    self.aviso(tom, t);
+                }
+                self.invalidar();
             }
             Resposta::Volumes { volumes, ocultos } => {
                 let on = volumes.iter().filter(|v| v.conectado).count();
@@ -879,6 +913,8 @@ impl AppDag {
                     Tom::Sucesso
                 };
                 self.aviso(tom, t);
+                self.biblioteca
+                    .atualizar(&[paginas::biblioteca::Consulta::Duplicatas]);
                 self.invalidar();
             }
             Resposta::Desmarcado { removidas } => {
@@ -942,6 +978,10 @@ impl AppDag {
                         Tom::Aviso
                     };
                     self.aviso(tom, crate::lixeira::resumo_do_resultado(&resultado));
+                    self.biblioteca.atualizar(&[
+                        paginas::biblioteca::Consulta::Duplicatas,
+                        paginas::biblioteca::Consulta::Espaco,
+                    ]);
                     self.invalidar();
                 }
             }
@@ -1027,6 +1067,9 @@ impl AppDag {
             | "explorador.filtrar"
             | "explorador.exportar"
             | "analise.filtros" => futuro(),
+            id if id.starts_with("biblioteca.") => {
+                paginas::biblioteca::motivo_desabilitada(self, id)
+            }
             id if id.starts_with("monitoramento.") => {
                 Some("O monitoramento chega no incremento 5".into())
             }
@@ -1087,6 +1130,9 @@ impl AppDag {
     pub fn executar_acao(&mut self, ctx: &egui::Context, id: &str) {
         if let Some(motivo) = self.motivo_desabilitada(id) {
             self.aviso(Tom::Aviso, motivo);
+            return;
+        }
+        if paginas::biblioteca::executar_acao(self, ctx, id) {
             return;
         }
         let abrir = |rota: &str| bancada_casca::abrir(ctx, rota);
@@ -1234,6 +1280,7 @@ impl AppDag {
                 .dica(dica_worker),
         ];
         v.push(self.segmento_da_fase());
+        v.extend(self.bib_segmento_de_status());
         let totais = self.totais.dado.map_or_else(
             || "Catálogo: —".to_string(),
             |t| {
@@ -1314,6 +1361,7 @@ impl AppDag {
     pub fn lista_de_acoes(&self) -> Vec<Acao> {
         paginas::todas()
             .into_iter()
+            .chain(paginas::biblioteca::todas())
             .flat_map(DefPagina::acoes)
             .map(|a| {
                 let mut acao = Acao::nova(a.id, a.rotulo).dica(a.dica);
@@ -1344,7 +1392,7 @@ impl AppDag {
     /// Abas do Ribbon, uma por página.
     #[must_use]
     pub fn lista_de_abas() -> Vec<Aba> {
-        paginas::todas()
+        let mut abas: Vec<Aba> = paginas::todas()
             .into_iter()
             .map(|p| {
                 p.grupos
@@ -1354,7 +1402,20 @@ impl AppDag {
                         aba.grupo(Grupo::novo(g.id, g.rotulo, &ids))
                     })
             })
-            .collect()
+            .collect();
+        // A seção Biblioteca tem uma única aba com os grupos de todas as páginas dela.
+        abas.push(paginas::biblioteca::grupos_do_ribbon().into_iter().fold(
+            Aba::nova(
+                paginas::biblioteca::ABA_RIBBON,
+                paginas::biblioteca::ROTULO_ABA,
+                paginas::biblioteca::KEYTIP_ABA,
+            ),
+            |aba, g| {
+                let ids: Vec<&str> = g.acoes.iter().map(|a| a.id).collect();
+                aba.grupo(Grupo::novo(g.id, g.rotulo, &ids))
+            },
+        ));
+        abas
     }
 }
 
@@ -1368,13 +1429,30 @@ impl AppCasca for AppDag {
     }
 
     fn navegacao(&self) -> Vec<GrupoNavegacao> {
-        vec![GrupoNavegacao::novo(
-            "Acervo",
-            paginas::todas()
-                .into_iter()
-                .map(|p| ItemNavegacao::novo(p.id, p.rotulo, p.icone))
-                .collect(),
-        )]
+        vec![
+            GrupoNavegacao::novo(
+                "Acervo",
+                paginas::todas()
+                    .into_iter()
+                    .map(|p| ItemNavegacao::novo(p.id, p.rotulo, p.icone))
+                    .collect(),
+            ),
+            GrupoNavegacao::novo(
+                paginas::biblioteca::GRUPO_NAVEGACAO,
+                paginas::biblioteca::todas()
+                    .into_iter()
+                    .map(|p| {
+                        let item = ItemNavegacao::novo(p.id, p.rotulo, p.icone);
+                        match (p.id, self.biblioteca.nao_vistos()) {
+                            ("biblioteca-alertas", Some(n)) if n > 0 => {
+                                item.contagem(u64::try_from(n).unwrap_or(0))
+                            }
+                            _ => item,
+                        }
+                    })
+                    .collect(),
+            ),
+        ]
     }
 
     fn rota_inicial(&self) -> Rota {
@@ -1383,6 +1461,15 @@ impl AppCasca for AppDag {
 
     fn trilha(&self, rota: &Rota) -> Vec<Elo> {
         let rotulo = paginas::por_id(rota.como_texto()).map_or("DAG", |p| p.rotulo);
+        if paginas::biblioteca::todas()
+            .iter()
+            .any(|p| p.id == rota.como_texto())
+        {
+            return vec![
+                Elo::texto(paginas::biblioteca::GRUPO_NAVEGACAO),
+                Elo::texto(rotulo),
+            ];
+        }
         vec![Elo::texto(rotulo)]
     }
 
@@ -1448,7 +1535,7 @@ mod testes {
     use bancada_casca::{Disponibilidade, ListaDeAcoes};
     use std::collections::HashSet;
 
-    const ABAS: [&str; 10] = [
+    const ABAS: [&str; 11] = [
         "Início",
         "Discos",
         "Varredura",
@@ -1459,6 +1546,7 @@ mod testes {
         "Fila de Serviço",
         "Monitoramento",
         "Configurações",
+        "Biblioteca",
     ];
 
     fn app() -> (tempfile::TempDir, AppDag) {

@@ -8,6 +8,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+dag-biblio = { path = "../dag-biblio" }
+dag-biblio-ebook = { path = "../dag-biblio-ebook" }
+dag-biblio-ia = { path = "../dag-biblio-ia" }
+dag-biblio-pdf = { path = "../dag-biblio-pdf" }
+dag-calibre = { path = "../dag-calibre" }
 dag-core.workspace = true
 dag-monitor.workspace = true
 dag-platform-linux.workspace = true
@@ -21,13 +26,13 @@ rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 bancada-segredos = { workspace = true, features = ["testes"] }
 zip.workspace = true
 dag-imagens.workspace = true
-blake3.workspace = true
 flate2.workspace = true
 
 [lints]

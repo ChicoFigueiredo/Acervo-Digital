@@ -77,3 +77,29 @@ Membros **contam** em Grupos de Duplicados (`grupo_membros_conteiner`, reconstru
 ## Backup
 
 `Catalogo::copiar_para` usa a API de backup do SQLite (cópia consistente com o WAL, nunca sobrescreve) e `verificar_integridade` roda `PRAGMA integrity_check`.
+
+## Curadoria Bibliográfica (migração 0011, Fase B)
+
+API em `src/biblioteca/` (funções recebem `&Connection`; instantes `agora` vêm do chamador; listas por cursor keyset; contagens por contadores mantidos por gatilhos, chaves `biblio_*` em `contadores`). A Biblioteca Homologada é só leitura: o Catálogo guarda apenas um **espelho** e o que o DAG calculou.
+
+| Tabela | Propósito e chaves | Regras |
+| --- | --- | --- |
+| `bibliotecas_calibre` | Bibliotecas conhecidas: `caminho` único, `papel` homologada/a_classificar, `library_uuid`, versão do Calibre, `estado`, `perfil_json`, `geracao_espelho`. | Um caminho tem um papel. Várias Homologadas são permitidas (cópias antigas ficam `arquivada`); índice parcial garante **uma só A Classificar ativa** (destino único dos cadastros). |
+| `instantaneos_biblioteca` | Cada leitura do `metadata.db`: hash, tamanho, manifesto, resultado da comparação (primeiro/igual/alterado/incompativel). | Índice `(biblioteca, quando DESC)`. |
+| `campos_calibre` | Campos padrão/personalizados, `datatype`, `multiplo`, `clonavel`, `motivo`. PK `(biblioteca, rotulo)`. | Substituído por inteiro a cada perfil. |
+| `livros_homologados` | Espelho de leitura: `calibre_id`, uuid, título e `titulo_norm`, autores/tags (JSON), `isbn13`, idioma, série, editora, `estante`, `geracao`. Único `(biblioteca, calibre_id)`. | Upsert idempotente por geração; quem não foi visto na geração corrente é removido (`sincronizar_espelho`). |
+| `formatos_homologados` | Um arquivo por `(livro, formato)`: caminho, tamanho, mtime, **hash BLAKE3 calculado pelo DAG** e `hash_em`, `file_id` opcional para `files`. | Hash só sobrevive à ressincronização se tamanho e mtime não mudaram. Índice `(hash, tamanho)` parcial: alerta de duplicata exata (CA-B04) em O(log n). `catalogo.rs` liga a `files` por `(volume, path_raw)` e reaproveita `hashes` do Catálogo. |
+| `obras`, `edicoes`, `formatos_bibliograficos` | Obra > Edição > Formato. `chave` canônica única em obras e edições; formato único `(edicao, formato, hash)` com `file_id` e `estado`. | "Garantir" = upsert por chave: reprocessar 3x não duplica (CA-B11); estado avançado nunca é rebaixado. |
+| `autores_biblio`, `vinculo_autoria` | Autor (`nome_norm` + `desambiguacao` únicos, variantes JSON) e vínculo por edição e papel. | Homônimos distintos usam `desambiguacao`. |
+| `jobs_bibliograficos` | Fila persistente: arquivo, motivo novo/alterado/reprocessar, `prioridade`, `enfileirado_em`, `ordem` (coluna gerada), estado, etapa, `checkpoint_json`, tentativas, erro, `versao_regras`. | Índice único parcial: **um job ativo por arquivo**. `ordem = prioridade*3600 - enfileirado_em` (1 ponto por hora de espera, aging); índice `(estado, ordem, id)` entrega o próximo em O(log n). "Pegar" é um `UPDATE ... RETURNING` atômico; órfãos `em_andamento` voltam a `pendente` (`retomar_orfaos`). Contadores `biblio_jobs:<estado>`. |
+| `extracoes` | Resultado por `(arquivo, versao_regras)`: estado, `resultado` (JSON, puro ou comprimido), páginas, OCR, tempo, `hash_arquivo`. | Reaproveitada só se o hash do arquivo é o mesmo. |
+| `sugestoes` | Campo, valor, lista, confiança, evidências, origem, modelo, `versao_regras`, estado (pendente/aceita/corrigida/rejeitada). Único `(arquivo, campo, origem, modelo, versao)`. | Regravar com o mesmo valor preserva a decisão; valor novo volta a `pendente`. Contador `biblio_sugestoes_pendentes`. |
+| `decisoes_humanas` | Alvo, campo, ação aceitar/corrigir/rejeitar, antes/depois, `autor` gui/cli/mcp, `lote_id`, `desfeita_em`. | Nunca apagada: desfazer (por lote ou avulsa) só preenche `desfeita_em` e devolve a sugestão a `pendente` se não restar decisão válida. |
+| `inferencias` | Chamadas de modelo: modelo, versão, `hash_prompt`, tokens, tempo, bruto. | Índice `(hash_prompt, modelo, versao)` serve de cache. |
+| `candidatos_duplicidade` | Arquivo x alvo (formato homologado, arquivo, edição), tipo exata/mesma_edicao/mesma_obra/incerta, risco, estado, `bytes`. | Só `exata` soma em `bytes_recuperaveis_exatos`; descartado/confirmado não é reaberto por reprocessamento. Índice `(estado, tipo, bytes DESC, id)`. Contador `biblio_candidatos_abertos`. |
+| `alertas_biblio` | Tipo (`ja_tem_este_livro`, ...), arquivo, `dados_json`, `visto_em`, `silenciado`, `chave` única opcional (emissão idempotente). | Índice parcial dos não vistos; contador `biblio_alertas_nao_vistos`; resumo por período (WOW-10). |
+| `cadastros_a_classificar` | Arquivo/edição na A Classificar, `calibre_id` criado, `chave_idempotencia` = `dag:<hash hex>`, estado. Único `(biblioteca, chave)`. | Só aceita biblioteca A Classificar. |
+| `homologacoes` | Aprovação: quem/quando, `antes_json`/`depois_json`, `calibre_id`, `rollback_id`, estado proposta/aprovada/aplicada/falhou/revertida. | Destino precisa ser Homologada; transições validadas (só aprovada é aplicada). O DAG só registra. |
+| `backups_biblioteca` | Manifesto, verificação, restauração amostral e cobertura (JSON). | Mínimo: a Cobertura real é a da Fase A. |
+
+Escala (Catálogo de ~20 milhões de arquivos): nada aqui varre `files` ou `hashes`. A ligação usa o índice único `(volume, path_raw)`, o reaproveitamento de hash usa a PK de `hashes`, e a busca de arquivos iguais aos homologados parte dos poucos milhares de formatos e usa `hashes(size_bytes, hash)`.

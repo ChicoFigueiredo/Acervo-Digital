@@ -30,6 +30,8 @@ pub enum TipoJob {
     Duplicados,
     /// Conteúdo de Contêineres (BLAKE3 dos Membros; ADR 0006).
     Conteineres,
+    /// Curadoria bibliográfica (fila de livros, sincronização, duplicatas).
+    Biblioteca,
 }
 
 impl TipoJob {
@@ -44,6 +46,7 @@ impl TipoJob {
             Self::Monitor => "Monitor",
             Self::Duplicados => "Agrupando duplicados",
             Self::Conteineres => "Conteúdo de contêineres",
+            Self::Biblioteca => "Curadoria bibliográfica",
         }
     }
 }

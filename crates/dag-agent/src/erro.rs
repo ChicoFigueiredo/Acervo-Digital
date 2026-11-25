@@ -53,6 +53,13 @@ pub enum ErroAgente {
     NadaEmExecucao,
     #[error("não foi possível falar com o agente em {}: {motivo}", .socket.display())]
     AgenteIndisponivel { socket: PathBuf, motivo: String },
+    /// Erro da curadoria bibliográfica, com código estável (`calibre_ocupado`,
+    /// `aprovacao_humana_exigida`...).
+    #[error("{mensagem}")]
+    Biblioteca {
+        codigo: &'static str,
+        mensagem: String,
+    },
     /// Violação do protocolo do socket (quadro malformado, conexão cortada...).
     #[error("protocolo do agente: {0}")]
     Ipc(String),
@@ -89,6 +96,7 @@ impl ErroAgente {
             Self::SemAgente => "sem_agente",
             Self::NadaEmExecucao => "nada_em_execucao",
             Self::AgenteIndisponivel { .. } => "agente_indisponivel",
+            Self::Biblioteca { codigo, .. } => codigo,
             Self::Ipc(_) => "ipc",
         }
     }
@@ -99,6 +107,32 @@ impl ErroAgente {
             codigo: self.codigo().to_string(),
             mensagem: self.to_string(),
         }
+    }
+}
+
+impl ErroAgente {
+    /// Erro da curadoria com código estável.
+    pub(crate) fn biblio(codigo: &'static str, mensagem: impl Into<String>) -> Self {
+        Self::Biblioteca {
+            codigo,
+            mensagem: mensagem.into(),
+        }
+    }
+}
+
+impl From<dag_calibre::ErroCalibre> for ErroAgente {
+    fn from(e: dag_calibre::ErroCalibre) -> Self {
+        use dag_calibre::ErroCalibre as E;
+        let codigo = match &e {
+            E::CalibreOcupado { .. } | E::ServidorServindo { .. } => "calibre_ocupado",
+            E::CalibredbAusente(_) => "calibredb_ausente",
+            E::JaExisteNaHomologada(_) => "ja_existe_na_homologada",
+            E::AprovacaoInvalida(_) => "aprovacao_invalida",
+            E::CaminhoProibido(_) | E::DiretorioNaoVazio(_) => "caminho_proibido",
+            E::BibliotecaInexistente(_) => "biblioteca_inexistente",
+            _ => "calibre",
+        };
+        Self::biblio(codigo, e.to_string())
     }
 }
 

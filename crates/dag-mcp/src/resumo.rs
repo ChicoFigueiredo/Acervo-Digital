@@ -237,6 +237,10 @@ pub fn resumir(r: &Resposta) -> String {
             "Hash Completo: {threads_por_disco} thread(s) por disco, até {max_discos} disco(s) em paralelo."
         ),
         Resposta::Verificacao { .. } => "Verificação de Integridade concluída.".into(),
+        Resposta::Biblioteca { dados } => crate::resumo_biblioteca::resumir_biblioteca(dados),
+        Resposta::Erro { codigo, .. } if codigo == "aprovacao_humana_exigida" => {
+            crate::resumo_biblioteca::APROVACAO_HUMANA.into()
+        }
         Resposta::Erro { codigo, mensagem } => format!("Erro ({codigo}): {mensagem}"),
     }
 }

@@ -10,7 +10,7 @@ use dag_core::{
 };
 
 /// Tabela de texto: colunas alinhadas à esquerda (`false`) ou à direita (`true`).
-fn tabela(cabecalho: &[&str], direita: &[bool], linhas: &[Vec<String>]) -> String {
+pub(crate) fn tabela(cabecalho: &[&str], direita: &[bool], linhas: &[Vec<String>]) -> String {
     let n = cabecalho.len();
     let mut larg: Vec<usize> = cabecalho.iter().map(|c| c.chars().count()).collect();
     for l in linhas {
@@ -1631,7 +1631,13 @@ pub fn imprimir(r: &Resposta, todos: bool) {
             "{}",
             membros(conteiner, entradas, proximo_cursor.as_deref())
         ),
-        Resposta::Erro { mensagem, .. } => eprintln!("erro: {mensagem}"),
+        Resposta::Biblioteca { dados } => print!("{}", crate::saida_biblioteca::texto(dados)),
+        Resposta::Erro { codigo, mensagem } => {
+            eprintln!("erro: {mensagem}");
+            if let Some(dica) = crate::saida_biblioteca::dica_de_erro(codigo) {
+                eprintln!("dica: {dica}");
+            }
+        }
         outra => {
             if let Ok(j) = serde_json::to_string_pretty(outra) {
                 println!("{j}");

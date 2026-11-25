@@ -4,6 +4,10 @@
 //! O transporte (socket local, etc.) não faz parte deste crate; só o formato.
 
 use crate::ClasseVolume;
+use crate::biblioteca::{
+    AprovacaoHumana, DadosBiblioteca, EstadoCadastroInfo, EstadoFilaInfo, ItemDecisao, MotivoFila,
+    PapelRegistro,
+};
 use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
     EventoInfo, ExecucaoId, Finalidade, FormatoExportacao, GrupoDuplicados, GrupoId, MarcacaoId,
@@ -259,6 +263,140 @@ pub enum Comando {
     ListarLixeira {
         limite: Option<u32>,
         cursor: Option<String>,
+    },
+
+    // ------------------------------------------------------------------------------------
+    // Curadoria Bibliográfica (Fase B). Só o agente escreve; a Biblioteca Homologada é somente
+    // leitura e nenhum comando daqui move ou apaga arquivos (ADR 0005, ADR 0008).
+    // ------------------------------------------------------------------------------------
+    /// Registra uma biblioteca Calibre. `homologada`: só lê. `a_classificar`: se o caminho não
+    /// for uma biblioteca, o agente a cria (via `calibredb`, com as colunas da Homologada e
+    /// `#dag_hash`/`#dag_confianca`); `caminho` vazio usa o destino da configuração.
+    BibliotecaRegistrar {
+        caminho: String,
+        papel: PapelRegistro,
+        #[serde(default)]
+        nome: Option<String>,
+    },
+    /// Bibliotecas registradas, com contagens.
+    BibliotecaListar,
+    /// Perfil da biblioteca (id ou caminho): campos, vocabulário, estantes candidatas.
+    BibliotecaPerfil {
+        biblioteca: String,
+    },
+    /// Lê a Homologada em `mode=ro`, grava perfil, espelho e campos, liga formatos ao Catálogo
+    /// por caminho, importa os hashes BLAKE3 existentes e prova (instantâneo antes/depois) que
+    /// nada mudou. Trabalho longo.
+    BibliotecaSincronizar {
+        biblioteca: String,
+    },
+    /// Arquivos do Catálogo fora da Homologada com mesmo hash+tamanho de um Formato homologado
+    /// (WOW-01/02), por livro e por bytes, com a decisão de descarte (só exibida).
+    BibliotecaDuplicatas {
+        #[serde(default)]
+        raiz: Option<String>,
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Enfileira os livros sob as Raízes (extensões bibliográficas) com prioridade por tamanho,
+    /// suspeita de duplicidade e novidade.
+    BibliotecaEnfileirar {
+        raizes: Vec<String>,
+        #[serde(default)]
+        motivo: Option<MotivoFila>,
+    },
+    /// Fila persistente.
+    BibliotecaFila {
+        #[serde(default)]
+        estado: Option<EstadoFilaInfo>,
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Processa a fila (job longo, pausável, cancelável, retomável). `ia`: consulta a IA local
+    /// quando configurada.
+    BibliotecaProcessar {
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        ia: bool,
+    },
+    /// Itens pendentes de revisão, lado a lado.
+    BibliotecaRevisao {
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Aceita, corrige ou rejeita sugestões em lote (B-12). Nunca escreve na Homologada.
+    BibliotecaDecidir {
+        itens: Vec<ItemDecisao>,
+        #[serde(default)]
+        lote: Option<String>,
+    },
+    /// Desfaz um lote de decisões.
+    BibliotecaDesfazer {
+        lote: String,
+    },
+    /// Cadastra na A Classificar (via `calibredb`) os arquivos aprovados; idempotente por
+    /// `dag:<hash>`. Com o Calibre/servidor no ar devolve `calibre_ocupado`.
+    BibliotecaCadastrar {
+        itens: Vec<i64>,
+    },
+    /// Livros da A Classificar (cadastros) e os prontos para cadastrar. Somente leitura.
+    BibliotecaCadastros {
+        #[serde(default)]
+        estado: Option<EstadoCadastroInfo>,
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Leva um cadastro aprovado da A Classificar à Homologada (B-24). Exige `aprovacao` de
+    /// pessoa (GUI/CLI); o MCP só pode propor (sem `aprovacao`).
+    BibliotecaHomologar {
+        item: i64,
+        #[serde(default)]
+        aprovacao: Option<AprovacaoHumana>,
+    },
+    /// Alertas bibliográficos (padrão: só os não vistos).
+    BibliotecaAlertas {
+        #[serde(default)]
+        nao_vistos: bool,
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    /// Marca alertas como vistos.
+    BibliotecaMarcarVisto {
+        ids: Vec<i64>,
+    },
+    /// Novidades da biblioteca desde um instante (segundos Unix; padrão: 24 h) (WOW-10).
+    BibliotecaResumo {
+        #[serde(default)]
+        desde: Option<i64>,
+    },
+    /// Espaço recuperável das duplicatas de livros, por Volume (B-15).
+    BibliotecaRelatorioEspaco {
+        #[serde(default)]
+        volume: Option<String>,
+    },
+    /// Verifica a Cobertura da Biblioteca Homologada e faz a restauração amostral por releitura
+    /// e BLAKE3 (B-26/CA-B24). Só lê o acervo; grava o resultado no Catálogo.
+    BibliotecaVerificarCobertura {
+        biblioteca: String,
+        /// Quantas cópias de backup reler por inteiro (padrão: 10).
+        #[serde(default)]
+        amostra: Option<u32>,
+    },
+    BibliotecaConfigObter,
+    /// Altera a configuração (JSON mesclado sobre a atual: só os campos enviados mudam).
+    BibliotecaConfigDefinir {
+        alteracoes: serde_json::Value,
     },
     /// Lê o conteúdo dos Contêineres pendentes (etapa "Conteúdo de contêineres"; trabalho longo).
     LerConteineres,
@@ -654,6 +792,10 @@ pub enum Resposta {
         aceitas: Vec<crate::erros::RegraAceita>,
         exclusoes: Vec<crate::erros::ExclusaoUsuario>,
     },
+    /// Resposta da Curadoria Bibliográfica (ver [`DadosBiblioteca`]).
+    Biblioteca {
+        dados: DadosBiblioteca,
+    },
     /// Falha; `codigo` é estável para máquinas, `mensagem` é para humanos.
     Erro {
         codigo: String,
@@ -776,6 +918,26 @@ mod tests {
                 pasta: Some("/a".into()),
                 limite: Some(10),
                 cursor: None,
+            },
+            Comando::BibliotecaRegistrar {
+                caminho: "/l".into(),
+                papel: PapelRegistro::AClassificar,
+                nome: None,
+            },
+            Comando::BibliotecaProcessar {
+                limite: Some(3),
+                ia: true,
+            },
+            Comando::BibliotecaHomologar {
+                item: 4,
+                aprovacao: Some(AprovacaoHumana {
+                    quem: "Chico".into(),
+                    quando: None,
+                    motivo: None,
+                }),
+            },
+            Comando::BibliotecaConfigDefinir {
+                alteracoes: serde_json::json!({"usar_unshare": true}),
             },
         ] {
             ida_e_volta(&c);

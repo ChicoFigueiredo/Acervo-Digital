@@ -181,6 +181,9 @@ impl Agente {
         politica: &PoliticaAbertura,
     ) -> Result<RelatorioAbertura, ErroAgente> {
         let mut rel = self.recuperar_etapas(politica)?;
+        // Jobs bibliográficos órfãos (processo morto no meio) voltam à fila.
+        let agora = self.agora_biblio();
+        let _ = dag_store::biblioteca::retomar_orfaos(self.catalogo.armazem().conexao(), agora);
         // Hashes existem mas os Grupos de Duplicados nunca foram construídos (ou são mais antigos
         // que a última mudança de hash): reconstrói agora, no escritor.
         if !rel.cancelada

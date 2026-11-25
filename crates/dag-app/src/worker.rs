@@ -138,6 +138,8 @@ pub enum Evento {
         desfecho: String,
         resposta: Box<Resposta>,
     },
+    /// Mensagem de progresso de um trabalho da Biblioteca (`biblioteca: ...`, `alerta: ...`).
+    Biblioteca(String),
     /// Saúde do monitor do agente.
     Monitor(SaudeMonitorInfo),
     /// Ponto de Confiança por Raiz.
@@ -535,6 +537,9 @@ impl Encaminhador {
                     texto: t.to_string(),
                     fim: false,
                 },
+                None if texto.starts_with("biblioteca: ") || texto.starts_with("alerta: ") => {
+                    Evento::Biblioteca(texto.clone())
+                }
                 None => return,
             },
         };
@@ -646,6 +651,11 @@ impl Tradutor {
                         texto: t.to_string(),
                         fim: false,
                     });
+                }
+                if j.tipo == TipoJob::Biblioteca
+                    && let Progresso::Mensagem { texto } = p
+                {
+                    out.push(Evento::Biblioteca(texto.clone()));
                 }
                 if matches!(p, Progresso::Passo(_)) {
                     // O passo vive no trabalho: a GUI o lê da lista de trabalhos também.

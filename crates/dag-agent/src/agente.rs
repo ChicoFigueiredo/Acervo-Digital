@@ -69,29 +69,30 @@ pub(crate) fn agora() -> i64 {
 /// `saida` grava um arquivo escolhido pelo usuário, nunca o Catálogo.
 #[must_use]
 pub fn somente_leitura(c: &Comando) -> bool {
-    matches!(
-        c,
-        Comando::Status { .. }
-            | Comando::Explorar { .. }
-            | Comando::ListarDuplicados { .. }
-            | Comando::DetalharGrupo { .. }
-            | Comando::Relatorio { .. }
-            | Comando::Eventos { .. }
-            | Comando::SaudeMonitor
-            | Comando::ListarJobs
-            | Comando::ListarLixeira { .. }
-            | Comando::MoverParaLixeira { simular: true, .. }
-            | Comando::StatusConteineres
-            | Comando::ListarPedidos { .. }
-            | Comando::ErrosDaVarredura { .. }
-            | Comando::ErrosRegras
-            | Comando::CofreListar
-            | Comando::ExplorarConteiner { .. }
-            | Comando::ConfigHash {
-                threads_por_disco: None,
-                max_discos: None
-            }
-    )
+    crate::biblioteca::somente_leitura_biblioteca(c)
+        || matches!(
+            c,
+            Comando::Status { .. }
+                | Comando::Explorar { .. }
+                | Comando::ListarDuplicados { .. }
+                | Comando::DetalharGrupo { .. }
+                | Comando::Relatorio { .. }
+                | Comando::Eventos { .. }
+                | Comando::SaudeMonitor
+                | Comando::ListarJobs
+                | Comando::ListarLixeira { .. }
+                | Comando::MoverParaLixeira { simular: true, .. }
+                | Comando::StatusConteineres
+                | Comando::ListarPedidos { .. }
+                | Comando::ErrosDaVarredura { .. }
+                | Comando::ErrosRegras
+                | Comando::CofreListar
+                | Comando::ExplorarConteiner { .. }
+                | Comando::ConfigHash {
+                    threads_por_disco: None,
+                    max_discos: None
+                }
+        )
 }
 
 /// Incremento em que o comando passa a existir, se ainda não foi implementado.
@@ -125,6 +126,8 @@ pub struct Agente {
     opcoes_hash: OpcoesHash,
     /// Cofre de Senhas (chave no keyring do sistema; abre só quando alguém o usa).
     pub(crate) cofre: Arc<CofreLazy>,
+    /// Curadoria Bibliográfica (Fase B): extrator, IA, executor do calibredb, relógio.
+    pub(crate) biblio: crate::biblioteca::ContextoBiblioteca,
 }
 
 impl fmt::Debug for Agente {
@@ -189,6 +192,7 @@ impl Agente {
             dispositivos: Self::dispositivos_padrao(),
             opcoes_hash: OpcoesHash::default(),
             cofre,
+            biblio: crate::biblioteca::ContextoBiblioteca::default(),
         }
     }
 
@@ -336,6 +340,9 @@ impl Agente {
             return Err(ErroAgente::Invalido(
                 "agente aberto só para leitura não executa este comando".into(),
             ));
+        }
+        if crate::biblioteca::e_biblioteca(&comando) {
+            return self.executar_biblioteca(comando);
         }
         match comando {
             Comando::ListarVolumes => self.listar_volumes(),
@@ -1104,6 +1111,7 @@ impl Agente {
                     // O estado final (`concluida`, `_com_avisos` ou `_com_erros`) já foi gravado
                     // pela etapa de hash, depois do reteste e da classificação.
                     desfecho = self.estado_gravado(r.execucao_id, desfecho);
+                    let _ = self.vigiar_biblioteca();
                     // Passada de verificação sem mudança e sem hash novo: os grupos continuam
                     // valendo (evita reconstruí-los a cada abertura). Mas hashes que mudaram
                     // desde a última reconstrução completa (ou grupos nunca construídos) sempre
@@ -1444,6 +1452,7 @@ fn pos_reconciliacao(
         duplicados::reconstruir_grupos(cat, Escopo::Tudo, autor, t)?;
     }
     duplicados::reavaliar_marcacoes(cat, autor, t)?;
+    crate::biblioteca::watcher::vigiar_silencioso(cat.armazem().conexao(), t);
     Ok(())
 }
 

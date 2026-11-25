@@ -1,6 +1,7 @@
 //! Registro de páginas e ações. Dados puros (sem egui), testáveis sem display.
 
 pub mod analise;
+pub mod biblioteca;
 pub mod configuracoes;
 pub mod conteudo;
 pub mod discos;
@@ -68,7 +69,10 @@ pub fn todas() -> [&'static DefPagina; 10] {
 }
 
 pub fn por_id(id: &str) -> Option<&'static DefPagina> {
-    todas().into_iter().find(|p| p.id == id)
+    todas()
+        .into_iter()
+        .chain(biblioteca::todas())
+        .find(|p| p.id == id)
 }
 
 /// Corpo de uma página dentro de uma rolagem vertical sempre visível: o que passa da janela

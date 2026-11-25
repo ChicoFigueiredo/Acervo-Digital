@@ -34,7 +34,7 @@ fn alvo_schema(desc: &str) -> Value {
     })
 }
 
-fn objeto(props: Value, obrigatorios: &[&str]) -> Value {
+pub(crate) fn objeto(props: Value, obrigatorios: &[&str]) -> Value {
     json!({
         "type": "object",
         "properties": props,
@@ -73,7 +73,7 @@ fn raizes(desc: &str) -> Value {
     json!({"type": "array", "items": {"type": "string"}, "description": desc})
 }
 
-fn f(nome: &'static str, tag: &'static str, desc: &str, schema: Value) -> Ferramenta {
+pub(crate) fn f(nome: &'static str, tag: &'static str, desc: &str, schema: Value) -> Ferramenta {
     Ferramenta {
         nome,
         descricao: desc.to_string(),
@@ -494,6 +494,7 @@ pub fn todas() -> Vec<Ferramenta> {
             &["destino"],
         ),
     ));
+    v.extend(crate::biblioteca::ferramentas());
     v
 }
 
@@ -508,6 +509,7 @@ pub fn montar(nome: &str, args: &Value) -> Result<Comando, String> {
         Value::Object(m) => m.clone(),
         _ => return Err("`arguments` deve ser um objeto".into()),
     };
+    crate::biblioteca::recusar_aprovacao(nome, &obj)?;
     // Rejeita propriedades fora do schema (additionalProperties: false).
     let props = ferr
         .schema
@@ -520,6 +522,7 @@ pub fn montar(nome: &str, args: &Value) -> Result<Comando, String> {
     }
     obj.retain(|_, v| !v.is_null());
     match nome {
+        n if n.starts_with("biblioteca_") => crate::biblioteca::preparar(n, &mut obj)?,
         "scan_full" => {
             if !obj.contains_key("raizes") {
                 return Err("faltou o argumento `raizes`".into());

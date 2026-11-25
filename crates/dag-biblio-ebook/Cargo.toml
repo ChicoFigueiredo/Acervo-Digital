@@ -1,0 +1,23 @@
+[package]
+name = "dag-biblio-ebook"
+description = "Extração de e-books (EPUB, MOBI/AZW/AZW3, FB2), quadrinhos (CBZ/CBR/CB7) e livros dentro de compactados, tudo em memória (Fase B, frente B2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dag-biblio = { path = "../dag-biblio" }
+dag-conteineres = { path = "../dag-conteineres" }
+roxmltree = { version = "=0.21.2", default-features = false, features = ["std"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+rars = { workspace = true, features = ["write", "encryption"] }
+sevenz-rust2.workspace = true
+tempfile.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

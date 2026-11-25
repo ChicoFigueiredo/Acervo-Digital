@@ -166,6 +166,22 @@ impl Agente {
                 }
             })?;
         drop(guarda);
+        // Espelhos e cópias antigas da biblioteca Calibre são candidatos a Cobertura, não a
+        // descarte: ficam fora da estimativa e só aparecem somados na observação.
+        let bibliotecas = super::duplicatas::caminhos_das_bibliotecas(conn);
+        let (mut espelhos, mut bytes_espelhos) = (0_u64, 0_u64);
+        let mut arquivos = arquivos;
+        let mut fora = std::collections::HashSet::new();
+        for a in arquivos.iter().filter(|a| !a.homologado) {
+            if let Some(info) = store::info_arquivo(conn, a.arquivo_id)?
+                && super::duplicatas::e_espelho_de_biblioteca(&info.caminho, &bibliotecas)
+            {
+                fora.insert(a.arquivo_id);
+                espelhos += 1;
+                bytes_espelhos += a.tamanho_logico;
+            }
+        }
+        arquivos.retain(|a| !fora.contains(&a.arquivo_id));
         let r = relatorio(&arquivos, 4096);
         let volumes = r
             .volumes
@@ -211,9 +227,18 @@ impl Agente {
             relatorio: RelatorioEspacoInfo {
                 volumes,
                 grupos,
-                observacao:
+                observacao: if espelhos == 0 {
                     "estimativa: nada é apagado; o descarte exige Cobertura e dupla confirmação"
-                        .into(),
+                        .into()
+                } else {
+                    format!(
+                        "estimativa: nada é apagado; o descarte exige Cobertura e dupla \
+                         confirmação. Fora da conta: {espelhos} cópia(s) em espelhos ou cópias \
+                         antigas de biblioteca Calibre ({:.1} GiB), que são candidatas a \
+                         Cobertura, não a descarte.",
+                        bytes_espelhos as f64 / f64::from(1u32 << 30)
+                    )
+                },
             },
         }))
     }

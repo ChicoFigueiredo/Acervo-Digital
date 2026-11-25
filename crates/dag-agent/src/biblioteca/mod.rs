@@ -532,3 +532,37 @@ impl Drop for GuardaInterrupcao {
         }
     }
 }
+
+#[cfg(test)]
+mod testes_interrupcao {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn cancelamento_interrompe_consulta_longa() {
+        let t = tempfile::tempdir().unwrap();
+        let a = Agente::abrir(t.path().join("c.sqlite")).unwrap();
+        let controle = a.controle();
+        let guarda = a.guarda_interrupcao();
+        let cancelador = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            controle.cancelar();
+        });
+        let inicio = Instant::now();
+        // Consulta artificial que levaria minutos.
+        let r: rusqlite::Result<i64> = a.conexao().query_row(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000000000)
+             SELECT count(*) FROM n",
+            [],
+            |l| l.get(0),
+        );
+        drop(guarda);
+        cancelador.join().unwrap();
+        assert!(r.is_err(), "devia ter sido interrompida: {r:?}");
+        assert!(
+            inicio.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            inicio.elapsed()
+        );
+    }
+}

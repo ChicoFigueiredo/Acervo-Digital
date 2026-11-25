@@ -184,6 +184,10 @@ fn perfil(b: &BibliotecaInfo, p: &PerfilResumo, campos: &[dag_core::CampoInfo]) 
             .collect();
         s.push_str(&format!("  formatos: {}\n", f.join(", ")));
     }
+    // O perfil também lista elementos que não são colunas (bibliotecas virtuais, preferências):
+    // vão numa seção à parte.
+    let (campos, outros): (Vec<&dag_core::CampoInfo>, Vec<&dag_core::CampoInfo>) =
+        campos.iter().partition(|c| c.datatype != "n/a");
     s.push_str("\nColunas (campos do Calibre):\n");
     if campos.is_empty() {
         s.push_str("  (nenhuma coluna personalizada)\n");
@@ -244,6 +248,20 @@ fn perfil(b: &BibliotecaInfo, p: &PerfilResumo, campos: &[dag_core::CampoInfo]) 
         let t: Vec<&str> = controle.iter().filter_map(|v| v.as_str()).collect();
         if !t.is_empty() {
             s.push_str(&format!("Tags de controle: {}\n", t.join(", ")));
+        }
+    }
+    if !outros.is_empty() {
+        s.push_str("\nOutros elementos da biblioteca:\n");
+        for c in &outros {
+            let estado = if c.clonavel {
+                "recriado na A Classificar".to_owned()
+            } else {
+                format!(
+                    "não recriado: {}",
+                    c.motivo.as_deref().unwrap_or("sem motivo informado")
+                )
+            };
+            s.push_str(&format!("  {} ({estado})\n", c.nome));
         }
     }
     let clonaveis = campos.iter().filter(|c| c.clonavel).count();

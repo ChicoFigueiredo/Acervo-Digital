@@ -84,6 +84,11 @@ fn papel_da_copia(
 /// O arquivo está numa cópia (não registrada) de biblioteca Calibre? Os livros ficam em
 /// `<raiz>/<Autor>/<Título (id)>/arquivo`, então basta um `stat` de `<raiz>/metadata.db`. Só lê
 /// metadados do sistema de arquivos; Volume desconectado responde "não".
+/// Cópia dentro de uma biblioteca registrada ou de uma cópia de biblioteca Calibre.
+pub(super) fn e_espelho_de_biblioteca(caminho: &str, bibliotecas: &[String]) -> bool {
+    bibliotecas.iter().any(|b| caminho.starts_with(b.as_str())) || em_copia_de_biblioteca(caminho)
+}
+
 fn em_copia_de_biblioteca(caminho: &str) -> bool {
     std::path::Path::new(caminho)
         .ancestors()

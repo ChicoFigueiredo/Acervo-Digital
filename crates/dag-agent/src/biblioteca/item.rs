@@ -104,10 +104,11 @@ fn candidato_de(v: &ValorSugerido, origem: OrigemEvidencia) -> Option<Candidato>
         confianca: v.confianca.clamp(0.0, 1.0),
         evidencias: v.evidencias.clone(),
     };
-    if e_lista(v.campo) && c.lista.is_empty() {
-        if let Some(t) = c.valor.take() {
-            c.lista = dividir_lista(v.campo, &t);
-        }
+    if e_lista(v.campo)
+        && c.lista.is_empty()
+        && let Some(t) = c.valor.take()
+    {
+        c.lista = dividir_lista(v.campo, &t);
     }
     Some(c)
 }
@@ -133,7 +134,7 @@ fn chave_rejeicao(campo: Campo, t: &str) -> String {
     }
 }
 
-fn texto_de<'a>(c: &'a [CampoReconciliado], campo: Campo) -> Option<&'a str> {
+fn texto_de(c: &[CampoReconciliado], campo: Campo) -> Option<&str> {
     c.iter()
         .find(|x| x.campo == campo)
         .and_then(|x| x.valor.as_deref())
@@ -876,7 +877,7 @@ impl Agente {
         let finais_livros = livros_candidatos(conn, isbn_final.as_deref(), &titulo)?;
         let a = RegistroBibliografico {
             formato: Some(e.formato),
-            hash: Some(hex(&e.hash_arquivo)).filter(|_| e.membro.is_empty()),
+            hash: e.membro.is_empty().then(|| hex(&e.hash_arquivo)),
             tamanho: e.tamanho,
             ..registro(
                 if e.membro.is_empty() {

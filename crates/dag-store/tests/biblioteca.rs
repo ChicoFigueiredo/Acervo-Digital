@@ -101,7 +101,7 @@ fn contar(c: &Connection, t: &str) -> i64 {
 #[test]
 fn migracao_em_catalogo_novo_cria_as_tabelas() {
     let cat = cat();
-    assert_eq!(cat.versao().unwrap(), 11);
+    assert_eq!(cat.versao().unwrap(), 12);
     let c = cat.armazem().conexao();
     for t in [
         "bibliotecas_calibre",
@@ -146,7 +146,7 @@ fn migracao_a_partir_da_versao_10_preserva_dados() {
         .execute("INSERT INTO contadores (chave, valor) VALUES ('x', 5)", [])
         .unwrap();
     a.migrar(&Escada::nova(MIGRACOES)).unwrap();
-    assert_eq!(a.versao().unwrap(), 11);
+    assert_eq!(a.versao().unwrap(), 12);
     let c = a.conexao();
     assert_eq!(contar(c, "files"), 3);
     assert_eq!(contador(c, "x").unwrap(), 5);

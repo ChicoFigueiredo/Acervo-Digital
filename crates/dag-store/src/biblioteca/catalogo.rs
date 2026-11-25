@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use super::limite_de;
 use crate::Resultado;
+use crate::duplicados::HASH_VALIDO;
 
 /// Liga formatos ainda sem `file_id` ao arquivo do Catálogo pelo caminho, uma fatia por vez
 /// (cursor `apos_id`). O caminho do Calibre perde `prefixo_a_remover` (p. ex. a montagem do
@@ -79,14 +80,19 @@ pub fn importar_hashes_do_catalogo(
     let Some(ultimo) = ultimo else {
         return Ok((0, None));
     };
+    // Só vale o hash do Catálogo cuja evidência (tamanho, mtime, ctime, inode) ainda confere com
+    // a linha de `files`: um hash velho de arquivo que mudou faria uma "duplicata exata" falsa.
     let n = conn.execute(
-        "UPDATE formatos_homologados SET
-            hash = (SELECT h.hash FROM hashes h WHERE h.file_id = formatos_homologados.file_id
-                    AND h.size_bytes = formatos_homologados.tamanho),
+        &"UPDATE formatos_homologados SET
+            hash = (SELECT h.hash FROM hashes h JOIN files f ON f.id = h.file_id
+                    WHERE h.file_id = formatos_homologados.file_id
+                    AND h.size_bytes = formatos_homologados.tamanho AND HASH_VALIDO),
             hash_em = ?4
          WHERE biblioteca_id = ?1 AND hash IS NULL AND file_id IS NOT NULL AND id > ?2 AND id <= ?3
-           AND EXISTS (SELECT 1 FROM hashes h WHERE h.file_id = formatos_homologados.file_id
-                       AND h.size_bytes = formatos_homologados.tamanho)",
+           AND EXISTS (SELECT 1 FROM hashes h JOIN files f ON f.id = h.file_id
+                       WHERE h.file_id = formatos_homologados.file_id
+                       AND h.size_bytes = formatos_homologados.tamanho AND HASH_VALIDO)"
+            .replace("HASH_VALIDO", HASH_VALIDO),
         params![biblioteca_id, apos_id, ultimo, agora],
     )?;
     Ok((n as u64, Some(ultimo)))

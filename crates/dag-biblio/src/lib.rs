@@ -6,6 +6,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod isbn;
 pub mod tipos;
 
 pub use tipos::*;

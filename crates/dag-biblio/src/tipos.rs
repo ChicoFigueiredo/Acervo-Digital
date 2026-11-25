@@ -223,10 +223,16 @@ pub enum EstadoLeitura {
     Drm,
     /// Protegido por senha.
     Senha,
-    Corrompido { motivo: String },
-    NaoSuportado { motivo: String },
+    Corrompido {
+        motivo: String,
+    },
+    NaoSuportado {
+        motivo: String,
+    },
     /// Ultrapassou limite de tamanho/tempo/expansão.
-    LimiteExcedido { limite: String },
+    LimiteExcedido {
+        limite: String,
+    },
 }
 
 /// Tudo o que a extração tirou de um arquivo, antes de qualquer IA.

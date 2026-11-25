@@ -896,6 +896,19 @@ pub fn texto(d: &DadosBiblioteca) -> String {
         DadosBiblioteca::Desfeita { lote, desfeitas } => {
             format!("Lote {lote}: {} decisão(ões) desfeita(s).\n", n(*desfeitas))
         }
+        DadosBiblioteca::Cadastros {
+            itens,
+            proximo_cursor,
+        } => format!(
+            "{} cadastro(s) da A Classificar, {} pronto(s) para cadastrar.{}",
+            itens.len(),
+            itens.iter().filter(|c| c.pronto_para_cadastrar).count(),
+            if proximo_cursor.is_some() {
+                " Há mais (use --cursor)."
+            } else {
+                ""
+            }
+        ),
         DadosBiblioteca::Cadastrada {
             resultados,
             bloqueado,
@@ -1120,6 +1133,10 @@ mod testes {
     #[test]
     fn revisao_mostra_lado_a_lado_evidencias_e_parecido() {
         let item = ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: 5,
             caminho: Some("/mnt/e/_classifica/jogo.pdf".into()),
             tamanho: Some(2048),
@@ -1221,12 +1238,14 @@ mod testes {
         let t = texto(&DadosBiblioteca::Cadastrada {
             resultados: vec![
                 ResultadoCadastro {
+                    cadastro_id: None,
                     file_id: 1,
                     estado: "cadastrado".into(),
                     calibre_id: Some(30),
                     erro: None,
                 },
                 ResultadoCadastro {
+                    cadastro_id: None,
                     file_id: 2,
                     estado: "pendente".into(),
                     calibre_id: None,
@@ -1264,6 +1283,7 @@ mod testes {
     #[test]
     fn homologacao_diz_o_que_aconteceu() {
         let mut h = HomologacaoInfo {
+            resumo: None,
             id: 1,
             cadastro_id: 12,
             estado: "proposta".into(),

@@ -722,6 +722,10 @@ mod testes {
         // Sem revisão nem cadastros carregados: todos prontos.
         assert_eq!(ui.prontos(&e).len(), 4);
         let rev = |id: i64, pend: i64| dag_core::ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: id,
             caminho: None,
             tamanho: None,

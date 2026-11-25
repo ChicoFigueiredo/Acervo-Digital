@@ -312,6 +312,10 @@ mod testes {
 
     fn item(id: i64, campos: Vec<CampoLadoALado>) -> ItemRevisaoInfo {
         ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: id,
             caminho: Some(format!("/l/{id}.pdf")),
             tamanho: Some(10),

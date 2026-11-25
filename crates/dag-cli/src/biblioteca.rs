@@ -1418,6 +1418,7 @@ mod testes {
         Resposta::Biblioteca {
             dados: DadosBiblioteca::Homologacao {
                 homologacao: HomologacaoInfo {
+                    resumo: None,
                     id: 1,
                     cadastro_id: 12,
                     estado: estado.into(),
@@ -1624,6 +1625,10 @@ mod testes {
 
     fn item_rev(id: i64, caminho: &str) -> dag_core::ItemRevisaoInfo {
         dag_core::ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: id,
             caminho: Some(caminho.into()),
             tamanho: Some(1),

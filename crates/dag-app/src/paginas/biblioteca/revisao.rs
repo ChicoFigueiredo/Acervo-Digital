@@ -632,6 +632,10 @@ mod testes {
 
     fn item(id: i64, campos: &[&str]) -> ItemRevisaoInfo {
         ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: id,
             caminho: None,
             tamanho: None,

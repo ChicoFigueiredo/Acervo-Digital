@@ -206,6 +206,15 @@ pub fn resumir_biblioteca(d: &DadosBiblioteca) -> String {
         DadosBiblioteca::Desfeita { lote, desfeitas } => {
             format!("Lote `{lote}` desfeito: {desfeitas} decisão(ões) revertida(s) no Catálogo.")
         }
+        DadosBiblioteca::Cadastros {
+            itens,
+            proximo_cursor,
+        } => format!(
+            "{} cadastro(s) da A Classificar, {} pronto(s) para cadastrar{}.",
+            itens.len(),
+            itens.iter().filter(|c| c.pronto_para_cadastrar).count(),
+            mais(proximo_cursor)
+        ),
         DadosBiblioteca::Cadastrada {
             resultados,
             bloqueado,
@@ -475,6 +484,7 @@ mod testes {
             (
                 DadosBiblioteca::Cadastrada {
                     resultados: vec![ResultadoCadastro {
+                        cadastro_id: None,
                         file_id: 1,
                         estado: "cadastrado".into(),
                         calibre_id: Some(1),
@@ -487,6 +497,7 @@ mod testes {
             (
                 DadosBiblioteca::Homologacao {
                     homologacao: HomologacaoInfo {
+                        resumo: None,
                         id: 1,
                         cadastro_id: 4,
                         estado: "proposta".into(),

@@ -986,6 +986,10 @@ mod testes {
 
     fn item(id: i64, caminho: &str, formato: &str, titulo: &str, tags: &[&str]) -> ItemRevisaoInfo {
         ItemRevisaoInfo {
+            membro: None,
+            proposta_homologada: None,
+            paginas: vec![],
+            paginas_ocr: 0,
             file_id: id,
             caminho: Some(caminho.into()),
             tamanho: Some(10),

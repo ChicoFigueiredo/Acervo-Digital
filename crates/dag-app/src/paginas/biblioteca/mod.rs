@@ -444,6 +444,8 @@ impl Estado {
     pub fn receber(&mut self, dados: DadosBiblioteca, prop: Option<PropBib>) -> Vec<AvisoBib> {
         let mut avisos: Vec<AvisoBib> = Vec::new();
         match dados {
+            // A página A Classificar ainda lê os cadastros pelo Leitor (somente leitura).
+            DadosBiblioteca::Cadastros { .. } => {}
             DadosBiblioteca::Bibliotecas { itens } => {
                 self.em_voo.remove(&Consulta::Bibliotecas);
                 self.bibliotecas = Some(itens);
@@ -1448,12 +1450,14 @@ mod testes {
             DadosBiblioteca::Cadastrada {
                 resultados: vec![
                     ResultadoCadastro {
+                        cadastro_id: None,
                         file_id: 1,
                         estado: "cadastrado".into(),
                         calibre_id: Some(9),
                         erro: None,
                     },
                     ResultadoCadastro {
+                        cadastro_id: None,
                         file_id: 2,
                         estado: "ja_existe_na_homologada".into(),
                         calibre_id: None,

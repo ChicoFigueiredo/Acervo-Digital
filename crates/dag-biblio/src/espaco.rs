@@ -208,6 +208,11 @@ pub fn relatorio(arquivos: &[ArquivoEspaco], bloco: u64) -> RelatorioEspaco {
         for i in &idx[1..] {
             let f = &fisicos[*i];
             let r = f.rep;
+            if r.homologado {
+                // Outro Formato da própria Homologada com o mesmo conteúdo: é assunto de revisão
+                // dentro da biblioteca, nunca espaço "recuperável" (o DAG não mexe nela).
+                continue;
+            }
             let bytes = alocado(r, bloco);
             let mut motivo = None;
             if r.reflink || (mantida.reflink && mantida.volume_id == r.volume_id) {
@@ -251,6 +256,21 @@ pub fn relatorio(arquivos: &[ArquivoEspaco], bloco: u64) -> RelatorioEspaco {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn segundo_formato_homologado_nao_conta_como_recuperavel() {
+        let mut a = arq(1, 1, 10_000, Some("h"));
+        a.homologado = true;
+        let mut b = arq(1, 2, 10_000, Some("h"));
+        b.homologado = true;
+        let c = arq(1, 3, 10_000, Some("h"));
+        let r = relatorio(&[a, b, c], 4096);
+        assert_eq!(r.grupos.len(), 1);
+        let g = &r.grupos[0];
+        assert_eq!(g.mantida, (1, 1));
+        assert_eq!(g.redundantes.len(), 1, "só a cópia de fora");
+        assert_eq!(g.redundantes[0].arquivo_id, 3);
+    }
 
     fn arq(vol: i64, id: i64, logico: u64, hash: Option<&str>) -> ArquivoEspaco {
         ArquivoEspaco {

@@ -80,14 +80,30 @@ const PERMITIDOS: &[(&str, &[&str])] = &[
         "dag-store/src/duplicados/exportar.rs",
         &[".write(true)", "create_new", "remove_file"],
     ),
+    // Pasta nova e vazia da biblioteca A Classificar (ADR 0008): só cria quando não existe.
+    ("dag-calibre/src/calibredb.rs", &["create_dir"]),
     // `fs.rs` da Lixeira é a única porta de mover; ver a verificação dedicada abaixo.
     ("dag-agent/src/lixeira/fs.rs", &["renameat", "create_dir"]),
 ];
+
+/// Pasta `testes/` declarada como `#[cfg(test)] mod testes;` no módulo pai: só testes.
+fn pasta_so_de_testes(p: &Path) -> bool {
+    if p.file_name().is_none_or(|n| n != "testes") {
+        return false;
+    }
+    let pai = p.parent().unwrap();
+    ["lib.rs", "mod.rs", "main.rs"].iter().any(|m| {
+        fs::read_to_string(pai.join(m)).is_ok_and(|t| t.contains("#[cfg(test)]\nmod testes;"))
+    })
+}
 
 fn arquivos_rs(dir: &Path, saida: &mut Vec<PathBuf>) {
     for e in fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.is_dir() {
+            if pasta_so_de_testes(&p) {
+                continue;
+            }
             arquivos_rs(&p, saida);
         } else if p.extension().is_some_and(|x| x == "rs") {
             saida.push(p);

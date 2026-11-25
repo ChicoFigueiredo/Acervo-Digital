@@ -2448,3 +2448,68 @@ fn ia_em_lote_agrupa_primarios_e_depois_segundos_pareceres_com_o_mesmo_resultado
     assert_eq!(gravado_um.len(), 4, "{gravado_um:?}");
     assert_eq!(gravado_um, gravado_lote, "mesmo resultado gravado");
 }
+
+#[test]
+fn compactado_grande_so_manda_o_teto_de_membros_para_a_ia() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct IaContadora(Arc<AtomicUsize>);
+    impl dag_agent::ClassificadorIa for IaContadora {
+        fn nome(&self) -> String {
+            "conta:1b".into()
+        }
+
+        fn classificar(
+            &self,
+            _entrada: &EntradaClassificacao,
+        ) -> Result<ResultadoClassificacao, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ResultadoClassificacao::default())
+        }
+    }
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("cursos.pdf"), corpo(33, 30_000)).unwrap();
+    // 20 "Membros" num só arquivo: mais que o teto padrão (12).
+    let ext = ExtratorRoteiro::novo(|_| {
+        (0..20)
+            .map(|i| {
+                (
+                    format!("curso/aula{i:02}.pdf"),
+                    vec![texto_v(
+                        Campo::Titulo,
+                        &format!("Aula {i}"),
+                        OrigemEvidencia::MetadadoInterno,
+                        0.9,
+                    )],
+                )
+            })
+            .collect()
+    });
+    let chamadas = Arc::new(AtomicUsize::new(0));
+    let mut a = e
+        .agente_com(Autor::Gui, ext)
+        .com_classificador_ia(Arc::new(IaContadora(Arc::clone(&chamadas))));
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = match bib(a.executar(Comando::BibliotecaProcessar {
+        limite: None,
+        ia: true,
+    })) {
+        DadosBiblioteca::Processada { resumo } => resumo,
+        d => panic!("{d:?}"),
+    };
+    assert_eq!(chamadas.load(Ordering::SeqCst), 12, "{r:?}");
+    assert_eq!(r.membros_de_conteiner, 20, "{r:?}");
+    // Todos os 20 viram itens de revisão; os 8 sem IA dizem por quê.
+    let itens: Vec<ItemRevisaoInfo> = revisao(&mut a)
+        .into_iter()
+        .filter(|i| i.membro.is_some())
+        .collect();
+    assert_eq!(itens.len(), 20, "{itens:#?}");
+    let sem_ia = itens
+        .iter()
+        .filter(|i| format!("{i:?}").contains("IA não consultada"))
+        .count();
+    assert_eq!(sem_ia, 8, "{itens:#?}");
+}

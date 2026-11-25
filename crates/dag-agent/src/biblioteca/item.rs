@@ -299,6 +299,18 @@ pub(super) struct ItemPreparado {
     rejeitados: HashMap<Campo, Vec<String>>,
     /// Entrada da IA (só existe quando há classificador).
     pub(super) entrada_ia: Option<EntradaClassificacao>,
+    /// A IA foi dispensada para este item (teto de Membros do compactado).
+    pub(super) ia_pulada: bool,
+}
+
+impl ItemPreparado {
+    /// Dispensa a IA deste item: segue só com a extração, com o motivo anotado para a revisão.
+    pub(super) fn pular_ia(&mut self, motivo: String) {
+        if self.entrada_ia.take().is_some() {
+            self.ia_pulada = true;
+            self.extras.push((None, motivo));
+        }
+    }
 }
 
 /// O que o humano rejeitou não volta como sugestão.
@@ -321,8 +333,12 @@ impl Agente {
         cfg: &ConfigBiblioteca,
         ia: Option<&Arc<dyn ClassificadorIa>>,
         vocab: Option<&Arc<CacheVocab>>,
+        pular_ia: Option<String>,
     ) -> Result<SaidaItem, ErroAgente> {
-        let p = self.preparar_item(e, cfg, ia, vocab)?;
+        let mut p = self.preparar_item(e, cfg, ia, vocab)?;
+        if let Some(motivo) = pular_ia {
+            p.pular_ia(motivo);
+        }
         let res = p
             .entrada_ia
             .as_ref()
@@ -665,6 +681,7 @@ impl Agente {
             humanos,
             rejeitados,
             entrada_ia,
+            ia_pulada: false,
         })
     }
 
@@ -691,6 +708,7 @@ impl Agente {
             humanos,
             rejeitados,
             entrada_ia: _,
+            ia_pulada: _,
         } = p;
         let nome_alvo = nome_alvo.as_str();
         let agora = self.agora_biblio();

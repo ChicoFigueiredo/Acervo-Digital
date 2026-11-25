@@ -102,6 +102,49 @@ struct Pronto {
     ms: u64,
 }
 
+/// Quais itens de um compactado ficam sem IA: com mais de `teto` Membros legíveis, passam os de
+/// formato de livro primeiro e, dentro de cada grupo, os maiores. Um arquivo solto nunca é pulado.
+fn membros_sem_ia(itens: &[ItemExtraido], teto: usize) -> Vec<bool> {
+    let mut pular = vec![false; itens.len()];
+    let legiveis: Vec<usize> = (0..itens.len())
+        .filter(|&i| {
+            !itens[i].membro.is_empty() && matches!(itens[i].resultado.estado, EstadoLeitura::Lido)
+        })
+        .collect();
+    if teto == 0 || legiveis.len() <= teto {
+        return pular;
+    }
+    let de_livro = |f: FormatoLivro| {
+        !matches!(
+            f,
+            FormatoLivro::Txt
+                | FormatoLivro::Rtf
+                | FormatoLivro::Html
+                | FormatoLivro::Docx
+                | FormatoLivro::Outro
+        )
+    };
+    let mut ordem = legiveis;
+    ordem.sort_by_key(|&i| {
+        (
+            std::cmp::Reverse(de_livro(itens[i].formato)),
+            std::cmp::Reverse(itens[i].tamanho),
+            i,
+        )
+    });
+    for &i in &ordem[teto..] {
+        pular[i] = true;
+    }
+    pular
+}
+
+/// Anotação de revisão de um Membro que ficou sem IA.
+fn motivo_sem_ia(teto: usize) -> String {
+    format!(
+        "IA não consultada: o compactado tem mais de {teto} livros; só os {teto} primeiros (formato de livro e maiores) passam pela IA"
+    )
+}
+
 fn motivo_excecao(e: &EstadoLeitura) -> String {
     match e {
         EstadoLeitura::Drm => "drm".to_owned(),
@@ -616,7 +659,9 @@ impl Agente {
             motivos: Vec::new(),
             prontos: Vec::new(),
         };
-        for it in itens {
+        let teto = ctx.cfg.ia.max_membros_conteiner;
+        let pular = membros_sem_ia(&itens, teto);
+        for (it, pular) in itens.into_iter().zip(pular) {
             jp.paginas += it.resultado.paginas.len() as u64;
             jp.ocr += it.ocr;
             if !matches!(it.resultado.estado, EstadoLeitura::Lido) {
@@ -634,7 +679,10 @@ impl Agente {
                 resultado: &it.resultado,
                 capa: it.capa.clone(),
             };
-            let prep = self.preparar_item(&entrada, ctx.cfg, ctx.ia, ctx.vocab)?;
+            let mut prep = self.preparar_item(&entrada, ctx.cfg, ctx.ia, ctx.vocab)?;
+            if pular {
+                prep.pular_ia(motivo_sem_ia(teto));
+            }
             jp.prontos.push((it, prep));
         }
         Ok(jp)
@@ -659,25 +707,59 @@ impl Agente {
         }
         let mut jobs = std::mem::take(pend);
         let mut entradas = Vec::new();
+        // Quantas entradas de IA cada job tem (para saber quais jobs a IA cobriu inteiros).
+        let mut por_job = Vec::with_capacity(jobs.len());
         for j in &mut jobs {
+            let antes = entradas.len();
             for (_, p) in &mut j.prontos {
                 if let Some(e) = p.entrada_ia.take() {
                     entradas.push(e);
                 }
             }
+            por_job.push(entradas.len() - antes);
         }
         let falha =
             || Err::<ResultadoClassificacao, String>("a IA falhou de forma inesperada".into());
-        let mut resultados: Vec<Result<ResultadoClassificacao, String>> = match ia {
-            Some(c) if !entradas.is_empty() => {
-                catch_unwind(AssertUnwindSafe(|| c.classificar_lote(&entradas))).unwrap_or_default()
+        // A IA roda em blocos de `lote`; o cancelamento vale entre blocos (um compactado grande
+        // não prende o job). O que não foi coberto volta para a fila, com a extração já gravada.
+        let bloco = cfg.ia.lote.max(1);
+        let mut resultados: Vec<Result<ResultadoClassificacao, String>> =
+            Vec::with_capacity(entradas.len());
+        let mut cancelado = false;
+        if let Some(c) = ia {
+            for pedaco in entradas.chunks(bloco) {
+                if matches!(
+                    self.controle.estado(),
+                    dag_scanner::EstadoControle::Cancelado
+                ) {
+                    cancelado = true;
+                    break;
+                }
+                let mut res = catch_unwind(AssertUnwindSafe(|| c.classificar_lote(pedaco)))
+                    .unwrap_or_default();
+                res.resize_with(pedaco.len(), falha);
+                resultados.extend(res);
             }
-            _ => Vec::new(),
-        };
-        resultados.resize_with(entradas.len(), falha);
+        }
+        let cobertos = resultados.len();
+        if !cancelado {
+            resultados.resize_with(entradas.len(), falha);
+        }
         let mut resultados = resultados.into_iter();
-        for jp in jobs {
+        let mut consumidos = 0_usize;
+        for (jp, n) in jobs.into_iter().zip(por_job) {
             let (job, info, t0) = (jp.job.clone(), jp.info.clone(), jp.t0);
+            if cancelado && consumidos + n > cobertos {
+                // Sem todos os resultados: o job volta inteiro para a fila (retomável).
+                for _ in consumidos..cobertos.min(consumidos + n) {
+                    resultados.next();
+                }
+                consumidos += n;
+                store::devolver_job(self.conexao(), job.id, self.agora_biblio())?;
+                r.interrompido = true;
+                continue;
+            }
+            consumidos += n;
             let res = self.concluir_job_pendente(jp, &mut resultados, ia, vocab);
             self.finalizar(&job, res, &Some(info), cfg, r, prog, t0)?;
         }
@@ -708,7 +790,11 @@ impl Agente {
         let mut erro: Option<ErroAgente> = None;
         for (it, prep) in prontos {
             // Sempre consome o resultado do item, para manter o alinhamento do lote.
-            let res_ia = resultados.next();
+            let res_ia = if prep.ia_pulada {
+                None
+            } else {
+                resultados.next()
+            };
             if erro.is_some() {
                 continue;
             }
@@ -790,7 +876,9 @@ impl Agente {
         let (mut ocr, mut paginas, mut membros) = (0_u64, 0_u64, 0_u64);
         let (mut revisao, mut usou_ia) = (0_u64, false);
         let mut motivos: Vec<String> = Vec::new();
-        for it in itens {
+        let teto = cfg.ia.max_membros_conteiner;
+        let pular = membros_sem_ia(&itens, teto);
+        for (it, pular) in itens.into_iter().zip(pular) {
             paginas += it.resultado.paginas.len() as u64;
             ocr += it.ocr;
             // Exceções: DRM, senha, ilegível, limite. Nunca contorna; vai para revisão humana.
@@ -809,7 +897,8 @@ impl Agente {
                 resultado: &it.resultado,
                 capa: it.capa.clone(),
             };
-            let s = self.processar_item(&entrada, cfg, ia, vocab)?;
+            let s =
+                self.processar_item(&entrada, cfg, ia, vocab, pular.then(|| motivo_sem_ia(teto)))?;
             usou_ia |= s.usou_ia;
             revisao += 1;
             membros += u64::from(!it.membro.is_empty());

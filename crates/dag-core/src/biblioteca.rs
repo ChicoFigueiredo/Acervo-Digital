@@ -113,6 +113,9 @@ pub struct ConfigIaBiblioteca {
     /// Livros por lote: o primário roda para o lote todo e o segundo parecer só depois, para
     /// trocar o modelo na GPU uma vez por lote. 1 = um livro por vez (sem agrupar).
     pub lote: usize,
+    /// Teto de Membros de um mesmo compactado que passam pela IA (os de formato de livro e os
+    /// maiores primeiro); os demais ficam só com a extração. 0 = sem teto.
+    pub max_membros_conteiner: usize,
 }
 
 impl Default for ConfigIaBiblioteca {
@@ -125,6 +128,7 @@ impl Default for ConfigIaBiblioteca {
             usar_visao: true,
             timeout_s: 300,
             lote: 8,
+            max_membros_conteiner: 12,
         }
     }
 }

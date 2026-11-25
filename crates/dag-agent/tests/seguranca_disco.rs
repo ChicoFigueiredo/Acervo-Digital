@@ -80,6 +80,9 @@ const PERMITIDOS: &[(&str, &[&str])] = &[
         "dag-store/src/duplicados/exportar.rs",
         &[".write(true)", "create_new", "remove_file"],
     ),
+    // Saídas pedidas pelo usuário na CLI (relatório de benchmark, casos do conjunto ouro):
+    // arquivo novo, nunca sobrescreve.
+    ("dag-cli/src/escrita.rs", &[".write(true)", "create_new"]),
     // Pasta nova e vazia da biblioteca A Classificar (ADR 0008): só cria quando não existe.
     ("dag-calibre/src/calibredb.rs", &["create_dir"]),
     // `fs.rs` da Lixeira é a única porta de mover; ver a verificação dedicada abaixo.

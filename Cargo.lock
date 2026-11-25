@@ -1174,9 +1174,12 @@ dependencies = [
  "clap",
  "ctrlc",
  "dag-agent",
+ "dag-biblio",
+ "dag-biblio-ia",
  "dag-core",
  "dag-mcp",
  "dag-platform-linux",
+ "serde",
  "serde_json",
  "tempfile",
 ]

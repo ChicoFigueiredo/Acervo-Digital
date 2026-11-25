@@ -107,7 +107,8 @@ pub struct ArquivoIgualAHomologado {
     pub tamanho: u64,
 }
 
-/// Para uma fatia de formatos homologados com hash (cursor `apos_formato_id`), acha os arquivos
+/// Para uma fatia de formatos homologados com hash, do maior para o menor (cursor `apos` =
+/// tamanho e id do último formato da página anterior; `None` começa do maior), acha os arquivos
 /// do Catálogo com o mesmo hash e tamanho (exceto o próprio arquivo ligado), pelo índice
 /// `hashes(size_bytes, hash)`: ~3 mil buscas em índice para uma biblioteca de 3 mil livros, mesmo
 /// com 20 milhões de arquivos. É a fonte dos candidatos `exata`.
@@ -117,22 +118,27 @@ pub struct ArquivoIgualAHomologado {
 pub fn arquivos_iguais_aos_homologados(
     conn: &Connection,
     biblioteca_id: i64,
-    apos_formato_id: i64,
+    apos: Option<(u64, i64)>,
     limite: usize,
 ) -> Resultado<Vec<ArquivoIgualAHomologado>> {
+    let (apos_tam, apos_id) = apos.map_or((i64::MAX, i64::MIN), |(t, i)| {
+        (i64::try_from(t).unwrap_or(i64::MAX), i)
+    });
     let mut st = conn.prepare(
         "WITH fatia AS (
             SELECT id, livro_id, hash, tamanho, file_id FROM formatos_homologados
-            WHERE biblioteca_id = ?1 AND hash IS NOT NULL AND id > ?2 ORDER BY id LIMIT ?3)
+            WHERE biblioteca_id = ?1 AND hash IS NOT NULL
+              AND (tamanho < ?2 OR (tamanho = ?2 AND id > ?3))
+            ORDER BY tamanho DESC, id LIMIT ?4)
          SELECT fatia.id, fatia.livro_id, h.file_id, fatia.tamanho FROM fatia
          CROSS JOIN hashes h INDEXED BY idx_hashes_dup
          WHERE h.size_bytes = fatia.tamanho AND h.hash = fatia.hash
            AND (fatia.file_id IS NULL OR h.file_id <> fatia.file_id)
-         ORDER BY fatia.id, h.file_id",
+         ORDER BY fatia.tamanho DESC, fatia.id, h.file_id",
     )?;
     let v = st
         .query_map(
-            params![biblioteca_id, apos_formato_id, limite_de(limite) as i64],
+            params![biblioteca_id, apos_tam, apos_id, limite_de(limite) as i64],
             |l| {
                 Ok(ArquivoIgualAHomologado {
                     formato_id: l.get(0)?,

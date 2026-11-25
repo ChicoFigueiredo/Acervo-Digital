@@ -16,7 +16,7 @@ use dag_core::{
 use dag_store::biblioteca as store;
 use rusqlite::Connection;
 
-use super::{cursor_i64, dados, hex, homologada_ativa, limite_pagina};
+use super::{dados, hex, homologada_ativa, limite_pagina};
 use crate::agente::Agente;
 use crate::erro::ErroAgente;
 
@@ -60,7 +60,9 @@ fn papel_da_copia(
     bibliotecas: &[String],
     pastas_a_classificar: &[String],
 ) -> (PapelCopia, PapelCopiaInfo) {
-    if bibliotecas.iter().any(|b| caminho.starts_with(b.as_str())) {
+    if bibliotecas.iter().any(|b| caminho.starts_with(b.as_str()))
+        || em_copia_de_biblioteca(caminho)
+    {
         return (
             PapelCopia::EspelhoDeBiblioteca,
             PapelCopiaInfo::EspelhoDeBiblioteca,
@@ -77,6 +79,16 @@ fn papel_da_copia(
         );
     }
     (PapelCopia::Outro, PapelCopiaInfo::Outro)
+}
+
+/// O arquivo está numa cópia (não registrada) de biblioteca Calibre? Os livros ficam em
+/// `<raiz>/<Autor>/<Título (id)>/arquivo`, então basta um `stat` de `<raiz>/metadata.db`. Só lê
+/// metadados do sistema de arquivos; Volume desconectado responde "não".
+fn em_copia_de_biblioteca(caminho: &str) -> bool {
+    std::path::Path::new(caminho)
+        .ancestors()
+        .nth(3)
+        .is_some_and(|raiz| raiz.join("metadata.db").is_file())
 }
 
 /// Avalia (sem executar) o descarte de uma cópia idêntica a um Formato homologado.
@@ -204,17 +216,30 @@ impl Agente {
             ));
         };
         let fatia = limite_pagina(limite);
-        let apos = cursor_i64(cursor).unwrap_or(0);
-        let ids: Vec<i64> = {
+        // Do maior Formato para o menor: o espaço recuperável aparece primeiro (B-06). Cursor
+        // "tamanho:id" do último Formato da página anterior.
+        let apos: Option<(u64, i64)> = cursor.and_then(|c| {
+            let (t, i) = c.split_once(':')?;
+            Some((t.parse().ok()?, i.parse().ok()?))
+        });
+        let (apos_tam, apos_id) = apos.map_or((i64::MAX, i64::MIN), |(t, i)| {
+            (i64::try_from(t).unwrap_or(i64::MAX), i)
+        });
+        let pagina: Vec<(i64, i64)> = {
             let mut st = conn.prepare(
-                "SELECT id FROM formatos_homologados WHERE biblioteca_id = ?1 AND hash IS NOT NULL
-                 AND id > ?2 ORDER BY id LIMIT ?3",
+                "SELECT id, tamanho FROM formatos_homologados WHERE biblioteca_id = ?1
+                   AND hash IS NOT NULL AND (tamanho < ?2 OR (tamanho = ?2 AND id > ?3))
+                 ORDER BY tamanho DESC, id LIMIT ?4",
             )?;
-            st.query_map(rusqlite::params![bib.id, apos, fatia as i64], |l| l.get(0))?
-                .collect::<rusqlite::Result<_>>()?
+            st.query_map(
+                rusqlite::params![bib.id, apos_tam, apos_id, fatia as i64],
+                |l| Ok((l.get(0)?, l.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?
         };
-        let proximo = if ids.len() == fatia {
-            ids.last().copied()
+        let ids: std::collections::BTreeSet<i64> = pagina.iter().map(|(i, _)| *i).collect();
+        let proximo = if pagina.len() == fatia {
+            pagina.last().map(|(i, t)| format!("{t}:{i}"))
         } else {
             None
         };
@@ -225,7 +250,7 @@ impl Agente {
         let mut grupos: BTreeMap<i64, GrupoDuplicata> = BTreeMap::new();
         let mut emitidos = 0_u64;
         for a in achados {
-            if ids.last().is_some_and(|u| a.formato_id > *u) {
+            if !ids.contains(&a.formato_id) {
                 continue;
             }
             if a.tamanho < cfg.tamanho_minimo_duplicata {
@@ -268,20 +293,28 @@ impl Agente {
                 },
                 agora,
             )?;
-            let (_, criado) = store::emitir_alerta(
-                conn,
-                &store::NovoAlerta {
-                    chave: Some(format!("dup:{}:{}", info.file_id, a.formato_id)),
-                    tipo: store::TipoAlerta::DuplicataExata,
-                    file_id: Some(info.file_id),
-                    dados_json: serde_json::json!({
-                        "formato_id": a.formato_id, "livro_id": a.livro_id,
-                        "caminho": info.caminho, "bytes": info.tamanho,
-                    })
-                    .to_string(),
-                },
-                agora,
-            )?;
+            // Cópias de biblioteca Calibre (espelhos e bibliotecas antigas) são candidatas a
+            // Cobertura, não "você já tem este livro": não geram alerta, para não afogar os de
+            // downloads e da A Classificar. Continuam listadas no grupo.
+            let espelho = matches!(copia.papel, PapelCopiaInfo::EspelhoDeBiblioteca);
+            let (_, criado) = if espelho {
+                (0, false)
+            } else {
+                store::emitir_alerta(
+                    conn,
+                    &store::NovoAlerta {
+                        chave: Some(format!("dup:{}:{}", info.file_id, a.formato_id)),
+                        tipo: store::TipoAlerta::DuplicataExata,
+                        file_id: Some(info.file_id),
+                        dados_json: serde_json::json!({
+                            "formato_id": a.formato_id, "livro_id": a.livro_id,
+                            "caminho": info.caminho, "bytes": info.tamanho,
+                        })
+                        .to_string(),
+                    },
+                    agora,
+                )?
+            };
             emitidos += u64::from(criado);
             let g = match grupos.entry(a.formato_id) {
                 std::collections::btree_map::Entry::Occupied(o) => o.into_mut(),
@@ -305,7 +338,12 @@ impl Agente {
             }
             g.copias.push(copia);
         }
-        let grupos: Vec<GrupoDuplicata> = grupos.into_values().collect();
+        let mut grupos: Vec<GrupoDuplicata> = grupos.into_values().collect();
+        grupos.sort_by(|a, b| {
+            b.bytes_sugeridos
+                .cmp(&a.bytes_sugeridos)
+                .then(b.bytes_totais.cmp(&a.bytes_totais))
+        });
         let (t, s) = grupos.iter().fold((0, 0), |(t, s), g| {
             (t + g.bytes_totais, s + g.bytes_sugeridos)
         });
@@ -317,7 +355,7 @@ impl Agente {
             bytes_totais_pagina: t,
             bytes_sugeridos_pagina: s,
             alertas_emitidos: emitidos,
-            proximo_cursor: proximo.map(|i| i.to_string()),
+            proximo_cursor: proximo,
         }))
     }
 }

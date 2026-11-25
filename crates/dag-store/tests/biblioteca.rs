@@ -326,7 +326,7 @@ fn ligacao_com_o_catalogo_reusa_hashes_e_acha_iguais() {
     let (n, ult) = importar_hashes_do_catalogo(c, b, 0, 100, 5).unwrap();
     assert_eq!((n, ult.is_some()), (1, true));
     // f2 (outro arquivo do Catálogo, mesmo hash e tamanho que o homologado f0) é duplicata exata.
-    let iguais = arquivos_iguais_aos_homologados(c, b, 0, 100).unwrap();
+    let iguais = arquivos_iguais_aos_homologados(c, b, None, 100).unwrap();
     assert_eq!(iguais.len(), 1);
     assert_eq!(iguais[0].file_id, f[2]);
     assert_eq!(iguais[0].tamanho, 1000);

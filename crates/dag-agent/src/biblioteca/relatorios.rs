@@ -111,6 +111,8 @@ impl Agente {
         // byte, que casariam com as ~139 mil entradas vazias do Catálogo.
         let minimo =
             i64::try_from(self.config_biblioteca().tamanho_minimo_duplicata).unwrap_or(i64::MAX);
+        let cancelado = || self.controle.estado() == dag_scanner::EstadoControle::Cancelado;
+        let guarda = self.guarda_interrupcao();
         let conn = self.conexao();
         let vol: Option<i64> = volume.and_then(|v| {
             v.parse().ok().or_else(|| {
@@ -120,13 +122,18 @@ impl Agente {
                 .ok()
             })
         });
+        // CROSS JOIN fixa a ordem: parte dos Formatos homologados (milhares) e só então busca
+        // os hashes por (tamanho, hash). Sem isso o SQLite propaga `tamanho >= ?2` para
+        // `hashes.size_bytes` e varre ~20 milhões de hashes com leitura aleatória em `files`
+        // (horas no Catálogo real, medido no ensaio do M1).
         let mut st = conn.prepare(
             "SELECT DISTINCT f.id, f.volume_id, f.native_dev, f.native_file_id, f.nlink,
                     f.logical_bytes, f.allocated_bytes, h.hash,
                     EXISTS (SELECT 1 FROM formatos_homologados x WHERE x.file_id = f.id)
              FROM formatos_homologados fh
-             JOIN hashes h INDEXED BY idx_hashes_dup ON h.size_bytes = fh.tamanho AND h.hash = fh.hash
-             JOIN files f ON f.id = h.file_id
+             CROSS JOIN hashes h INDEXED BY idx_hashes_dup
+                   ON h.size_bytes = fh.tamanho AND h.hash = fh.hash
+             CROSS JOIN files f ON f.id = h.file_id
              WHERE fh.hash IS NOT NULL AND f.state = 'ativo' AND f.na_lixeira = 0
                AND fh.tamanho >= ?2
                AND (?1 IS NULL OR f.volume_id = ?1)",
@@ -150,7 +157,15 @@ impl Agente {
                     homologado: l.get::<_, i64>(8)? != 0,
                 })
             })?
-            .collect::<rusqlite::Result<_>>()?;
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| {
+                if cancelado() {
+                    ErroAgente::biblio("cancelado", "relatório de espaço interrompido; nada mudou")
+                } else {
+                    e.into()
+                }
+            })?;
+        drop(guarda);
         let r = relatorio(&arquivos, 4096);
         let volumes = r
             .volumes

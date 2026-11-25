@@ -41,7 +41,10 @@ impl Agente {
         let agora = self.agora_biblio();
         let bruto = Path::new(caminho);
         let mut avisos = Vec::new();
-        let mut campos_perfil: Option<Vec<store::CampoCalibre>> = None;
+        let campos_perfil: Option<Vec<store::CampoCalibre>>;
+        let mut versao_calibre: Option<String> = None;
+        // Só é verdade quando o DAG acabou de criar a biblioteca Calibre (A Classificar nova).
+        let mut criou = false;
         let canon = match papel {
             PapelRegistro::Homologada => {
                 let c = std::fs::canonicalize(bruto).map_err(|e| {
@@ -49,8 +52,16 @@ impl Agente {
                 })?;
                 // Abre só para leitura: valida que é uma biblioteca Calibre.
                 let leitura = BibliotecaLeitura::abrir(&c)?;
-                let uuid = leitura.library_id()?;
-                let _ = uuid;
+                let _ = leitura.library_id()?;
+                drop(leitura);
+                // Perfil em `mode=ro`: grava os campos (para `perfil` e a compatibilidade) e a
+                // versão do Calibre que gravou por último, quando detectável.
+                let perfil = ler_perfil(&c)?;
+                versao_calibre = perfil
+                    .versao_calibre_gravacao
+                    .as_ref()
+                    .map(|v| v.versao.clone());
+                campos_perfil = Some(campos_do_perfil(&perfil));
                 c
             }
             PapelRegistro::AClassificar => {
@@ -88,6 +99,7 @@ impl Agente {
                 } else {
                     let cli = self.cliente_calibre(&cfg, Some(h))?;
                     let b = cli.criar_a_classificar(destino, h)?;
+                    criou = true;
                     cli.garantir_colunas_dag(&b)?;
                     avisos.push("A Classificar criada com `calibredb`".into());
                     let rel = cli.clonar_estrutura(&b, &perfil)?;
@@ -101,7 +113,7 @@ impl Agente {
         let (uuid, versao) = match papel {
             PapelRegistro::Homologada => {
                 let l = BibliotecaLeitura::abrir(&canon)?;
-                (l.library_id()?, None)
+                (l.library_id()?, versao_calibre)
             }
             PapelRegistro::AClassificar => (BibliotecaLeitura::abrir(&canon)?.library_id()?, None),
         };
@@ -112,7 +124,6 @@ impl Agente {
                 .map_or_else(|| "biblioteca".into(), |n| n.to_string_lossy().into_owned())
         });
         let conn = self.conexao();
-        let ja = store::biblioteca_por_caminho(conn, &caminho_txt)?.is_some();
         let id = store::registrar_biblioteca(
             conn,
             &store::NovaBiblioteca {
@@ -120,7 +131,7 @@ impl Agente {
                 papel: papel_store(papel),
                 nome: &nome_final,
                 library_uuid: uuid.as_deref(),
-                versao_calibre: versao,
+                versao_calibre: versao.as_deref(),
             },
             agora,
         )?;
@@ -131,7 +142,7 @@ impl Agente {
             .ok_or_else(|| ErroAgente::biblio("biblioteca_nao_registrada", "sumiu"))?;
         Ok(dados(DadosBiblioteca::Registrada {
             biblioteca: info_biblioteca(conn, &b)?,
-            criada: !ja,
+            criada: criou,
             avisos,
         }))
     }
@@ -149,7 +160,11 @@ impl Agente {
         let conn = self.conexao();
         let b = resolver_biblioteca(conn, ref_)?;
         let perfil = ler_perfil(Path::new(&b.caminho))?;
-        let campos_gravados = store::listar_campos(conn, b.id)?;
+        let mut campos_gravados = store::listar_campos(conn, b.id)?;
+        if campos_gravados.is_empty() {
+            // Registro anterior a esta versão: calcula do perfil lido agora (mode=ro).
+            campos_gravados = campos_do_perfil(&perfil);
+        }
         let campos: Vec<CampoInfo> = campos_gravados
             .into_iter()
             .map(|c| CampoInfo {

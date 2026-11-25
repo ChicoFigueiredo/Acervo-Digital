@@ -165,6 +165,29 @@ impl Agente {
         }
     }
 
+    /// Enquanto a guarda viver, o cancelamento (Ctrl-C, `dag cancelar`) interrompe a consulta
+    /// SQL em curso (`sqlite3_interrupt`). Só para consultas de leitura longas: a escrita não
+    /// passa por aqui.
+    pub(crate) fn guarda_interrupcao(&self) -> GuardaInterrupcao {
+        let alca = self.conexao().get_interrupt_handle();
+        let controle = self.controle.clone();
+        let fim = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fim2 = Arc::clone(&fim);
+        let vigia = std::thread::spawn(move || {
+            while !fim2.load(std::sync::atomic::Ordering::Relaxed) {
+                if controle.estado() == EstadoControle::Cancelado {
+                    alca.interrupt();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        GuardaInterrupcao {
+            fim,
+            vigia: Some(vigia),
+        }
+    }
+
     /// Progresso no painel de trabalhos (vai como mensagem de etapa; no máximo 2 por segundo).
     pub(crate) fn progresso_biblioteca(&mut self, p: &ProgressoBiblioteca, forcar: bool) {
         let ok = forcar
@@ -493,4 +516,19 @@ pub(crate) const PAGINA_BIBLIO_MAX: u32 = 500;
 
 pub(crate) fn limite_pagina(l: Option<u32>) -> usize {
     l.unwrap_or(PAGINA_BIBLIO).clamp(1, PAGINA_BIBLIO_MAX) as usize
+}
+
+/// Ver [`Agente::guarda_interrupcao`]. Ao sair de escopo, para o vigia.
+pub(crate) struct GuardaInterrupcao {
+    fim: Arc<std::sync::atomic::AtomicBool>,
+    vigia: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for GuardaInterrupcao {
+    fn drop(&mut self) {
+        self.fim.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(v) = self.vigia.take() {
+            let _ = v.join();
+        }
+    }
 }

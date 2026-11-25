@@ -137,6 +137,12 @@ fn registrada(b: &BibliotecaInfo, criada: bool, avisos: &[String]) -> String {
     if criada {
         s.push_str("  A pasta não era uma biblioteca: o DAG a criou agora (via calibredb).\n");
     }
+    if b.papel == PapelRegistro::Homologada {
+        s.push_str("  Lida só em modo leitura: nada foi criado nem alterado nela.\n");
+        if b.livros == 0 {
+            s.push_str("  As contagens aparecem depois da primeira sincronização.\n");
+        }
+    }
     for a in avisos {
         s.push_str(&format!("  aviso: {a}\n"));
     }

@@ -6,7 +6,17 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod autores;
+pub mod descarte;
+pub mod duplicidade;
+pub mod espaco;
+pub mod identidade;
 pub mod isbn;
+pub mod normalizacao;
+pub mod prioridade;
+pub mod reconciliacao;
+pub mod taxonomia;
 pub mod tipos;
+pub mod vocabulario;
 
 pub use tipos::*;

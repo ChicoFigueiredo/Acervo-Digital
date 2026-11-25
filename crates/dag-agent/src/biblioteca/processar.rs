@@ -9,7 +9,7 @@
 //! itens: nada novo sai da fila depois do pedido e o que já está lendo termina.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
@@ -292,7 +292,7 @@ impl Agente {
         let conn = self.conexao();
         let info = store::info_arquivo(conn, job.file_id)?
             .ok_or_else(|| ErroAgente::biblio("arquivo_inexistente", "arquivo fora do Catálogo"))?;
-        let caminho = Path::new(&info.caminho).to_path_buf();
+        let caminho = info.caminho_no_disco();
         let formato = formato_para_fila(&info.nome)
             .ok_or_else(|| ErroAgente::biblio("formato_nao_bibliografico", info.nome.clone()))?;
         if !caminho.is_file() {

@@ -41,6 +41,7 @@ impl Agente {
         let agora = self.agora_biblio();
         let bruto = Path::new(caminho);
         let mut avisos = Vec::new();
+        let mut campos_perfil: Option<Vec<store::CampoCalibre>> = None;
         let canon = match papel {
             PapelRegistro::Homologada => {
                 let c = std::fs::canonicalize(bruto).map_err(|e| {
@@ -66,17 +67,35 @@ impl Agente {
                 };
                 let h = Path::new(&homologada.caminho);
                 let existe = destino.join("metadata.db").is_file();
-                if existe {
-                    dag_calibre::calibredb::BibliotecaAClassificar::abrir(destino, h)?
-                        .raiz()
-                        .to_path_buf()
+                // Perfil da Homologada lido em `mode=ro`: nunca `calibredb clone`.
+                let perfil = ler_perfil(h)?;
+                let raiz = if existe {
+                    let b = dag_calibre::calibredb::BibliotecaAClassificar::abrir(destino, h)?;
+                    // Idempotente: só chama o calibredb se faltar coluna do perfil.
+                    let tem = BibliotecaLeitura::abrir(b.raiz())?
+                        .colunas_personalizadas()
+                        .iter()
+                        .map(|c| c.rotulo.clone())
+                        .collect::<Vec<_>>();
+                    let falta = perfil.colunas.iter().any(|c| !tem.contains(&c.rotulo));
+                    if falta {
+                        let cli = self.cliente_calibre(&cfg, Some(h))?;
+                        cli.garantir_colunas_dag(&b)?;
+                        let rel = cli.clonar_estrutura(&b, &perfil)?;
+                        avisos.extend(avisos_do_relatorio(&rel));
+                    }
+                    b.raiz().to_path_buf()
                 } else {
                     let cli = self.cliente_calibre(&cfg, Some(h))?;
                     let b = cli.criar_a_classificar(destino, h)?;
                     cli.garantir_colunas_dag(&b)?;
                     avisos.push("A Classificar criada com `calibredb`".into());
+                    let rel = cli.clonar_estrutura(&b, &perfil)?;
+                    avisos.extend(avisos_do_relatorio(&rel));
                     b.raiz().to_path_buf()
-                }
+                };
+                campos_perfil = Some(campos_do_perfil(&perfil));
+                raiz
             }
         };
         let (uuid, versao) = match papel {
@@ -105,6 +124,9 @@ impl Agente {
             },
             agora,
         )?;
+        if let Some(campos) = &campos_perfil {
+            store::gravar_campos(conn, id, campos)?;
+        }
         let b = store::obter_biblioteca(conn, id)?
             .ok_or_else(|| ErroAgente::biblio("biblioteca_nao_registrada", "sumiu"))?;
         Ok(dados(DadosBiblioteca::Registrada {
@@ -414,6 +436,69 @@ impl Agente {
             config: self.config_biblioteca_publica(),
         }))
     }
+}
+
+/// Relatório de compatibilidade da clonagem em linhas de aviso (nada some em silêncio).
+fn avisos_do_relatorio(rel: &dag_calibre::calibredb::RelatorioClone) -> Vec<String> {
+    let mut v = Vec::new();
+    if !rel.criadas.is_empty() {
+        v.push(format!("colunas criadas: {}", rel.criadas.join(", ")));
+    }
+    for (e, m) in &rel.nao_clonadas {
+        v.push(format!("não clonado: {e} ({m})"));
+    }
+    v.extend(rel.avisos.iter().map(|a| format!("aviso de clonagem: {a}")));
+    v.extend(
+        rel.divergencias
+            .iter()
+            .map(|d| format!("divergência após clonar: {d}")),
+    );
+    v
+}
+
+/// Campos da Homologada com o veredito de clonagem; o que não é coluna (biblioteca virtual,
+/// categoria de usuário...) entra com o próprio elemento como rótulo.
+fn campos_do_perfil(perfil: &dag_calibre::perfil::PerfilBiblioteca) -> Vec<store::CampoCalibre> {
+    let mut v = Vec::new();
+    for c in &perfil.colunas {
+        let status = perfil
+            .compatibilidade
+            .status_de(&format!("coluna #{}", c.rotulo))
+            .cloned();
+        let (clonavel, motivo) = match status {
+            Some(dag_calibre::perfil::StatusClone::NaoClonavel { motivos }) => {
+                (false, Some(motivos.join("; ")))
+            }
+            Some(dag_calibre::perfil::StatusClone::ClonavelComAviso { avisos }) => {
+                (true, Some(avisos.join("; ")))
+            }
+            _ => (true, None),
+        };
+        v.push(store::CampoCalibre {
+            rotulo: c.rotulo.clone(),
+            nome: c.nome.clone(),
+            datatype: c.tipo.nome_calibre().to_owned(),
+            multiplo: c.e_multipla,
+            clonavel,
+            motivo,
+        });
+    }
+    for i in perfil.compatibilidade.nao_clonaveis() {
+        if i.elemento.starts_with("coluna #") {
+            continue;
+        }
+        if let dag_calibre::perfil::StatusClone::NaoClonavel { motivos } = &i.status {
+            v.push(store::CampoCalibre {
+                rotulo: i.elemento.clone(),
+                nome: i.elemento.clone(),
+                datatype: "n/a".into(),
+                multiplo: false,
+                clonavel: false,
+                motivo: Some(motivos.join("; ")),
+            });
+        }
+    }
+    v
 }
 
 fn endereco_local(e: &str) -> bool {

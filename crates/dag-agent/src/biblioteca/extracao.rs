@@ -388,6 +388,8 @@ impl IaLocal {
         if let Some(s) = &cfg.ia.modelo_secundario {
             let mut p = PerfilModelo::ollama(s, false, PapelModelo::Secundario);
             p.endpoint.clone_from(&cfg.ia.endpoint);
+            // Segundo parecer com contexto menor: cabe na VRAM junto dos outros programas.
+            p.contexto = 4096;
             modelos.push(p);
         }
         // Qwen3 (e outros com "thinking") respondem direto no JSON Schema só com `think: false`.

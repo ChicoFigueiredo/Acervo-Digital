@@ -17,7 +17,7 @@
     {
       "nome": "qwen3:14b",
       "quantizacao": "Q4_K_M",
-      "contexto": 8192,
+      "contexto": 4096,
       "multimodal": false,
       "endpoint": "http://127.0.0.1:11434",
       "backend": "ollama",

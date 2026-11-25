@@ -156,6 +156,9 @@ impl Default for ConfigIa {
         // desliga isso no Ollama, para a saída sair direto no JSON Schema.
         let mut segundo = PerfilModelo::ollama("qwen3:14b", false, PapelModelo::Secundario);
         segundo.quantizacao = Some("Q4_K_M".into());
+        // Medido no cerebro (25/11): 9,2 GB de VRAM com 4096; com 8192 sobra pouca margem para
+        // os outros programas da GPU de 16 GB.
+        segundo.contexto = 4096;
         segundo
             .extras
             .insert("think".into(), serde_json::Value::Bool(false));

@@ -646,6 +646,9 @@ fn tipo_do_job(pedido: &Pedido) -> Option<(TipoJob, Vec<String>, Option<i64>)> {
         | Comando::ResolverPedido { .. }
         | Comando::TentarDeNovo { .. }
         | Comando::CofreAdicionar { .. } => Some((TipoJob::Conteineres, Vec::new(), None)),
+        c if crate::biblioteca::e_trabalho_longo_biblioteca(c) => {
+            Some((TipoJob::Biblioteca, Vec::new(), None))
+        }
         _ => None,
     }
 }

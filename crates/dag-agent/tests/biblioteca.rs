@@ -691,6 +691,27 @@ fn configuracao_aplica_patch_e_recusa_ia_remota() {
 }
 
 #[test]
+fn config_recusa_endpoint_que_so_parece_loopback() {
+    let e = Ambiente::novo();
+    let mut a = e.agente(Autor::Gui);
+    for ruim in [
+        "http://127.0.0.1@evil.com:11434",
+        "http://localhost.evil.com",
+        "http://127.0.0.10.evil.com",
+        "http://[::1]@evil.com",
+    ] {
+        let r = a.executar(Comando::BibliotecaConfigDefinir {
+            alteracoes: serde_json::json!({"ia": {"ativa": true, "endpoint": ruim}}),
+        });
+        assert!(matches!(r, Resposta::Erro { .. }), "{ruim} foi aceito");
+    }
+    let r = a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"ia": {"ativa": true, "endpoint": "http://[::1]:11434"}}),
+    });
+    assert!(matches!(r, Resposta::Biblioteca { .. }));
+}
+
+#[test]
 fn calibredb_real_cadastra_na_a_classificar_sem_tocar_a_homologada() {
     if dag_calibre::executor::ExecutorProcesso::disponivel().is_none() {
         eprintln!("AVISO: teste pulado, calibredb ausente");

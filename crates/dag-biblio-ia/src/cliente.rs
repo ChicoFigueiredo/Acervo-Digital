@@ -137,14 +137,55 @@ fn base_do_endpoint(endpoint: &str) -> Resultado<String> {
     Ok(e)
 }
 
-fn e_loopback(base: &str) -> bool {
-    let resto = base.trim_start_matches("http://");
-    let host = if let Some(r) = resto.strip_prefix('[') {
-        r.split(']').next().unwrap_or("")
-    } else {
-        resto.split([':', '/']).next().unwrap_or("")
+/// O endpoint (`http://host[:porta][/caminho]`) é, de fato, a própria máquina? Analisa a
+/// autoridade de forma estrita: recusa `usuario@host` (o host real seria o que vem depois do
+/// `@`), nomes que só começam com `127.` ou `localhost` (`127.evil.com`, `localhost.evil`),
+/// barra invertida e portas inválidas. Só `localhost` e IPs de loopback (v4 e v6) passam.
+#[must_use]
+pub fn endpoint_e_loopback(url: &str) -> bool {
+    let url = url.trim();
+    let resto = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"));
+    let Some(resto) = resto else {
+        return false;
     };
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    let autoridade = resto.split(['/', '?', '#']).next().unwrap_or("");
+    if autoridade.is_empty()
+        || autoridade
+            .chars()
+            .any(|c| c == '@' || c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    let (host, porta) = if let Some(v6) = autoridade.strip_prefix('[') {
+        let Some((h, r)) = v6.split_once(']') else {
+            return false;
+        };
+        (
+            h,
+            r.strip_prefix(':')
+                .or(if r.is_empty() { Some("") } else { None }),
+        )
+    } else {
+        match autoridade.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (autoridade, Some("")),
+        }
+    };
+    match porta {
+        Some(p) if p.is_empty() || (p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())) => {}
+        _ => return false,
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+fn e_loopback(base: &str) -> bool {
+    endpoint_e_loopback(base)
 }
 
 impl ClienteLlm {
@@ -162,6 +203,9 @@ impl ClienteLlm {
         let config = ureq::config::Config::builder()
             .timeout_global(Some(cfg.timeout))
             .timeout_connect(Some(cfg.timeout_conexao))
+            // Sem redirecionamento: um 30x do servidor local não pode levar o texto dos livros
+            // para fora do loopback.
+            .max_redirects(0)
             .http_status_as_error(false)
             .build();
         Ok(Self {
@@ -610,6 +654,40 @@ fn interpretar_ollama(v: &Value) -> Resultado<RespostaChat> {
 
 #[cfg(test)]
 mod testes {
+    #[test]
+    fn endpoint_loopback_estrito() {
+        use super::endpoint_e_loopback as l;
+        for ok in [
+            "http://127.0.0.1:11434",
+            "http://127.1.2.3/v1",
+            "http://localhost:8080",
+            "http://LOCALHOST",
+            "http://[::1]:11434/api",
+            "http://[::1]",
+        ] {
+            assert!(l(ok), "{ok}");
+        }
+        for ruim in [
+            "http://127.evil.com:11434",
+            "http://127.0.0.1@evil.com",
+            "http://127.0.0.1:80@evil.com/",
+            "http://localhost@evil.com",
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://[::1]@evil.com",
+            "http://[::1]evil",
+            "http://2130706433",
+            "http://0.0.0.0",
+            "http://10.0.0.1",
+            "http://localhost\\@evil.com",
+            "http://localhost:80a",
+            "ftp://localhost",
+            "http://",
+        ] {
+            assert!(!l(ruim), "{ruim}");
+        }
+    }
+
     use super::*;
     use crate::modelo::PapelModelo;
 

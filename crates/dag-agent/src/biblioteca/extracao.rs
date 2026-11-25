@@ -152,6 +152,14 @@ fn config_pdf(cfg: &ConfigBiblioteca) -> ConfigExtracaoPdf {
         ..ConfigExtracaoPdf::default()
     };
     c.limites.max_bytes_arquivo = cfg.max_bytes_arquivo;
+    c.paralelo_ocr = if cfg.ocr.paralelo > 0 {
+        cfg.ocr.paralelo
+    } else {
+        // Automático: metade dos núcleos repartida entre as extrações simultâneas.
+        let em_voo = cfg.max_discos_extracao.max(1) * cfg.extracoes_por_dispositivo.max(1);
+        let n = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+        (u32::try_from(n / 2).unwrap_or(1) / em_voo).clamp(1, 6)
+    };
     c
 }
 

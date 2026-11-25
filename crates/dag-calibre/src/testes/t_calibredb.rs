@@ -664,3 +664,76 @@ fn homologar_falha_no_meio_reverte_o_livro_criado() {
     let rm = ch.iter().find(|a| a[0] == "remove").unwrap();
     assert!(rm.contains(&"--permanent".to_owned()) && rm.contains(&"9".to_owned()));
 }
+
+#[test]
+fn homologar_add_interrompido_desfaz_o_livro_orfao() {
+    // O `add` cria o livro na Homologada e estoura o tempo antes de dizer o id.
+    let c = cenario_homolog();
+    let db = c.h.join("metadata.db");
+    let cli = cliente(ExecutorFalso::com_funcao(move |cmd| {
+        if cmd.args[0] == "add" {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(&format!(
+                "INSERT INTO books(id,title,sort,path) VALUES (7,'T','T','Au/T (7)');
+                 INSERT INTO identifiers(book,type,val) VALUES (7,'dag','{HASH}');
+                 INSERT INTO identifiers(book,type,val) VALUES (7,'dagpend','1');"
+            ))
+            .unwrap();
+            return Err(ErroCalibre::Timeout {
+                comando: "add".into(),
+                segundos: 1,
+            });
+        }
+        Ok(SaidaProcesso::ok(""))
+    }));
+    let e = homologar(
+        &cli,
+        &c.ac,
+        1,
+        &c.h,
+        &Alvo::Local(c.h.clone()),
+        &aprovacao(HASH, AGORA),
+        &opcoes(),
+    )
+    .unwrap_err();
+    match e {
+        ErroCalibre::HomologacaoParcial {
+            id_criado,
+            situacao,
+            ..
+        } => {
+            assert_eq!(id_criado, 7);
+            assert!(situacao.contains("revertido"), "{situacao}");
+        }
+        outro => panic!("{outro}"),
+    }
+    let ch = cli.exec_chamadas();
+    let rm = ch.iter().find(|a| a[0] == "remove").unwrap();
+    assert!(rm.contains(&"7".to_owned()));
+}
+
+#[test]
+fn homologar_add_que_falha_sem_criar_nada_nao_remove() {
+    let c = cenario_homolog();
+    let cli = cliente(ExecutorFalso::com_funcao(|cmd| {
+        if cmd.args[0] == "add" {
+            return Err(ErroCalibre::Timeout {
+                comando: "add".into(),
+                segundos: 1,
+            });
+        }
+        Ok(SaidaProcesso::ok(""))
+    }));
+    let e = homologar(
+        &cli,
+        &c.ac,
+        1,
+        &c.h,
+        &Alvo::Local(c.h.clone()),
+        &aprovacao(HASH, AGORA),
+        &opcoes(),
+    )
+    .unwrap_err();
+    assert!(matches!(e, ErroCalibre::Timeout { .. }), "{e}");
+    assert!(!cli.exec_chamadas().iter().any(|a| a[0] == "remove"));
+}

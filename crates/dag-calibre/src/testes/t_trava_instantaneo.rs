@@ -81,6 +81,39 @@ fn executor_respeita_timeout_e_binario_ausente() {
 }
 
 #[test]
+fn timeout_mata_tambem_os_netos() {
+    // Um neto em segundo plano segura o stdout: sem matar o grupo, a leitura esperaria 30 s.
+    let e = ExecutorProcesso::novo("sh");
+    let inicio = std::time::Instant::now();
+    let r = e.executar(&Comando {
+        args: v(&["-c", "sleep 30 & sleep 30"]),
+        stdin: None,
+        timeout: Duration::from_millis(300),
+    });
+    assert!(matches!(r, Err(ErroCalibre::Timeout { .. })));
+    assert!(
+        inicio.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        inicio.elapsed()
+    );
+}
+
+#[test]
+fn saida_enorme_e_truncada_sem_travar() {
+    let e = ExecutorProcesso::novo("sh");
+    let s = e
+        .executar(&Comando {
+            args: v(&["-c", "head -c 70000000 /dev/zero; echo fim >&2"]),
+            stdin: None,
+            timeout: Duration::from_secs(60),
+        })
+        .unwrap();
+    assert_eq!(s.status, Some(0));
+    assert_eq!(s.stdout.len(), 64 * 1024 * 1024);
+    assert_eq!(s.stderr.trim(), "fim");
+}
+
+#[test]
 fn executor_captura_stdout_stderr_e_stdin() {
     let e = ExecutorProcesso::novo("sh");
     let s = e

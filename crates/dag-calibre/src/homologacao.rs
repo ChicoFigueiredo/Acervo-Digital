@@ -292,8 +292,15 @@ pub fn homologar<E: ExecutorCalibre>(
         }
     }
     args.push(livro.formatos[0].caminho_absoluto.clone());
-    let s = cli.rodar_h(&alvo, "add", &args, true)?;
-    let id = interpretar_ids_adicionados(&s.stdout)?;
+    let id = match cli
+        .rodar_h(&alvo, "add", &args, true)
+        .and_then(|s| interpretar_ids_adicionados(&s.stdout))
+    {
+        Ok(id) => id,
+        // O `add` pode ter criado o livro e falhado depois (timeout, saída ilegível): procura o
+        // livro com o nosso `dag:` e a marca de pendência e desfaz, em vez de deixá-lo órfão.
+        Err(e) => return Err(desfazer_add_interrompido(cli, &alvo, &h, &hash, e)),
+    };
 
     let continuar = || -> Resultado<()> {
         for f in livro.formatos.iter().skip(1) {
@@ -386,6 +393,48 @@ pub fn homologar<E: ExecutorCalibre>(
         mudancas,
         anomalias,
     })
+}
+
+/// Depois de um `add` que falhou sem devolver id: lê a Homologada em `mode=ro`; se houver
+/// exatamente um livro com `dag:<hash>` ainda marcado como pendente, ele foi criado por este
+/// `add` (a pré-checagem garantiu que não havia nenhum `dag:<hash>` antes) e é removido.
+fn desfazer_add_interrompido<E: ExecutorCalibre>(
+    cli: &ClienteCalibredb<E>,
+    alvo: &Alvo,
+    homologada: &Path,
+    hash: &str,
+    erro: ErroCalibre,
+) -> ErroCalibre {
+    let achados = BibliotecaLeitura::abrir(homologada).and_then(|b| {
+        let ids = b.livros_por_identificador(IDENTIFICADOR_DAG, hash)?;
+        let mut pendentes = Vec::new();
+        for id in ids {
+            if b.livro(id)?.is_some_and(|l| {
+                l.identificadores
+                    .iter()
+                    .any(|(t, _)| t == IDENTIFICADOR_PENDENTE)
+            }) {
+                pendentes.push(id);
+            }
+        }
+        Ok(pendentes)
+    });
+    match achados {
+        Ok(ids) if ids.is_empty() => erro,
+        Ok(ids) if ids.len() == 1 => {
+            reverter_apos_falha(cli, alvo, ids[0], &format!("add interrompido: {erro}"))
+        }
+        Ok(ids) => ErroCalibre::HomologacaoParcial {
+            id_criado: ids[0],
+            situacao: format!("NÃO revertido: vários livros pendentes com dag:{hash} ({ids:?})"),
+            detalhe: erro.to_string(),
+        },
+        Err(e2) => ErroCalibre::HomologacaoParcial {
+            id_criado: 0,
+            situacao: format!("não deu para conferir a Homologada depois da falha ({e2})"),
+            detalhe: erro.to_string(),
+        },
+    }
 }
 
 fn reverter_apos_falha<E: ExecutorCalibre>(

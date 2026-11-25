@@ -173,6 +173,13 @@ impl ExecutorCalibre for ExecutorProcesso {
         for (k, v) in &self.ambiente {
             c.env(k, v);
         }
+        // Grupo de processos próprio: no timeout, mata o calibredb e os filhos dele (o
+        // `unshare`, o Python e o que mais tiver sido aberto), não só o processo direto.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
         let mut filho = c.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ErroCalibre::CalibredbAusente(format!("{} não encontrado", self.binario.display()))
@@ -187,26 +194,15 @@ impl ExecutorCalibre for ExecutorProcesso {
         }
         let mut so = filho.stdout.take();
         let mut se = filho.stderr.take();
-        let t_out = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            if let Some(s) = so.as_mut() {
-                let _ = s.read_to_end(&mut b);
-            }
-            b
-        });
-        let t_err = std::thread::spawn(move || {
-            let mut b = Vec::new();
-            if let Some(s) = se.as_mut() {
-                let _ = s.read_to_end(&mut b);
-            }
-            b
-        });
+        let t_out = std::thread::spawn(move || so.as_mut().map(ler_limitado).unwrap_or_default());
+        let t_err = std::thread::spawn(move || se.as_mut().map(ler_limitado).unwrap_or_default());
         let inicio = Instant::now();
         let status = loop {
             match filho.try_wait() {
                 Ok(Some(s)) => break s,
                 Ok(None) => {
                     if inicio.elapsed() >= cmd.timeout {
+                        matar_grupo(filho.id());
                         let _ = filho.kill();
                         let _ = filho.wait();
                         let _ = t_out.join();
@@ -229,6 +225,32 @@ impl ExecutorCalibre for ExecutorProcesso {
             stderr: String::from_utf8_lossy(&err).into_owned(),
         })
     }
+}
+
+/// Teto de bytes guardados de cada saída do `calibredb` (o resto é lido e descartado, para o
+/// processo não travar com o pipe cheio).
+const LIMITE_SAIDA: u64 = 64 * 1024 * 1024;
+
+fn ler_limitado(r: &mut impl Read) -> Vec<u8> {
+    let mut b = Vec::new();
+    let _ = r.by_ref().take(LIMITE_SAIDA).read_to_end(&mut b);
+    let _ = std::io::copy(r, &mut std::io::sink());
+    b
+}
+
+/// Mata o grupo de processos inteiro (criado com `process_group(0)`, logo pgid = pid).
+fn matar_grupo(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 type Roteiro = Box<dyn Fn(&Comando) -> Resultado<SaidaProcesso> + Send + Sync>;

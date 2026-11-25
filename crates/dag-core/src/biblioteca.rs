@@ -110,6 +110,9 @@ pub struct ConfigIaBiblioteca {
     pub modelo_secundario: Option<String>,
     pub usar_visao: bool,
     pub timeout_s: u64,
+    /// Livros por lote: o primário roda para o lote todo e o segundo parecer só depois, para
+    /// trocar o modelo na GPU uma vez por lote. 1 = um livro por vez (sem agrupar).
+    pub lote: usize,
 }
 
 impl Default for ConfigIaBiblioteca {
@@ -121,6 +124,7 @@ impl Default for ConfigIaBiblioteca {
             modelo_secundario: None,
             usar_visao: true,
             timeout_s: 300,
+            lote: 8,
         }
     }
 }

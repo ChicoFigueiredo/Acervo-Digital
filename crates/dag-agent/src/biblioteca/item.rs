@@ -15,7 +15,7 @@ use dag_biblio::{
     Campo, Evidencia, FormatoLivro, OrigemEvidencia, ResultadoExtracao, TipoDuplicidade,
     ValorSugerido, isbn,
 };
-use dag_biblio_ia::{EntradaClassificacao, VocabularioHomologado};
+use dag_biblio_ia::{EntradaClassificacao, ResultadoClassificacao, VocabularioHomologado};
 use dag_store::biblioteca as store;
 use rusqlite::Connection;
 
@@ -285,9 +285,36 @@ fn isbn_corroborado(
     })
 }
 
+/// O que o passo 5 (IA) e os passos 6–7 em diante precisam do que os passos 1–4 produziram.
+pub(super) struct ItemPreparado {
+    versao_item: String,
+    nome_alvo: String,
+    cand: BTreeMap<Campo, Vec<Candidato>>,
+    extras: Vec<(Option<Campo>, String)>,
+    sugestoes: dag_biblio::vocabulario::Sugestoes,
+    homologados: Vec<store::LivroHomologado>,
+    titulo_ref: Option<String>,
+    editora_rasc: Option<String>,
+    humanos: HashMap<Campo, store::AcaoDecisao>,
+    rejeitados: HashMap<Campo, Vec<String>>,
+    /// Entrada da IA (só existe quando há classificador).
+    pub(super) entrada_ia: Option<EntradaClassificacao>,
+}
+
+/// O que o humano rejeitou não volta como sugestão.
+fn podar(cand: &mut BTreeMap<Campo, Vec<Candidato>>, rejeitados: &HashMap<Campo, Vec<String>>) {
+    for (campo, ch) in rejeitados {
+        if let Some(v) = cand.get_mut(campo) {
+            v.retain(|c| {
+                c.origem == OrigemEvidencia::Humano
+                    || !ch.contains(&chave_rejeicao(*campo, &texto_do_candidato(c)))
+            });
+        }
+    }
+}
+
 impl Agente {
-    /// Processa o item. Grava Obra/Edição/Formato, sugestões, inferências e candidatos.
-    #[allow(clippy::too_many_lines)]
+    /// Processa o item de ponta a ponta (sem lote): prepara, consulta a IA e conclui.
     pub(super) fn processar_item(
         &mut self,
         e: &EntradaItem<'_>,
@@ -295,7 +322,25 @@ impl Agente {
         ia: Option<&Arc<dyn ClassificadorIa>>,
         vocab: Option<&Arc<CacheVocab>>,
     ) -> Result<SaidaItem, ErroAgente> {
-        let agora = self.agora_biblio();
+        let p = self.preparar_item(e, cfg, ia, vocab)?;
+        let res = p
+            .entrada_ia
+            .as_ref()
+            .zip(ia)
+            .map(|(entrada, c)| c.classificar(entrada));
+        self.concluir_item(e, p, res, ia, vocab)
+    }
+
+    /// Passos 1–4 (só Catálogo): candidatos, rascunho, Homologada e vocabulário; monta a entrada
+    /// da IA quando há classificador.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn preparar_item(
+        &mut self,
+        e: &EntradaItem<'_>,
+        cfg: &ConfigBiblioteca,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+    ) -> Result<ItemPreparado, ErroAgente> {
         let file_id = e.info.file_id;
         let versao_item = store::versao_do_item(&cfg.versao_regras, e.membro);
         let nome_alvo = if e.membro.is_empty() {
@@ -390,18 +435,7 @@ impl Agente {
                 }
             }
         }
-        // O que o humano rejeitou não volta como sugestão.
-        let podar = |cand: &mut BTreeMap<Campo, Vec<Candidato>>| {
-            for (campo, ch) in &rejeitados {
-                if let Some(v) = cand.get_mut(campo) {
-                    v.retain(|c| {
-                        c.origem == OrigemEvidencia::Humano
-                            || !ch.contains(&chave_rejeicao(*campo, &texto_do_candidato(c)))
-                    });
-                }
-            }
-        };
-        podar(&mut cand);
+        podar(&mut cand, &rejeitados);
 
         // 2. Rascunho (sem vocabulário nem IA): título, autores, editora, ISBN...
         let rascunho = reconciliar_mapa(&cand, false);
@@ -468,7 +502,7 @@ impl Agente {
                 push(Campo::Serie, l.serie.clone(), Vec::new());
                 break;
             }
-            podar(&mut cand);
+            podar(&mut cand, &rejeitados);
         }
 
         // 4. Vocabulário e estante aprendidos da Homologada (e das decisões humanas).
@@ -595,10 +629,9 @@ impl Agente {
             ));
         }
 
-        // 5. IA com contexto (vocabulário candidato, estantes, autores parecidos, few-shot).
-        let mut usou_ia = false;
-        let mut modelo = String::new();
-        if let Some(c) = ia {
+        // 5 (montagem). Entrada da IA com contexto (vocabulário candidato, estantes, autores
+        // parecidos, few-shot).
+        let entrada_ia = ia.map(|_| {
             let (vocabulario, exemplos) = match vocab {
                 Some(v) => (
                     VocabularioHomologado {
@@ -610,7 +643,7 @@ impl Agente {
                 ),
                 None => (VocabularioHomologado::default(), Vec::new()),
             };
-            let entrada = EntradaClassificacao {
+            EntradaClassificacao {
                 id: file_id.to_string(),
                 nome_arquivo: nome_alvo.to_owned(),
                 extracao: e.resultado.clone(),
@@ -618,8 +651,54 @@ impl Agente {
                 exemplos,
                 referencias,
                 imagem_pagina1: e.capa.clone(),
-            };
-            match c.classificar(&entrada) {
+            }
+        });
+        Ok(ItemPreparado {
+            versao_item,
+            nome_alvo: nome_alvo.to_owned(),
+            cand,
+            extras,
+            sugestoes,
+            homologados,
+            titulo_ref,
+            editora_rasc,
+            humanos,
+            rejeitados,
+            entrada_ia,
+        })
+    }
+
+    /// Passo 5 (resultado da IA) e passos 6 em diante: reconciliação e gravação.
+    /// `res_ia` é `None` quando não há IA; `Err` = IA indisponível para este item.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn concluir_item(
+        &mut self,
+        e: &EntradaItem<'_>,
+        p: ItemPreparado,
+        res_ia: Option<Result<ResultadoClassificacao, String>>,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+    ) -> Result<SaidaItem, ErroAgente> {
+        let ItemPreparado {
+            versao_item,
+            nome_alvo,
+            mut cand,
+            mut extras,
+            sugestoes,
+            homologados,
+            titulo_ref,
+            editora_rasc,
+            humanos,
+            rejeitados,
+            entrada_ia: _,
+        } = p;
+        let nome_alvo = nome_alvo.as_str();
+        let agora = self.agora_biblio();
+        let file_id = e.info.file_id;
+        let mut usou_ia = false;
+        let mut modelo = String::new();
+        if let (Some(c), Some(res)) = (ia, res_ia) {
+            match res {
                 Ok(res) => {
                     usou_ia = true;
                     modelo = c.nome();
@@ -662,7 +741,7 @@ impl Agente {
                     for r in &res.revisao_humana {
                         extras.push((r.campo, format!("IA: {:?}", r.motivo)));
                     }
-                    podar(&mut cand);
+                    podar(&mut cand, &rejeitados);
                 }
                 Err(err) => {
                     self.mensagem(format!(

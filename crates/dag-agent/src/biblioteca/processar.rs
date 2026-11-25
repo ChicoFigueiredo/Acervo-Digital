@@ -18,12 +18,13 @@ use dag_biblio::{
     Campo, EstadoLeitura, FormatoLivro, OrigemEvidencia, ResultadoExtracao, TipoDuplicidade,
     ValorSugerido,
 };
+use dag_biblio_ia::ResultadoClassificacao;
 use dag_core::{DadosBiblioteca, ProgressoBiblioteca, Resposta, ResumoProcessamento};
 use dag_store::biblioteca as store;
 
 use super::extracao::{ClassificadorIa, IaIndisponivel, IaLocal, SaidaMembro};
 use super::fila::formato_para_fila;
-use super::item::EntradaItem;
+use super::item::{EntradaItem, ItemPreparado};
 use super::vocab::CacheVocab;
 use super::{ConfigBiblioteca, blake3_arquivo, dados, hex};
 use crate::agente::Agente;
@@ -68,6 +69,26 @@ enum Preparo {
         caminho: PathBuf,
         formato: FormatoLivro,
     },
+}
+
+/// Job com os itens já preparados (passos 1–4) à espera do lote de IA.
+struct JobPendente {
+    job: store::Job,
+    info: store::InfoArquivo,
+    hash: [u8; 32],
+    reaproveitado: bool,
+    t0: Instant,
+    ocr: u64,
+    paginas: u64,
+    motivos: Vec<String>,
+    prontos: Vec<(ItemExtraido, ItemPreparado)>,
+}
+
+/// Contexto fixo do processamento (evita listas enormes de argumentos).
+struct CtxLote<'a> {
+    cfg: &'a ConfigBiblioteca,
+    ia: Option<&'a Arc<dyn ClassificadorIa>>,
+    vocab: Option<&'a Arc<CacheVocab>>,
 }
 
 /// Extração pronta, vinda de uma thread.
@@ -132,6 +153,12 @@ impl Agente {
             ..ProgressoBiblioteca::default()
         };
         let max_discos = cfg.max_discos_extracao.max(1) as usize;
+        // Lote de IA: o primário roda para o lote todo e só depois o segundo parecer, para trocar
+        // o modelo na GPU uma vez por lote. Sem IA ou com `lote <= 1`: um livro por vez.
+        let tam_lote = cfg.ia.lote.max(1);
+        let usa_lote = ia_cls.is_some() && tam_lote > 1;
+        let mut pend: Vec<JobPendente> = Vec::new();
+        let mut n_pend = 0_usize;
         let (tx, rx): (Sender<Pronto>, Receiver<Pronto>) = channel();
         let mut ocupados: Vec<i64> = Vec::new();
         let mut em_voo = 0_usize;
@@ -140,6 +167,23 @@ impl Agente {
             // Despacha enquanto couber: um arquivo por disco, até `max_discos` discos.
             let mut despachou = false;
             while pegos < maximo && em_voo < max_discos {
+                if !pend.is_empty()
+                    && !matches!(
+                        self.controle.estado(),
+                        dag_scanner::EstadoControle::Executando
+                    )
+                {
+                    // Pausa/cancelamento: conclui o lote pendente antes de esperar ou sair.
+                    self.descarregar_lote(
+                        &mut pend,
+                        &mut n_pend,
+                        &cfg,
+                        ia_cls.as_ref(),
+                        vocab.as_ref(),
+                        &mut r,
+                        &mut prog,
+                    )?;
+                }
                 if !self.seguir_biblioteca() {
                     r.interrompido = true;
                     break;
@@ -205,17 +249,53 @@ impl Agente {
                         )?;
                     }
                     Ok(Preparo::Reusar { info, hash, itens }) => {
-                        let res = self.concluir_extracao(
-                            &job,
-                            &info,
-                            hash,
-                            itens,
-                            true,
-                            &cfg,
-                            ia_cls.as_ref(),
-                            vocab.as_ref(),
-                        );
-                        self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                        if usa_lote {
+                            let ctx = CtxLote {
+                                cfg: &cfg,
+                                ia: ia_cls.as_ref(),
+                                vocab: vocab.as_ref(),
+                            };
+                            match self.agrupar_extracao(&ctx, &job, &info, hash, itens, true, t0) {
+                                Ok(jp) => {
+                                    n_pend += jp.prontos.len();
+                                    pend.push(jp);
+                                }
+                                Err(e) => {
+                                    self.finalizar(
+                                        &job,
+                                        Err(e),
+                                        &Some(info),
+                                        &cfg,
+                                        &mut r,
+                                        &mut prog,
+                                        t0,
+                                    )?;
+                                }
+                            }
+                            if n_pend >= tam_lote {
+                                self.descarregar_lote(
+                                    &mut pend,
+                                    &mut n_pend,
+                                    &cfg,
+                                    ia_cls.as_ref(),
+                                    vocab.as_ref(),
+                                    &mut r,
+                                    &mut prog,
+                                )?;
+                            }
+                        } else {
+                            let res = self.concluir_extracao(
+                                &job,
+                                &info,
+                                hash,
+                                itens,
+                                true,
+                                &cfg,
+                                ia_cls.as_ref(),
+                                vocab.as_ref(),
+                            );
+                            self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                        }
                     }
                     Err(e) => {
                         self.finalizar(
@@ -231,6 +311,15 @@ impl Agente {
                 }
             }
             if em_voo == 0 {
+                self.descarregar_lote(
+                    &mut pend,
+                    &mut n_pend,
+                    &cfg,
+                    ia_cls.as_ref(),
+                    vocab.as_ref(),
+                    &mut r,
+                    &mut prog,
+                )?;
                 if despachou {
                     continue; // o que saiu da fila já foi concluído sem extração
                 }
@@ -253,7 +342,26 @@ impl Agente {
                         ..
                     } = p;
                     let res = match saidas {
-                        Ok(s) => self.gravar_e_concluir(
+                        Ok(s) if usa_lote => {
+                            let ctx = CtxLote {
+                                cfg: &cfg,
+                                ia: ia_cls.as_ref(),
+                                vocab: vocab.as_ref(),
+                            };
+                            match self
+                                .gravar_extracao(&job, &info, hash, s, ms, &cfg)
+                                .and_then(|itens| {
+                                    self.agrupar_extracao(&ctx, &job, &info, hash, itens, false, t0)
+                                }) {
+                                Ok(jp) => {
+                                    n_pend += jp.prontos.len();
+                                    pend.push(jp);
+                                    None
+                                }
+                                Err(e) => Some(Err(e)),
+                            }
+                        }
+                        Ok(s) => Some(self.gravar_e_concluir(
                             &job,
                             &info,
                             hash,
@@ -262,15 +370,38 @@ impl Agente {
                             &cfg,
                             ia_cls.as_ref(),
                             vocab.as_ref(),
-                        ),
-                        Err(e) => Err(ErroAgente::biblio("extracao", e)),
+                        )),
+                        Err(e) => Some(Err(ErroAgente::biblio("extracao", e))),
                     };
-                    self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                    if let Some(res) = res {
+                        self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                    }
+                    if n_pend >= tam_lote {
+                        self.descarregar_lote(
+                            &mut pend,
+                            &mut n_pend,
+                            &cfg,
+                            ia_cls.as_ref(),
+                            vocab.as_ref(),
+                            &mut r,
+                            &mut prog,
+                        )?;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
+        // Nada fica para trás: o lote pendente é concluído antes de sair.
+        self.descarregar_lote(
+            &mut pend,
+            &mut n_pend,
+            &cfg,
+            ia_cls.as_ref(),
+            vocab.as_ref(),
+            &mut r,
+            &mut prog,
+        )?;
         // Itens da Homologada (`!Catalogar` ou sem tag): só propostas, nada é escrito nela.
         if !r.interrompido && r.processados < maximo {
             let restante = maximo - r.processados;
@@ -400,6 +531,20 @@ impl Agente {
         ia: Option<&Arc<dyn ClassificadorIa>>,
         vocab: Option<&Arc<CacheVocab>>,
     ) -> Result<Desfecho, ErroAgente> {
+        let itens = self.gravar_extracao(job, info, hash, saidas, ms, cfg)?;
+        self.concluir_extracao(job, info, hash, itens, false, cfg, ia, vocab)
+    }
+
+    /// Grava a extração de cada livro e o checkpoint "extraido" (reaproveitado numa retomada).
+    fn gravar_extracao(
+        &mut self,
+        job: &store::Job,
+        info: &store::InfoArquivo,
+        hash: [u8; 32],
+        saidas: Vec<SaidaMembro>,
+        ms: u64,
+        cfg: &ConfigBiblioteca,
+    ) -> Result<Vec<ItemExtraido>, ErroAgente> {
         let agora = self.agora_biblio();
         let mut itens = Vec::with_capacity(saidas.len());
         for s in saidas {
@@ -428,7 +573,189 @@ impl Agente {
             });
         }
         store::gravar_checkpoint(self.conexao(), job.id, "extraido", None, agora)?;
-        self.concluir_extracao(job, info, hash, itens, false, cfg, ia, vocab)
+        Ok(itens)
+    }
+
+    /// Como `concluir_extracao`, mas só até a metade: exceções são tratadas na hora e cada livro
+    /// lido passa pelos passos 1–4; a IA e a gravação ficam para o lote.
+    #[allow(clippy::too_many_arguments)]
+    fn agrupar_extracao(
+        &mut self,
+        ctx: &CtxLote<'_>,
+        job: &store::Job,
+        info: &store::InfoArquivo,
+        hash: [u8; 32],
+        itens: Vec<ItemExtraido>,
+        reaproveitado: bool,
+        t0: Instant,
+    ) -> Result<JobPendente, ErroAgente> {
+        let agora = self.agora_biblio();
+        let mut jp = JobPendente {
+            job: job.clone(),
+            info: info.clone(),
+            hash,
+            reaproveitado,
+            t0,
+            ocr: 0,
+            paginas: 0,
+            motivos: Vec::new(),
+            prontos: Vec::new(),
+        };
+        for it in itens {
+            jp.paginas += it.resultado.paginas.len() as u64;
+            jp.ocr += it.ocr;
+            if !matches!(it.resultado.estado, EstadoLeitura::Lido) {
+                let motivo = self.registrar_excecao(job, &it, agora);
+                jp.motivos.push(motivo);
+                continue;
+            }
+            let entrada = EntradaItem {
+                job_id: job.id,
+                info,
+                membro: &it.membro,
+                formato: it.formato,
+                tamanho: it.tamanho,
+                hash_arquivo: hash,
+                resultado: &it.resultado,
+                capa: it.capa.clone(),
+            };
+            let prep = self.preparar_item(&entrada, ctx.cfg, ctx.ia, ctx.vocab)?;
+            jp.prontos.push((it, prep));
+        }
+        Ok(jp)
+    }
+
+    /// Roda a IA para o lote inteiro (primários, depois segundos pareceres), conclui cada item e
+    /// finaliza cada job. Erro de um item/job não derruba os demais.
+    #[allow(clippy::too_many_arguments)]
+    fn descarregar_lote(
+        &mut self,
+        pend: &mut Vec<JobPendente>,
+        n_pend: &mut usize,
+        cfg: &ConfigBiblioteca,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+        r: &mut ResumoProcessamento,
+        prog: &mut ProgressoBiblioteca,
+    ) -> Result<(), ErroAgente> {
+        *n_pend = 0;
+        if pend.is_empty() {
+            return Ok(());
+        }
+        let mut jobs = std::mem::take(pend);
+        let mut entradas = Vec::new();
+        for j in &mut jobs {
+            for (_, p) in &mut j.prontos {
+                if let Some(e) = p.entrada_ia.take() {
+                    entradas.push(e);
+                }
+            }
+        }
+        let falha =
+            || Err::<ResultadoClassificacao, String>("a IA falhou de forma inesperada".into());
+        let mut resultados: Vec<Result<ResultadoClassificacao, String>> = match ia {
+            Some(c) if !entradas.is_empty() => {
+                catch_unwind(AssertUnwindSafe(|| c.classificar_lote(&entradas))).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        resultados.resize_with(entradas.len(), falha);
+        let mut resultados = resultados.into_iter();
+        for jp in jobs {
+            let (job, info, t0) = (jp.job.clone(), jp.info.clone(), jp.t0);
+            let res = self.concluir_job_pendente(jp, &mut resultados, ia, vocab);
+            self.finalizar(&job, res, &Some(info), cfg, r, prog, t0)?;
+        }
+        Ok(())
+    }
+
+    /// Passos 6 em diante de cada livro do job, com o resultado da IA que lhe coube no lote.
+    fn concluir_job_pendente(
+        &mut self,
+        jp: JobPendente,
+        resultados: &mut impl Iterator<Item = Result<ResultadoClassificacao, String>>,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+    ) -> Result<Desfecho, ErroAgente> {
+        let agora = self.agora_biblio();
+        let JobPendente {
+            job,
+            info,
+            hash,
+            reaproveitado,
+            ocr,
+            paginas,
+            motivos,
+            prontos,
+            ..
+        } = jp;
+        let (mut revisao, mut usou_ia, mut membros) = (0_u64, false, 0_u64);
+        let mut erro: Option<ErroAgente> = None;
+        for (it, prep) in prontos {
+            // Sempre consome o resultado do item, para manter o alinhamento do lote.
+            let res_ia = resultados.next();
+            if erro.is_some() {
+                continue;
+            }
+            let entrada = EntradaItem {
+                job_id: job.id,
+                info: &info,
+                membro: &it.membro,
+                formato: it.formato,
+                tamanho: it.tamanho,
+                hash_arquivo: hash,
+                resultado: &it.resultado,
+                capa: None,
+            };
+            match self.concluir_item(&entrada, prep, res_ia, ia, vocab) {
+                Ok(s) => {
+                    usou_ia |= s.usou_ia;
+                    revisao += 1;
+                    membros += u64::from(!it.membro.is_empty());
+                }
+                Err(e) => erro = Some(e),
+            }
+        }
+        if let Some(e) = erro {
+            return Err(e);
+        }
+        let conn = self.conexao();
+        if revisao == 0 {
+            store::marcar_excecao(conn, job.id, &motivos.join("; "), agora)?;
+            return Ok(Desfecho::Excecao);
+        }
+        store::gravar_checkpoint(conn, job.id, "revisao_pendente", None, agora)?;
+        Ok(Desfecho::Revisao {
+            reaproveitado,
+            ocr,
+            paginas,
+            ia: usou_ia,
+            membros,
+        })
+    }
+
+    /// Alerta de exceção (DRM, senha, ilegível, limite): nunca contorna; vai para revisão humana.
+    fn registrar_excecao(&mut self, job: &store::Job, it: &ItemExtraido, agora: i64) -> String {
+        let motivo = motivo_excecao(&it.resultado.estado);
+        let _ = store::emitir_alerta(
+            self.conexao(),
+            &store::NovoAlerta {
+                chave: Some(format!("excecao:{}:{}", job.file_id, it.membro)),
+                tipo: store::TipoAlerta::ExtracaoFalhou,
+                file_id: Some(job.file_id),
+                dados_json: serde_json::json!({
+                    "motivo": motivo,
+                    "membro": (!it.membro.is_empty()).then_some(&it.membro),
+                })
+                .to_string(),
+            },
+            agora,
+        );
+        if it.membro.is_empty() {
+            motivo
+        } else {
+            format!("{}: {motivo}", it.membro)
+        }
     }
 
     /// Cada livro extraído vira um item de revisão (um por Membro de compactado).
@@ -453,26 +780,8 @@ impl Agente {
             ocr += it.ocr;
             // Exceções: DRM, senha, ilegível, limite. Nunca contorna; vai para revisão humana.
             if !matches!(it.resultado.estado, EstadoLeitura::Lido) {
-                let motivo = motivo_excecao(&it.resultado.estado);
-                let _ = store::emitir_alerta(
-                    self.conexao(),
-                    &store::NovoAlerta {
-                        chave: Some(format!("excecao:{}:{}", job.file_id, it.membro)),
-                        tipo: store::TipoAlerta::ExtracaoFalhou,
-                        file_id: Some(job.file_id),
-                        dados_json: serde_json::json!({
-                            "motivo": motivo,
-                            "membro": (!it.membro.is_empty()).then_some(&it.membro),
-                        })
-                        .to_string(),
-                    },
-                    agora,
-                );
-                motivos.push(if it.membro.is_empty() {
-                    motivo
-                } else {
-                    format!("{}: {motivo}", it.membro)
-                });
+                let motivo = self.registrar_excecao(job, &it, agora);
+                motivos.push(motivo);
                 continue;
             }
             let entrada = EntradaItem {

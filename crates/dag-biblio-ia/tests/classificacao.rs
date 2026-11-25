@@ -700,3 +700,91 @@ fn sem_imagem_ou_modelo_nao_multimodal_nao_ha_passada_de_visao() {
     let _ = c.classificar(&entrada_com_imagem());
     assert_eq!(f.contagem("/api/chat"), 1, "modelo não multimodal");
 }
+
+#[test]
+fn lote_agrupa_chamadas_por_modelo_e_da_o_mesmo_resultado_que_item_a_item() {
+    use std::sync::{Arc, Mutex};
+    let mut divergente = entrada_calculo();
+    divergente.extracao.metadados.push(ValorSugerido {
+        campo: Campo::Titulo,
+        valor: Some("Outro Título Qualquer".into()),
+        lista: vec![],
+        confianca: 0.7,
+        evidencias: vec![],
+    });
+    let entradas = vec![
+        entrada_calculo(),
+        divergente.clone(),
+        entrada_calculo(),
+        divergente,
+    ];
+
+    let montar = |log: &Arc<Mutex<Vec<&'static str>>>| {
+        let s = saida_boa();
+        let (la, lb) = (log.clone(), log.clone());
+        let (sa, sb) = (s.clone(), s);
+        let fa = Falso::novo(move |c, _| {
+            (c == "/v1/chat/completions").then(|| {
+                la.lock().unwrap().push("primario");
+                chat_openai(&sa)
+            })
+        });
+        let fb = Falso::novo(move |c, _| {
+            (c == "/v1/chat/completions").then(|| {
+                lb.lock().unwrap().push("secundario");
+                chat_openai(&sb)
+            })
+        });
+        let c = Classificador::novo(
+            cliente(&fa, "a", PapelModelo::Primario),
+            Some(cliente(&fb, "b", PapelModelo::Secundario)),
+        );
+        (c, fa, fb)
+    };
+
+    let log_i = Arc::new(Mutex::new(Vec::new()));
+    let (ci, _fa, _fb) = montar(&log_i);
+    let individuais: Vec<_> = entradas.iter().map(|e| ci.classificar(e)).collect();
+    assert_eq!(
+        *log_i.lock().unwrap(),
+        [
+            "primario",
+            "primario",
+            "secundario",
+            "primario",
+            "primario",
+            "secundario"
+        ]
+    );
+
+    let log_l = Arc::new(Mutex::new(Vec::new()));
+    let (cl, _ga, _gb) = montar(&log_l);
+    let lote = cl.classificar_lote(&entradas);
+    assert_eq!(
+        *log_l.lock().unwrap(),
+        [
+            "primario",
+            "primario",
+            "primario",
+            "primario",
+            "secundario",
+            "secundario"
+        ],
+        "primários em lote e só então os segundos pareceres"
+    );
+
+    assert_eq!(lote.len(), individuais.len());
+    for (l, i) in lote.iter().zip(&individuais) {
+        assert_eq!(l.valores, i.valores);
+        assert_eq!(l.revisao_humana, i.revisao_humana);
+        assert_eq!(l.rejeicoes, i.rejeicoes);
+        assert_eq!(l.tags_novas_propostas, i.tags_novas_propostas);
+        assert_eq!(l.segundo_parecer_consultado, i.segundo_parecer_consultado);
+        assert_eq!(l.motivos_segundo_parecer, i.motivos_segundo_parecer);
+        assert_eq!(l.avisos, i.avisos);
+        let papeis =
+            |r: &ResultadoClassificacao| r.registros.iter().map(|x| x.papel).collect::<Vec<_>>();
+        assert_eq!(papeis(l), papeis(i));
+    }
+    assert!(lote[1].segundo_parecer_consultado && !lote[0].segundo_parecer_consultado);
+}

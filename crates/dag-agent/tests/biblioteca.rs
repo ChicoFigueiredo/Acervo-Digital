@@ -2289,3 +2289,162 @@ fn ca_b02_calibredb_real_cria_a_classificar_com_pasta_e_demais_colunas() {
     }
     assert_eq!(arvore(&e.m.homologada), antes);
 }
+
+/// IA falsa que registra a ordem das chamadas. Em lote, imita o `Classificador` real: todos os
+/// primários e, depois, os segundos pareceres dos que precisam (nome com "dup").
+struct IaOrdem {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl IaOrdem {
+    fn resultado(entrada: &EntradaClassificacao) -> ResultadoClassificacao {
+        ResultadoClassificacao {
+            valores: vec![lista_v(
+                Campo::Tags,
+                &["Literatura"],
+                OrigemEvidencia::Ia,
+                0.8,
+            )],
+            segundo_parecer_consultado: entrada.nome_arquivo.contains("dup"),
+            ..ResultadoClassificacao::default()
+        }
+    }
+}
+
+impl dag_agent::ClassificadorIa for IaOrdem {
+    fn nome(&self) -> String {
+        "ordem:1b".into()
+    }
+
+    fn classificar(
+        &self,
+        entrada: &EntradaClassificacao,
+    ) -> Result<ResultadoClassificacao, String> {
+        let mut l = self.log.lock().unwrap();
+        l.push(format!("P:{}", entrada.nome_arquivo));
+        if entrada.nome_arquivo.contains("dup") {
+            l.push(format!("S:{}", entrada.nome_arquivo));
+        }
+        Ok(Self::resultado(entrada))
+    }
+
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        let mut l = self.log.lock().unwrap();
+        for e in entradas {
+            l.push(format!("P:{}", e.nome_arquivo));
+        }
+        for e in entradas.iter().filter(|e| e.nome_arquivo.contains("dup")) {
+            l.push(format!("S:{}", e.nome_arquivo));
+        }
+        entradas.iter().map(|e| Ok(Self::resultado(e))).collect()
+    }
+}
+
+fn processar_com_lote(lote: usize) -> (Vec<String>, Vec<String>, dag_core::ResumoProcessamento) {
+    let e = Ambiente::novo();
+    etiquetar(&e.m, 1, "Literatura");
+    etiquetar(&e.m, 2, "Literatura");
+    for (i, n) in ["a.pdf", "b_dup.pdf", "c.pdf", "d_dup.pdf"]
+        .iter()
+        .enumerate()
+    {
+        fs::write(e.m.downloads.join(n), corpo(30 + i as u8, 30_000)).unwrap();
+    }
+    let ext = ExtratorRoteiro::novo(|_| {
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Quincas Borba",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut a = e
+        .agente_com(Autor::Gui, ext)
+        .com_classificador_ia(Arc::new(IaOrdem {
+            log: Arc::clone(&log),
+        }));
+    a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"ia": {"lote": lote}}),
+    });
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = match bib(a.executar(Comando::BibliotecaProcessar {
+        limite: None,
+        ia: true,
+    })) {
+        DadosBiblioteca::Processada { resumo } => resumo,
+        d => panic!("{d:?}"),
+    };
+    let itens = revisao(&mut a);
+    let mut gravado: Vec<String> = itens
+        .iter()
+        .filter(|i| {
+            i.caminho.as_deref().is_some_and(|c| {
+                ["a.pdf", "b_dup.pdf", "c.pdf", "d_dup.pdf"]
+                    .iter()
+                    .any(|n| c.ends_with(&format!("/{n}")))
+            })
+        })
+        .map(|i| {
+            let nome = i.caminho.clone().unwrap_or_default();
+            let nome = nome.rsplit('/').next().unwrap_or_default().to_owned();
+            let campos: Vec<String> = i
+                .campos
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}={:?}/{:?}/{:?}/{:?}/{:?}/{}",
+                        c.campo,
+                        c.sugerido,
+                        c.sugerido_lista,
+                        c.confianca,
+                        c.origem,
+                        c.motivos,
+                        c.estado
+                    )
+                })
+                .collect();
+            format!("{nome}: {campos:?}")
+        })
+        .collect();
+    gravado.sort();
+    let l = log.lock().unwrap().clone();
+    (l, gravado, r)
+}
+
+#[test]
+fn ia_em_lote_agrupa_primarios_e_depois_segundos_pareceres_com_o_mesmo_resultado() {
+    let (log_um, gravado_um, r_um) = processar_com_lote(1);
+    let (log_lote, gravado_lote, r_lote) = processar_com_lote(8);
+
+    let primarios = |l: &[String]| l.iter().filter(|x| x.starts_with("P:")).count();
+    assert_eq!(primarios(&log_um), 4, "{log_um:?}");
+    assert_eq!(primarios(&log_lote), 4, "{log_lote:?}");
+
+    // Item a item, o segundo parecer vem logo depois do primário do mesmo livro, e a sequência
+    // de modelos alterna. Em lote, nenhum primário vem depois do primeiro segundo parecer.
+    let trocas = |l: &[String]| l.windows(2).filter(|w| w[0][..1] != w[1][..1]).count();
+    let primeiro_s = log_lote.iter().position(|x| x.starts_with("S:")).unwrap();
+    assert!(
+        log_lote[primeiro_s..].iter().all(|x| x.starts_with("S:")),
+        "{log_lote:?}"
+    );
+    assert_eq!(trocas(&log_lote), 1, "{log_lote:?}");
+    assert!(trocas(&log_um) > 1, "{log_um:?}");
+
+    assert_eq!(r_um.consultas_ia, 4, "{r_um:?}");
+    assert_eq!(r_lote.consultas_ia, 4, "{r_lote:?}");
+    assert_eq!(r_um.revisao_pendente, r_lote.revisao_pendente);
+    assert_eq!(r_um.falhas + r_lote.falhas, 0);
+    assert_eq!(gravado_um.len(), 4, "{gravado_um:?}");
+    assert_eq!(gravado_um, gravado_lote, "mesmo resultado gravado");
+}

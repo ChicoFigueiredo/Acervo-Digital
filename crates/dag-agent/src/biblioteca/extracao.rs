@@ -341,6 +341,15 @@ pub trait ClassificadorIa: Send + Sync {
     /// Falhas do modelo viram revisão humana dentro do resultado.
     fn classificar(&self, entrada: &EntradaClassificacao)
     -> Result<ResultadoClassificacao, String>;
+
+    /// Classifica vários livros de uma vez, na ordem das entradas. A implementação padrão chama
+    /// `classificar` item a item; `IaLocal` agrupa as chamadas por modelo (menos trocas na GPU).
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        entradas.iter().map(|e| self.classificar(e)).collect()
+    }
 }
 
 /// IA indisponível.
@@ -426,5 +435,16 @@ impl ClassificadorIa for IaLocal {
     ) -> Result<ResultadoClassificacao, String> {
         // `classificar` nunca entra em pânico nem devolve erro: falhas viram revisão humana.
         Ok(self.inner.classificar(entrada))
+    }
+
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        self.inner
+            .classificar_lote(entradas)
+            .into_iter()
+            .map(Ok)
+            .collect()
     }
 }

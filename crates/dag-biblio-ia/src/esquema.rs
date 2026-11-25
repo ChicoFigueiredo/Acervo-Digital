@@ -132,12 +132,16 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
             }
             _ => texto_ou_nulo(),
         };
-        // Duas evidências só nos campos críticos; nos demais basta uma (cada evidência custa
-        // dezenas de tokens de saída, e a saída longa é o que mais pesa na IA local).
-        let max_ev = if CAMPOS_CRITICOS.contains(&c) { 2 } else { 1 };
-        props.insert(nome_campo(c), esquema_campo(valor, max_ev));
+        // Até 2 evidências em todos os campos: com só 1 nos não críticos (prompt/4) o validador
+        // aceitou ~20% menos campos por item, quase sem ganho de tempo (medição de 25/11).
+        props.insert(nome_campo(c), esquema_campo(valor, 2));
     }
-    let nomes: Vec<String> = CAMPOS_IA.iter().map(|c| nome_campo(*c)).collect();
+    // Só título e autores são obrigatórios: campo sem evidência é omitido (cada `null` com a
+    // lista de evidências vazia custa tokens de saída, e a saída é o que pesa na IA local).
+    let nomes: Vec<String> = [Campo::Titulo, Campo::Autores]
+        .iter()
+        .map(|c| nome_campo(*c))
+        .collect();
     json!({
         "type": "object",
         "properties": {
@@ -334,7 +338,7 @@ mod testes {
                 .as_array()
                 .unwrap()
                 .len(),
-            14
+            2
         );
         assert_eq!(
             esquema_visao()["properties"]["campos"]["required"]

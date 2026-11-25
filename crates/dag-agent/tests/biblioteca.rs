@@ -2513,3 +2513,56 @@ fn compactado_grande_so_manda_o_teto_de_membros_para_a_ia() {
         .count();
     assert_eq!(sem_ia, 8, "{itens:#?}");
 }
+
+#[test]
+fn copia_de_arquivo_ja_curado_vira_duplicata_sem_nova_extracao() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let e = Ambiente::novo();
+    let conteudo = corpo(41, 40_000);
+    fs::create_dir_all(e.m.downloads.join("a")).unwrap();
+    fs::create_dir_all(e.m.downloads.join("b")).unwrap();
+    fs::write(e.m.downloads.join("a/livro.pdf"), &conteudo).unwrap();
+    let extracoes = Arc::new(AtomicUsize::new(0));
+    let cont = Arc::clone(&extracoes);
+    let ext = ExtratorRoteiro::novo(move |_| {
+        cont.fetch_add(1, Ordering::SeqCst);
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Um Livro",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1);
+
+    // A mesma cópia aparece em outra pasta: vira Duplicata Exata do primeiro, sem extrair.
+    fs::write(e.m.downloads.join("b/copia.pdf"), &conteudo).unwrap();
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1, "{r:?}");
+    assert!(
+        alertas(&mut a)
+            .iter()
+            .any(|al| format!("{al:?}").contains("arquivo_igual")),
+        "alerta de cópia"
+    );
+    let itens = revisao(&mut a);
+    assert_eq!(
+        itens
+            .iter()
+            .filter(|i| i.caminho.as_deref().is_some_and(|c| c.ends_with(".pdf")))
+            .count(),
+        1,
+        "{itens:#?}"
+    );
+}

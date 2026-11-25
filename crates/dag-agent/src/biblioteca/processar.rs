@@ -544,6 +544,47 @@ impl Agente {
                 return Ok(Preparo::Feito(Desfecho::DuplicataExata { bytes }));
             }
         }
+        // 1b. Cópia de um arquivo que já passou pela curadoria (mesmo conteúdo em outra pasta):
+        // Duplicata Exata dele, sem nova extração nem IA.
+        // Só para quem nunca foi extraído e não está sendo reprocessado de propósito.
+        if info.tamanho >= cfg.tamanho_minimo_duplicata
+            && !matches!(job.motivo, store::MotivoJob::Reprocessar)
+            && store::hash_da_extracao(conn, info.file_id)?.is_none()
+            && let Some(original) = store::arquivo_curado_com_mesmo_hash(conn, &hash, info.file_id)?
+        {
+            let caminho_original = store::info_arquivo(conn, original)?.map(|i| i.caminho);
+            store::registrar_candidato(
+                conn,
+                &store::NovoCandidato {
+                    file_id: info.file_id,
+                    alvo: store::AlvoDuplicidade::Arquivo(original),
+                    tipo: TipoDuplicidade::Exata,
+                    evidencias_json:
+                        serde_json::json!({"hash": hex(&hash), "tamanho": info.tamanho}).to_string(),
+                    risco: store::RiscoDuplicidade::Baixo,
+                    bytes: info.tamanho,
+                },
+                agora,
+            )?;
+            store::emitir_alerta(
+                conn,
+                &store::NovoAlerta {
+                    chave: Some(format!("dup_arquivo:{}:{original}", info.file_id)),
+                    tipo: store::TipoAlerta::DuplicataExata,
+                    file_id: Some(info.file_id),
+                    dados_json: serde_json::json!({
+                        "arquivo_igual": original, "caminho_igual": caminho_original,
+                        "caminho": info.caminho, "bytes": info.tamanho,
+                    })
+                    .to_string(),
+                },
+                agora,
+            )?;
+            store::gravar_checkpoint(conn, job.id, "duplicata_exata", None, agora)?;
+            return Ok(Preparo::Feito(Desfecho::DuplicataExata {
+                bytes: info.tamanho,
+            }));
+        }
         // 2. Extração: reaproveita a vigente (mesmo hash e regras) ou extrai.
         let vigentes =
             store::extracoes_vigentes_do_arquivo(conn, job.file_id, &cfg.versao_regras, &hash)?;

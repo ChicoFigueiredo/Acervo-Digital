@@ -54,12 +54,12 @@ pub fn campo_do_nome(nome: &str) -> Option<Campo> {
 fn esquema_evidencias() -> Value {
     json!({
         "type": "array",
-        "maxItems": 3,
+        "maxItems": 2,
         "items": {
             "type": "object",
             "properties": {
                 "pagina": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                "trecho": {"type": "string", "maxLength": 500}
+                "trecho": {"type": "string", "maxLength": 200}
             },
             "required": ["pagina", "trecho"],
             "additionalProperties": false
@@ -126,6 +126,10 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
             Campo::Autores => esquema_pessoas(),
             Campo::Tags => json!({"type": "array", "items": tags_itens, "maxItems": 12}),
             Campo::Estante => estante.clone(),
+            // Resumo curto: a geração longa é o que mais custa na IA local (medição de 25/11).
+            Campo::Resumo => {
+                json!({"anyOf": [{"type": "string", "maxLength": 400}, {"type": "null"}]})
+            }
             _ => texto_ou_nulo(),
         };
         props.insert(nome_campo(c), esquema_campo(valor));

@@ -1,0 +1,23 @@
+[package]
+name = "dag-biblio-ia"
+description = "Classificação bibliográfica com IA local (llama.cpp/GGUF): cliente, prompt, validador, segundo parecer e benchmark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dag-biblio = { path = "../dag-biblio" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+# Cliente HTTP síncrono, Rust puro, sem TLS (só localhost), sem gzip/cookies/json embutidos.
+ureq = { version = "=3.5.2", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -924,8 +924,56 @@ pub fn texto(d: &DadosBiblioteca) -> String {
         }
         DadosBiblioteca::Resumo { resumo: r } => resumo(r),
         DadosBiblioteca::Espaco { relatorio } => espaco(relatorio),
+        DadosBiblioteca::Cobertura { resumo: r } => cobertura(r),
         DadosBiblioteca::Config { config: c } => config(c),
     }
+}
+
+fn cobertura(r: &dag_core::ResumoCobertura) -> String {
+    let mut s = format!(
+        "Cobertura da Biblioteca Homologada, verificada em {}:\n",
+        quando(Some(r.verificado_em))
+    );
+    s.push_str(&format!(
+        "  Formatos: {} no total, {} com Cobertura, {} sem.\n  Manifesto: {} arquivo(s); metadata.db BLAKE3 {}.\n",
+        n(r.formatos_total),
+        n(r.formatos_cobertos),
+        n(r.formatos_sem_cobertura),
+        n(r.arquivos_no_manifesto),
+        r.hash_metadata_db
+    ));
+    s.push_str(&format!(
+        "  Amostra relida (BLAKE3, sem copiar): {} de {} pedida(s): {} ok, {} com falha.\n",
+        n(u64::from(r.amostra_verificada)),
+        n(u64::from(r.amostra_pedida)),
+        n(u64::from(r.amostra_ok)),
+        n(u64::from(r.amostra_falha))
+    ));
+    for f in &r.falhas {
+        s.push_str(&format!("    falha: {f}\n"));
+    }
+    for f in r.sem_cobertura.iter().take(10) {
+        s.push_str(&format!(
+            "    sem Cobertura: {} ({})\n",
+            f.caminho, f.motivo
+        ));
+    }
+    if r.sem_cobertura.len() > 10 {
+        s.push_str(&format!(
+            "    ... e mais {} exemplo(s) no JSON\n",
+            r.sem_cobertura.len() - 10
+        ));
+    }
+    s.push_str(&format!(
+        "Verificação {} (o descarte exige uma aprovada nos últimos {} dia(s)).\n",
+        if r.aprovada {
+            "APROVADA"
+        } else {
+            "NÃO aprovada"
+        },
+        r.validade_dias
+    ));
+    s
 }
 
 fn cadastrada(r: &[dag_core::ResultadoCadastro], bloqueado: Option<&str>) -> String {

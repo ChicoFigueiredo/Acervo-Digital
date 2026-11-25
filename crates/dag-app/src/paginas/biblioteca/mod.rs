@@ -811,6 +811,28 @@ impl Estado {
                 self.em_voo.remove(&Consulta::Espaco);
                 self.espaco = Some(relatorio);
             }
+            DadosBiblioteca::Cobertura { resumo } => {
+                // A GUI ainda não tem tela própria (CLI/MCP): mostra o veredito na faixa.
+                avisos.push((
+                    if resumo.aprovada {
+                        Tom::Sucesso
+                    } else {
+                        Tom::Aviso
+                    },
+                    format!(
+                        "Cobertura da Homologada {}: {} de {} Formato(s) cobertos; amostra {} ok, {} com falha.",
+                        if resumo.aprovada {
+                            "aprovada"
+                        } else {
+                            "não aprovada"
+                        },
+                        inteiro_pt_br(resumo.formatos_cobertos),
+                        inteiro_pt_br(resumo.formatos_total),
+                        resumo.amostra_ok,
+                        resumo.amostra_falha
+                    ),
+                ));
+            }
             DadosBiblioteca::Config { config } => {
                 let salvou = matches!(prop, Some(PropBib::Acao(AcaoBib::ConfigDefinir)));
                 self.em_voo.remove(&Consulta::Config);

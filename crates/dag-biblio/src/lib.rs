@@ -11,6 +11,7 @@ pub mod descarte;
 pub mod duplicidade;
 pub mod espaco;
 pub mod identidade;
+pub mod impressao;
 pub mod isbn;
 pub mod normalizacao;
 pub mod prioridade;

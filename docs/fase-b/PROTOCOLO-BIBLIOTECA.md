@@ -42,6 +42,7 @@ Toda resposta bibliográfica é `Resposta::Biblioteca { dados }`, com `dados` et
 | `BibliotecaMarcarVisto` | `ids` | `vistos` {marcados} | sim |
 | `BibliotecaResumo` | `desde?` (Unix s; padrão 24 h) | `resumo` {resumo} | não |
 | `BibliotecaRelatorioEspaco` | `volume?` (id ou rótulo) | `espaco` {relatorio} | não |
+| `BibliotecaVerificarCobertura` | `biblioteca`, `amostra?` (padrão 10) | `cobertura` {resumo} | sim (job; só grava o resultado em `backups_biblioteca`) |
 | `BibliotecaConfigObter` | - | `config` {config} | não |
 | `BibliotecaConfigDefinir` | `alteracoes` (merge-patch JSON) | `config` {config} | sim |
 
@@ -122,7 +123,35 @@ o hash é de um Formato homologado e enfileira. `Agente::vigiar_biblioteca()` fo
 `politica_trava`, `homologacao` (modo local/servidor; senha no Cofre, `senha_env` só como legado),
 `max_discos_extracao`, `aging_por_hora`, `tag_controle_livro_novo`,
 `debounce_s`, `extensoes_ignoradas`, `tamanho_minimo_duplicata`, `pastas_a_classificar`,
-`versao_regras`. Endpoint de IA fora do loopback é recusado.
+`versao_regras`, `cobertura_validade_dias` (30; `0` desliga a exigência) e `cobertura_minima_pct` (100).
+Endpoint de IA fora do loopback é recusado.
+
+## Lacunas fechadas depois do aceite (B-02, B-14, B-26)
+
+- **Colunas da A Classificar (B-02/CA-B02)**: ao criar (ou reabrir, só se faltar coluna) a A
+  Classificar, o agente lê o perfil da Homologada em `mode=ro` e chama
+  `ClienteCalibredb::clonar_estrutura` (nunca `calibredb clone`, nunca `calibredb` apontado para a
+  Homologada), além de `garantir_colunas_dag`. O relatório de compatibilidade (o que não se clona e
+  por quê: bibliotecas virtuais, categorias de usuário, composite) vai para `avisos` de
+  `registrada` e para `campos_calibre` (visível em `BibliotecaPerfil.campos`).
+- **Impressão digital textual (B-14)**: `dag_biblio::impressao` (shingles de 3 palavras
+  normalizadas + MinHash de 128 valores, Jaccard estimado, 64 bandas LSH; ignora números, dobra
+  confusões de OCR e hifenização). A migração 0013 guarda `impressoes_texto` e
+  `impressoes_bandas`. Ao processar um item, o agente grava a impressão e compara só com os itens
+  que colidem em bandas LSH (teto de 20, nunca quadrático). Jaccard >= 0,5 vira candidato
+  `mesma_edicao` (risco médio); entre 0,25 e 0,5, `incerta` (risco alto), com alvo `arquivo`.
+  Nunca é `exata`, tem `bytes = 0` e não autoriza descarte.
+- **Cobertura = backup verificado (B-26/CA-B24)**: `BibliotecaVerificarCobertura` monta o manifesto
+  da Homologada (metadata.db e todos os arquivos com BLAKE3, reaproveitando o hash do Catálogo
+  quando tamanho e mtime batem), confere que cada Formato tem cópia com Cobertura (Marcação de
+  Backup em outro Dispositivo Físico) e faz a restauração amostral como releitura integral
+  das cópias de backup sorteadas com conferência de BLAKE3 (nada é copiado). Resposta `cobertura`
+  {formatos_total/cobertos/sem_cobertura, amostra_pedida/verificada/ok/falha, falhas, aprovada,
+  verificado_em}. Aprovada = cobertura >= `cobertura_minima_pct`, amostra sem falha e ao menos uma
+  cópia relida. O descarte (`dag_biblio::descarte::avaliar`) passou a bloquear com
+  `cobertura_nao_verificada` quando não há verificação aprovada nos últimos
+  `cobertura_validade_dias`. CLI: `dag biblioteca cobertura <biblioteca> [--amostra N]`; MCP:
+  `biblioteca_verificar_cobertura`.
 
 ## Pontos de encaixe
 

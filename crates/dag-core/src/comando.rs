@@ -385,6 +385,14 @@ pub enum Comando {
         #[serde(default)]
         volume: Option<String>,
     },
+    /// Verifica a Cobertura da Biblioteca Homologada e faz a restauração amostral por releitura
+    /// e BLAKE3 (B-26/CA-B24). Só lê o acervo; grava o resultado no Catálogo.
+    BibliotecaVerificarCobertura {
+        biblioteca: String,
+        /// Quantas cópias de backup reler por inteiro (padrão: 10).
+        #[serde(default)]
+        amostra: Option<u32>,
+    },
     BibliotecaConfigObter,
     /// Altera a configuração (JSON mesclado sobre a atual: só os campos enviados mudam).
     BibliotecaConfigDefinir {

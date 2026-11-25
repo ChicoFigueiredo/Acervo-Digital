@@ -63,6 +63,23 @@ pub struct CopiaPreservada {
     pub na_lixeira: bool,
 }
 
+/// Situação da verificação de Cobertura da Biblioteca Homologada (B-26) para o descarte.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "situacao", rename_all = "snake_case")]
+pub enum VerificacaoCobertura {
+    /// A exigência está desligada (validade 0) ou não se aplica.
+    #[default]
+    NaoExigida,
+    /// Verificação aprovada e dentro da validade.
+    Aprovada,
+    /// Nunca houve verificação.
+    Ausente,
+    /// A última aprovada é antiga demais.
+    Vencida { dias: u32 },
+    /// A última verificação não foi aprovada.
+    Reprovada,
+}
+
 /// Pedido de sugestão.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PedidoDescarte {
@@ -77,6 +94,9 @@ pub struct PedidoDescarte {
     /// homologado sem Cobertura.
     #[serde(default)]
     pub cobertura_do_formato_homologado: Vec<i64>,
+    /// Verificação de Cobertura (backup verificado) recente e aprovada da Homologada.
+    #[serde(default)]
+    pub verificacao_cobertura: VerificacaoCobertura,
 }
 
 /// Razão de bloqueio.
@@ -91,6 +111,8 @@ pub enum RazaoBloqueio {
     EdicaoDistinta,
     /// Candidata sem hash.
     CandidataSemHash,
+    /// Sem verificação de Cobertura recente e aprovada da Biblioteca Homologada (B-26).
+    CoberturaNaoVerificada { situacao: VerificacaoCobertura },
     /// Está dentro da Homologada (livro repetido): revisão humana, não descarte.
     RepetidoNaHomologada,
     /// Espelho de biblioteca: serve de Cobertura, não de descarte.
@@ -125,6 +147,19 @@ impl RazaoBloqueio {
                 format!("a duplicidade é {classificacao:?}, não Exata")
             }
             Self::EdicaoDistinta => "são edições distintas da mesma obra: preservar".into(),
+            Self::CoberturaNaoVerificada { situacao } => match situacao {
+                VerificacaoCobertura::Ausente => {
+                    "a Cobertura da Biblioteca Homologada nunca foi verificada".into()
+                }
+                VerificacaoCobertura::Vencida { dias } => format!(
+                    "a última verificação de Cobertura aprovada tem {dias} dias: verifique de novo"
+                ),
+                VerificacaoCobertura::Reprovada => {
+                    "a última verificação de Cobertura da Biblioteca Homologada não foi aprovada"
+                        .into()
+                }
+                _ => "a Cobertura da Biblioteca Homologada não está verificada".into(),
+            },
             Self::CandidataSemHash => "a cópia candidata não tem Hash Completo".into(),
             Self::RepetidoNaHomologada => {
                 "livro repetido dentro da Homologada: revisar, nunca descartar automaticamente"
@@ -199,6 +234,14 @@ pub fn avaliar(p: &PedidoDescarte) -> DecisaoDescarte {
     }
     if p.candidata.hash.is_none() {
         razoes.push(RazaoBloqueio::CandidataSemHash);
+    }
+    if !matches!(
+        p.verificacao_cobertura,
+        VerificacaoCobertura::NaoExigida | VerificacaoCobertura::Aprovada
+    ) {
+        razoes.push(RazaoBloqueio::CoberturaNaoVerificada {
+            situacao: p.verificacao_cobertura.clone(),
+        });
     }
     match p.candidata.papel {
         PapelCopia::Homologada => razoes.push(RazaoBloqueio::RepetidoNaHomologada),
@@ -332,7 +375,28 @@ mod testes {
             copias,
             iniciativa: Iniciativa::Humana,
             cobertura_do_formato_homologado: vec![],
+            verificacao_cobertura: VerificacaoCobertura::Aprovada,
         }
+    }
+
+    #[test]
+    fn sem_verificacao_de_cobertura_recente_o_descarte_e_bloqueado() {
+        let mut p = pedido(vec![boa()]);
+        p.candidata.papel = PapelCopia::Outro;
+        assert!(avaliar(&p).e_sugestao());
+        for v in [
+            VerificacaoCobertura::Ausente,
+            VerificacaoCobertura::Vencida { dias: 40 },
+            VerificacaoCobertura::Reprovada,
+        ] {
+            p.verificacao_cobertura = v.clone();
+            assert!(
+                razoes(&avaliar(&p))
+                    .contains(&RazaoBloqueio::CoberturaNaoVerificada { situacao: v })
+            );
+        }
+        p.verificacao_cobertura = VerificacaoCobertura::NaoExigida;
+        assert!(avaliar(&p).e_sugestao());
     }
 
     #[test]

@@ -436,7 +436,7 @@ fn descricao_do_mover_avisa_das_confirmacoes_e_so_o_usuario_esvazia() {
 // Curadoria Bibliográfica
 // ---------------------------------------------------------------------------------------------
 
-const FERRAMENTAS_BIBLIOTECA: [&str; 19] = [
+const FERRAMENTAS_BIBLIOTECA: [&str; 20] = [
     "biblioteca_listar",
     "biblioteca_perfil",
     "biblioteca_duplicatas",
@@ -448,6 +448,7 @@ const FERRAMENTAS_BIBLIOTECA: [&str; 19] = [
     "biblioteca_config_obter",
     "biblioteca_registrar",
     "biblioteca_sincronizar",
+    "biblioteca_verificar_cobertura",
     "biblioteca_enfileirar",
     "biblioteca_processar",
     "biblioteca_marcar_visto",

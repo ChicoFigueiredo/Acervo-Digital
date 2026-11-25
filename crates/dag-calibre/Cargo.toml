@@ -1,0 +1,22 @@
+[package]
+name = "dag-calibre"
+description = "Integração com o Calibre (Fase B): leitura somente-leitura da Homologada, perfil, instantâneos, calibredb e homologação controlada"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dag-biblio = { path = "../dag-biblio" }
+blake3.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

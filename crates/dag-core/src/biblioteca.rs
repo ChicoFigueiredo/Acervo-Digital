@@ -218,6 +218,21 @@ pub struct ConfigBiblioteca {
     pub pastas_a_classificar: Vec<String>,
     /// Versão das regras de extração/classificação: mudar reprocessa (CA-B11).
     pub versao_regras: String,
+    /// O descarte só é sugerido se houve verificação de Cobertura aprovada nos últimos N dias
+    /// (B-26). `0` desliga a exigência.
+    #[serde(default = "validade_cobertura_padrao")]
+    pub cobertura_validade_dias: u32,
+    /// Percentual mínimo de Formatos com Cobertura para a verificação ser aprovada.
+    #[serde(default = "cobertura_minima_padrao")]
+    pub cobertura_minima_pct: u32,
+}
+
+fn validade_cobertura_padrao() -> u32 {
+    30
+}
+
+fn cobertura_minima_padrao() -> u32 {
+    100
 }
 
 fn um_por_padrao_discos() -> u32 {
@@ -255,6 +270,8 @@ impl Default for ConfigBiblioteca {
                 .map(String::from)
                 .to_vec(),
             versao_regras: "b1".into(),
+            cobertura_validade_dias: validade_cobertura_padrao(),
+            cobertura_minima_pct: cobertura_minima_padrao(),
         }
     }
 }
@@ -726,6 +743,43 @@ pub struct RelatorioEspacoInfo {
     pub observacao: String,
 }
 
+/// Formato da Homologada sem cópia com Cobertura.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormatoSemCoberturaInfo {
+    pub formato_id: i64,
+    pub caminho: String,
+    pub motivo: String,
+}
+
+/// Verificação de Cobertura da Biblioteca Homologada (B-26/CA-B24): backup verificado = Cobertura
+/// da Fase A (cópia com Marcação de Backup em outro Dispositivo Físico) mais a "restauração
+/// amostral" feita como releitura integral e conferência de BLAKE3 (nada é copiado).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumoCobertura {
+    pub biblioteca: i64,
+    /// Linha gravada em `backups_biblioteca`.
+    pub backup_id: i64,
+    /// Segundos Unix da verificação.
+    pub verificado_em: i64,
+    pub formatos_total: u64,
+    pub formatos_cobertos: u64,
+    pub formatos_sem_cobertura: u64,
+    /// Até 50 exemplos, com o motivo.
+    pub sem_cobertura: Vec<FormatoSemCoberturaInfo>,
+    /// Arquivos no manifesto (metadata.db, formatos, capas, OPF).
+    pub arquivos_no_manifesto: u64,
+    pub hash_metadata_db: String,
+    pub amostra_pedida: u32,
+    pub amostra_verificada: u32,
+    pub amostra_ok: u32,
+    pub amostra_falha: u32,
+    pub falhas: Vec<String>,
+    /// Cobertura mínima atingida e amostra sem falha (e com ao menos uma cópia verificada).
+    pub aprovada: bool,
+    /// Validade (dias) da verificação para o fluxo de descarte.
+    pub validade_dias: u32,
+}
+
 /// Dados de toda resposta bibliográfica.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
@@ -804,6 +858,10 @@ pub enum DadosBiblioteca {
     },
     Espaco {
         relatorio: RelatorioEspacoInfo,
+    },
+    /// Resultado de `BibliotecaVerificarCobertura`.
+    Cobertura {
+        resumo: ResumoCobertura,
     },
     Config {
         config: ConfigBiblioteca,

@@ -192,7 +192,21 @@ pub fn ferramentas() -> Vec<Ferramenta> {
             &format!(
                 "Sincroniza o espelho da Biblioteca Homologada no Catálogo lendo o metadata.db só em leitura e prova por instantâneo que nada mudou. Só grava no Catálogo; trabalho longo. {NAO_TOCA_ACERVO}"
             ),
-            objeto(ref_biblioteca, &["biblioteca"]),
+            objeto(ref_biblioteca.clone(), &["biblioteca"]),
+        ),
+        f(
+            "biblioteca_verificar_cobertura",
+            "biblioteca_verificar_cobertura",
+            &format!(
+                "Verifica a Cobertura da Biblioteca Homologada (backup verificado): monta o manifesto com BLAKE3, confere se cada Formato tem cópia com Marcação de Backup em outro Dispositivo Físico e relê por inteiro uma amostra das cópias de backup conferindo o BLAKE3 (sem copiar nada). Só lê o acervo; grava o resultado no Catálogo; trabalho longo. O descarte só é sugerido com uma verificação aprovada e recente. {NAO_TOCA_ACERVO} {SEM_DESCARTE}"
+            ),
+            objeto(
+                com(
+                    ref_biblioteca.clone(),
+                    json!({"amostra": {"type": "integer", "minimum": 0, "description": "Quantas cópias de backup reler (padrão 10)"}}),
+                ),
+                &["biblioteca"],
+            ),
         ),
         f(
             "biblioteca_enfileirar",
@@ -385,7 +399,7 @@ fn nao_vazia(obj: &Map<String, Value>, chave: &str) -> Result<(), String> {
 /// Validações e ajustes dos argumentos antes de virar `Comando` (a tag é inserida depois).
 pub fn preparar(nome: &str, obj: &mut Map<String, Value>) -> Result<(), String> {
     match nome {
-        "biblioteca_perfil" | "biblioteca_sincronizar" => {
+        "biblioteca_perfil" | "biblioteca_sincronizar" | "biblioteca_verificar_cobertura" => {
             if !obj.contains_key("biblioteca") {
                 return Err("faltou o argumento `biblioteca`".into());
             }

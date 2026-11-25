@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use dag_biblio::TipoDuplicidade;
 use dag_biblio::descarte::{
     CopiaCandidata, CopiaPreservada, DecisaoDescarte, Iniciativa, PapelCopia, PedidoDescarte,
-    avaliar,
+    VerificacaoCobertura, avaliar,
 };
 use dag_core::{
     Autor, CopiaDuplicata, DadosBiblioteca, DecisaoDescarteInfo, FormatoHomologadoRef,
@@ -86,6 +86,7 @@ pub(super) fn avaliar_copia(
     autor: Autor,
     bibliotecas: &[String],
     pastas: &[String],
+    verificacao_cobertura: VerificacaoCobertura,
 ) -> Result<(CopiaDuplicata, bool), ErroAgente> {
     let grupo = store::copias_do_grupo(conn, info.file_id)?;
     let hash_txt = info.hash.map(|h| hex(&h));
@@ -123,6 +124,7 @@ pub(super) fn avaliar_copia(
         copias,
         iniciativa: iniciativa_do(autor),
         cobertura_do_formato_homologado: cobertura,
+        verificacao_cobertura,
     };
     let decisao = match avaliar(&pedido) {
         DecisaoDescarte::Sugerir(r) => DecisaoDescarteInfo {
@@ -218,6 +220,7 @@ impl Agente {
         };
         let achados = store::arquivos_iguais_aos_homologados(conn, bib.id, apos, fatia)?;
         let bibliotecas = caminhos_das_bibliotecas(conn);
+        let verificacao = super::cobertura::situacao_da_cobertura(conn, &cfg, bib.id, agora);
         let prefixo = raiz.map(str::to_owned);
         let mut grupos: BTreeMap<i64, GrupoDuplicata> = BTreeMap::new();
         let mut emitidos = 0_u64;
@@ -242,8 +245,14 @@ impl Agente {
             if store::e_formato_homologado(conn, info.file_id)? {
                 continue;
             }
-            let (copia, _) =
-                avaliar_copia(conn, &info, autor, &bibliotecas, &cfg.pastas_a_classificar)?;
+            let (copia, _) = avaliar_copia(
+                conn,
+                &info,
+                autor,
+                &bibliotecas,
+                &cfg.pastas_a_classificar,
+                verificacao.clone(),
+            )?;
             store::registrar_candidato(
                 conn,
                 &store::NovoCandidato {

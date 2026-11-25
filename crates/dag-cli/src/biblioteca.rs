@@ -157,6 +157,14 @@ pub enum Biblioteca {
         /// Id ou caminho
         biblioteca: String,
     },
+    /// Verifica a Cobertura da Homologada e relê uma amostra das cópias de backup (BLAKE3)
+    Cobertura {
+        /// Id ou caminho
+        biblioteca: String,
+        /// Quantas cópias de backup reler por inteiro (padrão 10)
+        #[arg(long)]
+        amostra: Option<u32>,
+    },
     /// Livros que você já tem: cópias fora da Homologada com o mesmo conteúdo
     Duplicatas {
         /// Só cópias sob esta pasta
@@ -312,6 +320,13 @@ pub fn preparar(b: Biblioteca, agora: i64) -> Result<(Comando, Fluxo), Box<Respo
         }),
         Biblioteca::Sincronizar { biblioteca } => simples(Comando::BibliotecaSincronizar {
             biblioteca: id_ou_caminho(&biblioteca),
+        }),
+        Biblioteca::Cobertura {
+            biblioteca,
+            amostra,
+        } => simples(Comando::BibliotecaVerificarCobertura {
+            biblioteca: id_ou_caminho(&biblioteca),
+            amostra,
         }),
         Biblioteca::Duplicatas {
             raiz,
@@ -998,6 +1013,13 @@ mod testes {
             cmd(&["sincronizar", "/mnt/e/Livros"]),
             Comando::BibliotecaSincronizar {
                 biblioteca: "/mnt/e/Livros".into()
+            }
+        );
+        assert_eq!(
+            cmd(&["cobertura", "2", "--amostra", "7"]),
+            Comando::BibliotecaVerificarCobertura {
+                biblioteca: "2".into(),
+                amostra: Some(7)
             }
         );
         assert_eq!(

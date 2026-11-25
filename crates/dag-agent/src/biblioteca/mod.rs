@@ -13,6 +13,7 @@
 
 mod bibliotecas;
 mod cadastro;
+mod cobertura;
 mod duplicatas;
 mod extracao;
 mod fila;
@@ -267,6 +268,10 @@ impl Agente {
             Comando::BibliotecaRelatorioEspaco { volume } => {
                 self.relatorio_espaco_biblioteca(volume.as_deref())
             }
+            Comando::BibliotecaVerificarCobertura {
+                biblioteca,
+                amostra,
+            } => self.verificar_cobertura(&biblioteca, amostra),
             Comando::BibliotecaConfigObter => Ok(dados(DadosBiblioteca::Config {
                 config: self.config_biblioteca_publica(),
             })),
@@ -299,6 +304,7 @@ pub(crate) fn e_biblioteca(c: &Comando) -> bool {
             | Comando::BibliotecaMarcarVisto { .. }
             | Comando::BibliotecaResumo { .. }
             | Comando::BibliotecaRelatorioEspaco { .. }
+            | Comando::BibliotecaVerificarCobertura { .. }
             | Comando::BibliotecaConfigObter
             | Comando::BibliotecaConfigDefinir { .. }
     )
@@ -334,6 +340,7 @@ pub(crate) fn e_trabalho_longo_biblioteca(c: &Comando) -> bool {
             | Comando::BibliotecaProcessar { .. }
             | Comando::BibliotecaCadastrar { .. }
             | Comando::BibliotecaHomologar { .. }
+            | Comando::BibliotecaVerificarCobertura { .. }
     )
 }
 

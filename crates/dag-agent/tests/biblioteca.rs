@@ -1801,3 +1801,470 @@ fn cadastros_lista_prontos_so_depois_da_revisao_e_e_somente_leitura() {
     assert_eq!(depois[0].titulo.as_deref(), Some("Livro Pronto"));
     assert_eq!(depois[0].estado, None);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Lacunas da Fase B: B-02 (clonar estrutura), B-14 (impressão textual), B-26 (cobertura)
+// ---------------------------------------------------------------------------------------------
+
+use dag_calibre::executor::{Comando as ComandoCalibre, ExecutorCalibre, SaidaProcesso};
+
+/// `calibredb` falso: `list` cria o `metadata.db`; `add_custom_column` grava em `custom_columns`.
+#[derive(Debug, Default)]
+struct CalibredbFalso {
+    chamadas: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl ExecutorCalibre for CalibredbFalso {
+    fn executar(&self, cmd: &ComandoCalibre) -> dag_calibre::Resultado<SaidaProcesso> {
+        self.chamadas.lock().unwrap().push(cmd.args.clone());
+        let a = &cmd.args;
+        let lib = a
+            .iter()
+            .position(|x| x == "--library-path")
+            .map(|i| PathBuf::from(&a[i + 1]))
+            .unwrap();
+        match a[0].as_str() {
+            "list" => {
+                if !lib.join("metadata.db").exists() {
+                    let c = Connection::open(lib.join("metadata.db")).unwrap();
+                    c.execute_batch(ESQUEMA).unwrap();
+                    c.execute(
+                        "INSERT INTO library_id(uuid) VALUES ('uuid-a-classificar')",
+                        [],
+                    )
+                    .unwrap();
+                }
+                Ok(SaidaProcesso::ok("[]"))
+            }
+            "add_custom_column" => {
+                let c = Connection::open(lib.join("metadata.db")).unwrap();
+                let multiplo = a.iter().any(|x| x == "--is-multiple");
+                let tipo = a[3].clone();
+                let display = a
+                    .iter()
+                    .position(|x| x == "--display")
+                    .map_or("{}".to_owned(), |i| a[i + 1].clone());
+                c.execute(
+                    "INSERT INTO custom_columns(label,name,datatype,display,is_multiple,normalized)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![a[1], a[2], tipo, display, multiplo, tipo == "text"],
+                )
+                .unwrap();
+                let n = c.last_insert_rowid();
+                if tipo == "text" {
+                    c.execute_batch(&format!(
+                        "CREATE TABLE custom_column_{n} (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                         CREATE TABLE books_custom_column_{n}_link (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, value INTEGER NOT NULL);"
+                    ))
+                    .unwrap();
+                } else {
+                    c.execute_batch(&format!(
+                        "CREATE TABLE custom_column_{n} (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, value REAL);"
+                    ))
+                    .unwrap();
+                }
+                Ok(SaidaProcesso::ok(""))
+            }
+            _ => Ok(SaidaProcesso::ok("")),
+        }
+    }
+}
+
+/// Acrescenta `#pasta` (text) e `#nota` (int) à Homologada sintética.
+fn colunas_na_homologada(m: &Mundo) {
+    let c = Connection::open(m.homologada.join("metadata.db")).unwrap();
+    c.execute_batch(
+        "INSERT INTO custom_columns(label,name,datatype,display,is_multiple,normalized)
+           VALUES ('pasta','!1.Pasta','text','{}',0,1), ('nota','Nota','int','{}',0,0);
+         CREATE TABLE custom_column_1 (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE books_custom_column_1_link (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, value INTEGER NOT NULL);
+         CREATE TABLE custom_column_2 (id INTEGER PRIMARY KEY, book INTEGER NOT NULL, value INTEGER);",
+    )
+    .unwrap();
+}
+
+fn colunas_de(raiz: &Path) -> Vec<String> {
+    let c = Connection::open(raiz.join("metadata.db")).unwrap();
+    let mut st = c
+        .prepare("SELECT label FROM custom_columns ORDER BY label")
+        .unwrap();
+    st.query_map([], |l| l.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn ca_b02_a_classificar_recria_as_colunas_da_homologada_e_e_idempotente() {
+    let e = Ambiente::novo();
+    colunas_na_homologada(&e.m);
+    let falso = Arc::new(CalibredbFalso::default());
+    let mut a = e
+        .agente(Autor::Gui)
+        .com_executor_calibre(falso.clone())
+        .com_processos_calibre(vec![]);
+    let _ = registrar_homologada(&mut a, &e.m);
+    let antes = arvore(&e.m.homologada);
+    let destino = e.m._tmp.path().join("A_Classificar");
+    let registrar = |a: &mut Agente| {
+        bib(a.executar(Comando::BibliotecaRegistrar {
+            caminho: destino.to_str().unwrap().into(),
+            papel: PapelRegistro::AClassificar,
+            nome: None,
+        }))
+    };
+    let (id, avisos) = match registrar(&mut a) {
+        DadosBiblioteca::Registrada {
+            biblioteca, avisos, ..
+        } => (biblioteca.id, avisos),
+        d => panic!("{d:?}"),
+    };
+    let cols = colunas_de(&destino);
+    for esperada in ["dag_confianca", "dag_hash", "nota", "pasta"] {
+        assert!(cols.contains(&esperada.to_owned()), "{cols:?}");
+    }
+    assert!(avisos.iter().any(|v| v.contains("pasta")), "{avisos:?}");
+    // O relatório de compatibilidade fica em campos_calibre.
+    match bib(a.executar(Comando::BibliotecaPerfil {
+        biblioteca: id.to_string(),
+    })) {
+        DadosBiblioteca::Perfil { campos, .. } => {
+            assert!(campos.iter().any(|c| c.rotulo == "pasta" && c.clonavel));
+        }
+        d => panic!("{d:?}"),
+    }
+    // Nenhum comando do calibredb apontou para a Homologada.
+    let h = e.m.homologada.to_str().unwrap();
+    assert!(
+        falso
+            .chamadas
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !c.iter().any(|x| x.starts_with(h)))
+    );
+    assert_eq!(arvore(&e.m.homologada), antes);
+    // Segundo registro: nada novo é criado.
+    let n = falso.chamadas.lock().unwrap().len();
+    registrar(&mut a);
+    assert_eq!(falso.chamadas.lock().unwrap().len(), n);
+    assert_eq!(colunas_de(&destino), cols);
+}
+
+// --- B-14: impressão digital textual -----------------------------------------------------------
+
+type PaginasDe = dyn Fn(&str) -> Vec<String> + Send + Sync;
+
+/// Extrator que devolve páginas de texto por nome de arquivo.
+struct ExtratorPaginas {
+    paginas_de: Box<PaginasDe>,
+}
+
+impl ExtratorLivro for ExtratorPaginas {
+    fn nome(&self) -> String {
+        "paginas".into()
+    }
+
+    fn extrair(
+        &self,
+        caminho: &Path,
+        _formato: FormatoLivro,
+        _cfg: &ConfigBiblioteca,
+    ) -> Result<SaidaExtracao, String> {
+        let nome = caminho.file_name().unwrap().to_string_lossy().into_owned();
+        let paginas = (self.paginas_de)(&nome)
+            .into_iter()
+            .enumerate()
+            .map(|(i, texto)| dag_biblio::PaginaTexto {
+                numero: i as u32 + 1,
+                texto,
+                via_ocr: true,
+                qualidade: 0.8,
+                idioma_ocr: None,
+            })
+            .collect();
+        Ok(saida(Vec::new(), None, paginas))
+    }
+}
+
+/// Texto pseudo-aleatório determinístico (`n` palavras).
+fn texto_livro(semente: u64, n: usize) -> Vec<String> {
+    let silabas = [
+        "ca", "mo", "ri", "tu", "be", "lo", "sa", "ne", "du", "fi", "ga", "po", "re", "vu", "xo",
+        "ze",
+    ];
+    let mut s = semente.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut palavras = Vec::new();
+    for _ in 0..n {
+        let mut p = String::new();
+        for _ in 0..3 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            p.push_str(silabas[(s % 16) as usize]);
+        }
+        palavras.push(p);
+    }
+    palavras
+        .chunks(300)
+        .map(|c| c.join(" "))
+        .collect::<Vec<_>>()
+}
+
+#[test]
+fn b14_duas_digitalizacoes_do_mesmo_livro_viram_hipotese_de_mesma_edicao_nunca_exata() {
+    let e = Ambiente::novo();
+    let original = texto_livro(11, 3000);
+    // A segunda digitalização tem OCR ruim: letras trocadas, números de página e caixa alta.
+    let ruidosa: Vec<String> = original
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut v: Vec<String> = p.split(' ').map(str::to_owned).collect();
+            for (k, w) in v.iter_mut().enumerate() {
+                if k % 30 == 0 {
+                    w.replace_range(0..1, "x");
+                }
+            }
+            format!("{} {}\nLIVRO", v.join(" ").to_uppercase(), i + 1)
+        })
+        .collect();
+    let outro = texto_livro(99, 3000);
+    let (a_txt, b_txt, c_txt) = (original.clone(), ruidosa, outro);
+    let ext = Arc::new(ExtratorPaginas {
+        paginas_de: Box::new(move |n| match n {
+            "scan_a.pdf" => a_txt.clone(),
+            "scan_b.pdf" => b_txt.clone(),
+            _ => c_txt.clone(),
+        }),
+    });
+    fs::write(e.m.downloads.join("scan_a.pdf"), corpo(60, 30_000)).unwrap();
+    fs::write(e.m.downloads.join("scan_b.pdf"), corpo(61, 30_000)).unwrap();
+    fs::write(e.m.downloads.join("outro.pdf"), corpo(62, 30_000)).unwrap();
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    let conn = Connection::open(&e.m.catalogo).unwrap();
+    let nome_de = |id: i64| -> String {
+        conn.query_row("SELECT name_display FROM files WHERE id = ?1", [id], |l| {
+            l.get(0)
+        })
+        .unwrap()
+    };
+    let mut st = conn
+        .prepare(
+            "SELECT file_id, alvo_id, tipo, bytes FROM candidatos_duplicidade
+             WHERE alvo_tipo = 'arquivo'",
+        )
+        .unwrap();
+    let linhas: Vec<(String, String, String, i64)> = st
+        .query_map([], |l| {
+            Ok((
+                nome_de(l.get(0)?),
+                nome_de(l.get(1)?),
+                l.get::<_, String>(2)?,
+                l.get(3)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        linhas.iter().any(|(f, al, t, _)| t == "mesma_edicao"
+            && ["scan_a.pdf", "scan_b.pdf"].contains(&f.as_str())
+            && ["scan_a.pdf", "scan_b.pdf"].contains(&al.as_str())),
+        "{linhas:?}"
+    );
+    // Nunca Exata, nunca espaço recuperável, e o texto diferente não gera hipótese.
+    assert!(linhas.iter().all(|(_, _, t, b)| t != "exata" && *b == 0));
+    assert!(
+        !linhas
+            .iter()
+            .any(|(f, al, _, _)| f == "outro.pdf" || al == "outro.pdf"),
+        "{linhas:?}"
+    );
+}
+
+// --- B-26: verificação de Cobertura -------------------------------------------------------------
+
+fn volume_hd(raiz: &Path) -> VolumeDescoberto {
+    let mut v = volume(raiz);
+    v.platform_id = format!("HD-{}", v.st_dev);
+    v.rotulo = Some("HD-Externo".into());
+    v.dispositivo = Some(DispositivoDescoberto {
+        identificador: "disco-hd".into(),
+        modelo: None,
+        tipo: TipoDispositivo::Hdd,
+        removivel: false,
+    });
+    v
+}
+
+fn cobertura(a: &mut Agente, id: i64, amostra: u32) -> dag_core::ResumoCobertura {
+    match bib(a.executar(Comando::BibliotecaVerificarCobertura {
+        biblioteca: id.to_string(),
+        amostra: Some(amostra),
+    })) {
+        DadosBiblioteca::Cobertura { resumo } => resumo,
+        d => panic!("{d:?}"),
+    }
+}
+
+#[test]
+fn ca_b24_cobertura_verificada_amostra_relida_e_descarte_exige_verificacao_recente() {
+    let e = Ambiente::novo();
+    let shm = Path::new("/dev/shm");
+    if !shm.is_dir() || fs::metadata(shm).unwrap().dev() == fs::metadata(&e.m.raiz).unwrap().dev() {
+        eprintln!("AVISO: sem segundo filesystem; teste de Cobertura ignorado");
+        return;
+    }
+    let hd = tempfile::Builder::new()
+        .prefix("dag-hd-")
+        .tempdir_in(shm)
+        .unwrap();
+    let hd_raiz = fs::canonicalize(hd.path()).unwrap();
+    // Cópias de backup dos 3 Formatos da Homologada e uma cópia solta em Downloads.
+    let originais = [
+        "Machado de Assis/Dom Casmurro (1)/Dom Casmurro.pdf",
+        "Machado de Assis/Memórias Póstumas (2)/Memórias Póstumas.epub",
+        "Machado de Assis/O Alienista (3)/O Alienista.pdf",
+    ];
+    for (i, o) in originais.iter().enumerate() {
+        let destino = hd_raiz.join(format!("backup/{i}_{}", o.rsplit('/').next().unwrap()));
+        fs::create_dir_all(destino.parent().unwrap()).unwrap();
+        fs::copy(e.m.homologada.join(o), destino).unwrap();
+    }
+    fs::copy(
+        e.m.homologada.join(originais[0]),
+        e.m.downloads.join("copia.pdf"),
+    )
+    .unwrap();
+    let mut a = e
+        .agente(Autor::Gui)
+        .com_volumes_fixos(vec![volume(&e.m.raiz), volume_hd(&hd_raiz)]);
+    a.executar(Comando::IniciarScan {
+        modo: ModoVarredura::FullScan,
+        raizes: vec![
+            e.m.raiz.to_str().unwrap().into(),
+            hd_raiz.to_str().unwrap().into(),
+        ],
+        sem_hash: false,
+        elevar: false,
+        releitura_total: false,
+        threads_por_disco: None,
+        max_discos: None,
+    });
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    let homologada_antes = arvore(&e.m.homologada);
+    let razoes_da_copia = |a: &mut Agente| -> Vec<String> {
+        let DadosBiblioteca::Duplicatas { grupos, .. } =
+            bib(a.executar(Comando::BibliotecaDuplicatas {
+                raiz: Some(e.m.downloads.to_str().unwrap().into()),
+                limite: None,
+                cursor: None,
+            }))
+        else {
+            panic!()
+        };
+        grupos[0].copias[0].decisao.razoes.clone()
+    };
+    // Nunca verificada: o descarte nem é sugerido.
+    assert!(
+        razoes_da_copia(&mut a)
+            .iter()
+            .any(|r| r.contains("nunca foi verificada")),
+    );
+    // Sem Marcação de Backup, nenhum Formato tem Cobertura.
+    let r0 = cobertura(&mut a, id, 5);
+    assert_eq!((r0.formatos_total, r0.formatos_cobertos), (3, 0));
+    assert!(!r0.aprovada);
+    assert!(r0.arquivos_no_manifesto >= 4, "{r0:?}"); // metadata.db + 3 formatos
+    assert!(!r0.hash_metadata_db.is_empty());
+    // Marcação de Backup no HD: os 3 Formatos passam a ter Cobertura e a amostra confere.
+    let m = a.executar(Comando::MarcarBackup {
+        alvo: dag_core::Alvo::Volume("HD-Externo".into()),
+    });
+    assert!(matches!(m, Resposta::Marcacao { .. }), "{m:?}");
+    let r1 = cobertura(&mut a, id, 5);
+    assert_eq!(r1.formatos_cobertos, 3, "{r1:?}");
+    assert_eq!(
+        (r1.amostra_verificada, r1.amostra_ok, r1.amostra_falha),
+        (3, 3, 0)
+    );
+    assert!(r1.aprovada, "{r1:?}");
+    let conn = Connection::open(&e.m.catalogo).unwrap();
+    let (estado, rest): (String, Option<String>) = conn
+        .query_row(
+            "SELECT verificacao_estado, restauracao_json FROM backups_biblioteca
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |l| Ok((l.get(0)?, l.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(estado, "ok");
+    assert!(rest.unwrap().contains("releitura_blake3_sem_copia"));
+    // Verificação aprovada e recente: a razão some (outras razões da Fase A podem continuar).
+    assert!(
+        !razoes_da_copia(&mut a).iter().any(
+            |r| r.contains("Cobertura da Biblioteca") || r.contains("verificação de Cobertura")
+        ),
+    );
+    // Passados 40 dias (validade padrão: 30), volta a exigir.
+    e.avancar(40 * 86_400);
+    assert!(
+        razoes_da_copia(&mut a)
+            .iter()
+            .any(|r| r.contains("40 dias")),
+    );
+    // Corrompe uma cópia de backup (mesmo tamanho): a amostra detecta e reprova.
+    let alvo = fs::read_dir(hd_raiz.join("backup"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut b = fs::read(&alvo).unwrap();
+    b[100] ^= 0xFF;
+    fs::write(&alvo, b).unwrap();
+    let r2 = cobertura(&mut a, id, 10);
+    assert_eq!(r2.amostra_falha, 1, "{r2:?}");
+    assert!(!r2.aprovada);
+    assert!(r2.falhas[0].contains("BLAKE3"), "{:?}", r2.falhas);
+    // Tudo foi só leitura do acervo.
+    assert_eq!(arvore(&e.m.homologada), homologada_antes);
+}
+
+#[test]
+fn ca_b02_calibredb_real_cria_a_classificar_com_pasta_e_demais_colunas() {
+    if dag_calibre::executor::ExecutorProcesso::disponivel().is_none() {
+        eprintln!("AVISO: teste pulado, calibredb ausente");
+        return;
+    }
+    let e = Ambiente::novo();
+    colunas_na_homologada(&e.m);
+    let mut a = e.agente(Autor::Gui);
+    registrar_homologada(&mut a, &e.m);
+    let antes = arvore(&e.m.homologada);
+    let destino = e.m._tmp.path().join("A_Classificar_real");
+    let r = a.executar(Comando::BibliotecaRegistrar {
+        caminho: destino.to_str().unwrap().into(),
+        papel: PapelRegistro::AClassificar,
+        nome: None,
+    });
+    match r {
+        Resposta::Biblioteca { .. } => {}
+        Resposta::Erro { codigo, mensagem } => {
+            eprintln!("AVISO: calibredb não pôde criar a A Classificar ({codigo}): {mensagem}");
+            assert_eq!(arvore(&e.m.homologada), antes);
+            return;
+        }
+        outra => panic!("{outra:?}"),
+    }
+    let cols = colunas_de(&destino);
+    for esperada in ["dag_confianca", "dag_hash", "nota", "pasta"] {
+        assert!(cols.contains(&esperada.to_owned()), "{cols:?}");
+    }
+    assert_eq!(arvore(&e.m.homologada), antes);
+}

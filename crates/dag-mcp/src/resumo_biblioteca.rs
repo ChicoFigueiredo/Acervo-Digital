@@ -285,6 +285,21 @@ pub fn resumir_biblioteca(d: &DadosBiblioteca) -> String {
                 r.observacao
             )
         }
+        DadosBiblioteca::Cobertura { resumo: r } => format!(
+            "Cobertura da Homologada: {} de {} Formato(s) com cópia de backup em outro Dispositivo Físico ({} sem); amostra relida: {} ok e {} com falha de {} pedida(s); verificação {} (vale {} dia(s) para o descarte).",
+            r.formatos_cobertos,
+            r.formatos_total,
+            r.formatos_sem_cobertura,
+            r.amostra_ok,
+            r.amostra_falha,
+            r.amostra_pedida,
+            if r.aprovada {
+                "APROVADA"
+            } else {
+                "NÃO aprovada"
+            },
+            r.validade_dias
+        ),
         DadosBiblioteca::Config { config: c } => format!(
             "Configuração da curadoria: IA {} ({}), OCR {}, homologação em modo {}, prefixo unshare {}.",
             if c.ia.ativa { "ligada" } else { "desligada" },

@@ -237,6 +237,7 @@ pub fn resumir(r: &Resposta) -> String {
             "Hash Completo: {threads_por_disco} thread(s) por disco, até {max_discos} disco(s) em paralelo."
         ),
         Resposta::Verificacao { .. } => "Verificação de Integridade concluída.".into(),
+        Resposta::Biblioteca { .. } => "Curadoria Bibliográfica: veja structuredContent.".into(),
         Resposta::Erro { codigo, mensagem } => format!("Erro ({codigo}): {mensagem}"),
     }
 }

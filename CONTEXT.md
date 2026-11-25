@@ -156,6 +156,22 @@ _Avoid_: biblioteca oficial, biblioteca principal, Calibre (sozinho)
 Biblioteca Calibre separada, criada pelo DAG, onde entram os livros candidatos para revisão antes da homologação. É área de trabalho: estar nela não autoriza descartar nada.
 _Avoid_: pré-catálogo, staging, caixa de entrada
 
+**Obra**:
+O livro como criação intelectual, independente de idioma, tradução ou editora (por exemplo, *Dom Casmurro*).
+_Avoid_: livro (quando se quer dizer a obra), título
+
+**Edição**:
+Uma publicação concreta de uma Obra: editora, edição, tradução, idioma e ano próprios, normalmente com ISBN próprio. Traduções, revisões e volumes são Edições distintas.
+_Avoid_: versão, manifestação, exemplar
+
+**Formato**:
+O tipo de arquivo em que uma Edição existe (o EPUB da Edição X, o PDF da Edição X). A classe geral de um arquivo no Catálogo (Livro, Foto...) é a Categoria, não o Formato.
+_Avoid_: extensão, tipo
+
+**Arquivo**:
+Um arquivo físico catalogado que contém um Formato de uma Edição. Vários Arquivos com o mesmo Hash Completo formam um Grupo de Duplicados.
+_Avoid_: cópia (quando não se fala de duplicados), exemplar
+
 ## Relationships
 
 - Um **Grupo de Duplicados** contém dois ou mais arquivos físicos; caminhos do **Mesmo Arquivo Físico** contam como um só.
@@ -176,6 +192,8 @@ _Avoid_: pré-catálogo, staging, caixa de entrada
 - Um **Contêiner** cifrado é tentado primeiro com a **Senha do Contêiner** já guardada, depois com o **Cofre de Senhas**; só se tudo falhar vira **Pedido de Serviço** de senha, e os **Membros** ficam não lidos até a resposta.
 - Um livro só é sugerido para a **Lixeira do Volume** se tiver **Cobertura** com hash conferido; o fluxo bibliográfico não cria outro conceito de backup.
 - A **Biblioteca Homologada** e **A Classificar** são bibliotecas Calibre independentes; nada da **A Classificar** entra na **Biblioteca Homologada** sem aprovação do usuário.
+- Uma **Obra** tem uma ou mais **Edições**; uma **Edição** tem um ou mais **Formatos**; um **Formato** existe em um ou mais **Arquivos**.
+- Só **Arquivos** do mesmo **Formato** com o mesmo Hash Completo são duplicados de verdade e geram espaço recuperável; PDF e EPUB da mesma **Edição** são dois **Formatos** preservados.
 
 ## Flagged ambiguities
 

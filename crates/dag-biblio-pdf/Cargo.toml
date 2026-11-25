@@ -1,0 +1,24 @@
+[package]
+name = "dag-biblio-pdf"
+description = "Extração de PDF e DjVu da Fase B (poppler, djvulibre, tesseract via processo) com OCR seletivo e amostragem progressiva"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dag-biblio = { path = "../dag-biblio" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# memfd_create: bytes em memória viram um arquivo anônimo (sem disco) que as ferramentas leem.
+rustix.workspace = true
+# Só para codificar o PNG da capa de DjVu (ddjvu entrega PNM).
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

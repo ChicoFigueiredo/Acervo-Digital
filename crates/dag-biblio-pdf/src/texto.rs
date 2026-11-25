@@ -149,7 +149,12 @@ fn linha_de_sumario(linha: &str) -> Option<ItemSumario> {
     let (resto, ultimo) = t.rsplit_once(char::is_whitespace).map_or_else(
         || {
             // Pontilhado grudado no número: "Título.....12".
-            let pos = t.rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1);
+            // Fim do último caractere não dígito (pode ter vários bytes: "•", "—", "…").
+            let pos = t
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !c.is_ascii_digit())
+                .map(|(i, c)| i + c.len_utf8());
             pos.map_or((t, ""), |i| (&t[..i], &t[i..]))
         },
         |(a, b)| (a, b),
@@ -497,6 +502,24 @@ pub fn como_dado_nao_confiavel(texto: &str) -> String {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn sumario_grudado_com_caractere_multibyte_nao_entra_em_panico() {
+        // Visto na curadoria real: "•" e "—" antes do número quebravam o fatiamento por byte.
+        for l in [
+            "Capítulo•12",
+            "Intro—7",
+            "Índice…3",
+            "•1",
+            "—",
+            "Introdução ………… 9",
+            "日本語の章12",
+        ] {
+            let _ = linha_de_sumario(l);
+        }
+        let item = linha_de_sumario("Introdução……………12").unwrap();
+        assert_eq!(item.pagina, Some(12));
+    }
 
     #[test]
     fn texto_normal_tem_boa_qualidade() {

@@ -9,7 +9,8 @@ use dag_core::{
 use dag_store::biblioteca as store;
 
 use super::duplicatas::livro_ref;
-use super::{cursor_i64, dados, hex, limite_pagina};
+use super::item::PREFIXO_REVISAO;
+use super::{dados, hex, limite_pagina};
 use crate::agente::Agente;
 use crate::erro::ErroAgente;
 
@@ -42,6 +43,23 @@ fn texto_do_valor(v: &dag_biblio::ValorSugerido) -> Option<String> {
     })
 }
 
+/// Cursor da revisão: `file_id` ou `file_id:membro`.
+fn cursor_item(c: Option<&str>) -> Option<(i64, String)> {
+    let c = c?;
+    match c.split_once(':') {
+        Some((f, m)) => Some((f.parse().ok()?, m.to_owned())),
+        None => Some((c.parse().ok()?, String::new())),
+    }
+}
+
+fn texto_cursor(f: i64, m: &str) -> String {
+    if m.is_empty() {
+        f.to_string()
+    } else {
+        format!("{f}:{m}")
+    }
+}
+
 impl Agente {
     pub(super) fn revisao_biblioteca(
         &mut self,
@@ -49,15 +67,18 @@ impl Agente {
         cursor: Option<&str>,
     ) -> Result<Resposta, ErroAgente> {
         let conn = self.conexao();
-        let pag = store::listar_revisao_pendente(conn, cursor_i64(cursor), limite_pagina(limite))?;
+        let pag = store::listar_revisao_itens(conn, cursor_item(cursor), limite_pagina(limite))?;
         let mut itens = Vec::with_capacity(pag.itens.len());
         for it in &pag.itens {
             let info = store::info_arquivo(conn, it.file_id)?;
             let extraido: Option<ResultadoExtracao> = conn
                 .query_row(
                     "SELECT resultado FROM extracoes WHERE file_id = ?1 AND compressao = 'nenhuma'
-                     AND resultado IS NOT NULL ORDER BY criado_em DESC LIMIT 1",
-                    [it.file_id],
+                     AND resultado IS NOT NULL
+                     AND CASE WHEN instr(versao_regras, '|m:') > 0
+                              THEN substr(versao_regras, instr(versao_regras, '|m:') + 3) ELSE '' END = ?2
+                     ORDER BY criado_em DESC LIMIT 1",
+                    rusqlite::params![it.file_id, it.membro],
                     |l| l.get::<_, Vec<u8>>(0),
                 )
                 .ok()
@@ -72,6 +93,14 @@ impl Agente {
                     )
                     && let Some(l) = store::obter_livro(conn, livro_id)?
                 {
+                    // Candidato de um Membro só vai ao item dele.
+                    let do_membro = serde_json::from_str::<serde_json::Value>(&c.evidencias_json)
+                        .ok()
+                        .and_then(|v| v.get("membro").and_then(|m| m.as_str().map(str::to_owned)))
+                        .unwrap_or_default();
+                    if do_membro != it.membro {
+                        continue;
+                    }
                     parecidos.push(ParecidoHomologado {
                         livro: livro_ref(&l),
                         motivo: c.evidencias_json.clone(),
@@ -79,7 +108,7 @@ impl Agente {
                     });
                 }
             }
-            let sugs = store::sugestoes_do_arquivo(conn, it.file_id)?;
+            let sugs = store::sugestoes_do_item(conn, it.file_id, &it.membro)?;
             let campos = sugs
                 .iter()
                 .map(|s| {
@@ -98,6 +127,16 @@ impl Agente {
                         Campo::Isbn => p.livro.isbn13.clone(),
                         _ => None,
                     });
+                    let motivos: Vec<String> = s
+                        .evidencias
+                        .iter()
+                        .filter_map(|e| {
+                            e.detalhe
+                                .as_deref()
+                                .and_then(|d| d.strip_prefix(PREFIXO_REVISAO))
+                                .map(str::to_owned)
+                        })
+                        .collect();
                     CampoLadoALado {
                         campo: nome,
                         extraido: ext,
@@ -112,42 +151,65 @@ impl Agente {
                         evidencias: s
                             .evidencias
                             .iter()
-                            .map(|e| {
-                                e.trecho
-                                    .clone()
-                                    .or_else(|| e.detalhe.clone())
-                                    .unwrap_or_else(|| format!("{:?}", e.origem))
+                            .filter(|e| {
+                                !e.detalhe
+                                    .as_deref()
+                                    .is_some_and(|d| d.starts_with(PREFIXO_REVISAO))
+                            })
+                            .map(|e| match (&e.trecho, &e.detalhe) {
+                                (Some(t), Some(d)) => format!("{t}: {d}"),
+                                (Some(x), None) | (None, Some(x)) => x.clone(),
+                                (None, None) => format!("{:?}", e.origem),
                             })
                             .collect(),
-                        precisa_revisao: s.confianca < 0.9,
-                        motivos: Vec::new(),
+                        precisa_revisao: s.confianca < 0.9 || !motivos.is_empty(),
+                        motivos,
                         homologado,
                         estado: format!("{:?}", s.estado).to_lowercase(),
                         sugestao_id: Some(s.id),
                     }
                 })
                 .collect();
-            let od = store::obra_edicao_do_arquivo(conn, it.file_id)?;
+            let od = sugs
+                .iter()
+                .find_map(|s| s.edicao_id)
+                .map(|e| store::obter_edicao(conn, e).map(|x| x.map(|ed| (ed.obra_id, ed.id))))
+                .transpose()?
+                .flatten()
+                .or(store::obra_edicao_do_arquivo(conn, it.file_id)?);
+            let proposta = if it.membro.is_empty() && store::e_formato_homologado(conn, it.file_id)?
+            {
+                store::livro_do_arquivo(conn, it.file_id)?.map(|l| livro_ref(&l))
+            } else {
+                None
+            };
             itens.push(ItemRevisaoInfo {
                 file_id: it.file_id,
                 caminho: info.as_ref().map(|i| i.caminho.clone()),
                 tamanho: info.as_ref().map(|i| i.tamanho),
                 hash: info.as_ref().and_then(|i| i.hash).map(|h| hex(&h)),
-                formato: info
-                    .as_ref()
-                    .and_then(|i| i.nome.rsplit('.').next().map(str::to_uppercase)),
+                formato: if it.membro.is_empty() {
+                    info.as_ref()
+                        .and_then(|i| i.nome.rsplit('.').next().map(str::to_uppercase))
+                } else {
+                    it.membro.rsplit('.').next().map(str::to_uppercase)
+                },
                 pendentes: it.pendentes,
                 campos,
                 homologados_parecidos: parecidos,
                 obra_id: od.map(|x| x.0),
                 edicao_id: od.map(|x| x.1),
-                avisos: Vec::new(),
+                avisos: avisos_da_extracao(extraido.as_ref()),
+                paginas: paginas_resumidas(extraido.as_ref()),
+                paginas_ocr: extraido.as_ref().map_or(0, paginas_com_ocr),
+                membro: (!it.membro.is_empty()).then(|| it.membro.clone()),
+                proposta_homologada: proposta,
             });
         }
         Ok(dados(DadosBiblioteca::Revisao {
             itens,
             total_pendentes: store::contar_sugestoes_pendentes(conn)?,
-            proximo_cursor: pag.proximo.map(|i| i.to_string()),
+            proximo_cursor: pag.proximo.map(|(f, m)| texto_cursor(f, &m)),
         }))
     }
 
@@ -180,11 +242,23 @@ impl Agente {
                 AlvoRevisao::Arquivo(f) => {
                     let s = store::sugestoes_do_arquivo(&tx, f)?
                         .into_iter()
-                        .filter(|s| s.campo == campo && s.estado == store::EstadoSugestao::Pendente)
+                        .filter(|s| {
+                            s.campo == campo
+                                && s.estado == store::EstadoSugestao::Pendente
+                                && store::membro_da_versao(&s.versao_regras).is_empty()
+                        })
                         .max_by(|a, b| a.confianca.total_cmp(&b.confianca));
                     (store::AlvoDecisao::Arquivo(f), s)
                 }
-                AlvoRevisao::Edicao(e) => (store::AlvoDecisao::Edicao(e), None),
+                // Um Membro de compactado se decide pela Edição dele: as sugestões pendentes
+                // da Edição são as do livro (o arquivo é o do Contêiner, compartilhado).
+                AlvoRevisao::Edicao(e) => {
+                    let s = store::sugestoes_pendentes_da_edicao(&tx, e)?
+                        .into_iter()
+                        .filter(|s| s.campo == campo)
+                        .max_by(|a, b| a.confianca.total_cmp(&b.confianca));
+                    (store::AlvoDecisao::Edicao(e), s)
+                }
                 AlvoRevisao::Obra(o) => (store::AlvoDecisao::Obra(o), None),
             };
             if sugestao.is_none() && acao != store::AcaoDecisao::Corrigir {
@@ -229,4 +303,53 @@ impl Agente {
             desfeitas: n,
         }))
     }
+}
+
+/// Páginas lidas com OCR (a lista `paginas_ocr` do resultado, ou as páginas marcadas `via_ocr`).
+fn paginas_com_ocr(r: &ResultadoExtracao) -> u32 {
+    let marcadas = r.paginas.iter().filter(|p| p.via_ocr).count();
+    u32::try_from(r.paginas_ocr.len().max(marcadas)).unwrap_or(u32::MAX)
+}
+
+/// Resumo das páginas extraídas: número, se veio de OCR, qualidade e um trecho curto.
+fn paginas_resumidas(r: Option<&ResultadoExtracao>) -> Vec<dag_core::biblioteca::PaginaResumo> {
+    r.map(|r| {
+        r.paginas
+            .iter()
+            .map(|p| dag_core::biblioteca::PaginaResumo {
+                numero: p.numero,
+                via_ocr: p.via_ocr,
+                qualidade: p.qualidade,
+                trecho: p
+                    .texto
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(160)
+                    .collect(),
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Avisos da extração, com a marca de OCR em primeiro lugar (a CLI distingue PDF imagem de PDF
+/// textual por ela).
+fn avisos_da_extracao(r: Option<&ResultadoExtracao>) -> Vec<String> {
+    let Some(r) = r else { return Vec::new() };
+    let mut v = Vec::new();
+    let ocr = paginas_com_ocr(r);
+    if ocr > 0 {
+        let total = r
+            .total_paginas
+            .map_or(String::new(), |t| format!(" de {t}"));
+        v.push(format!("ocr: {ocr}{total} páginas lidas por OCR"));
+    }
+    for a in &r.avisos {
+        if !v.contains(a) {
+            v.push(a.clone());
+        }
+    }
+    v
 }

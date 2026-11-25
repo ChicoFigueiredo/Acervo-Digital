@@ -146,14 +146,15 @@ pub fn gravar_lote(
 ) -> Resultado<Vec<i64>> {
     let mut up_livro = conn.prepare_cached(
         "INSERT INTO livros_homologados (biblioteca_id, calibre_id, uuid, titulo, titulo_norm, autores_json,
-                isbn13, idioma, serie, indice, editora, tags_json, estante, caminho, geracao, atualizado_em)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                isbn13, idioma, serie, indice, editora, tags_json, estante, caminho, geracao, atualizado_em,
+                titulo_principal)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(biblioteca_id, calibre_id) DO UPDATE SET
             uuid = excluded.uuid, titulo = excluded.titulo, titulo_norm = excluded.titulo_norm,
             autores_json = excluded.autores_json, isbn13 = excluded.isbn13, idioma = excluded.idioma,
             serie = excluded.serie, indice = excluded.indice, editora = excluded.editora,
             tags_json = excluded.tags_json, estante = excluded.estante, caminho = excluded.caminho,
-            geracao = excluded.geracao,
+            geracao = excluded.geracao, titulo_principal = excluded.titulo_principal,
             atualizado_em = CASE WHEN
                 livros_homologados.uuid IS excluded.uuid AND livros_homologados.titulo = excluded.titulo
                 AND livros_homologados.autores_json = excluded.autores_json
@@ -196,7 +197,8 @@ pub fn gravar_lote(
                 l.estante,
                 l.caminho,
                 geracao,
-                agora
+                agora,
+                super::titulo_principal(&l.titulo)
             ],
             |r| r.get(0),
         )?;

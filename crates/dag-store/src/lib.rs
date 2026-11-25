@@ -68,7 +68,28 @@ pub const MIGRACOES: &[Migracao] = &[
         "Curadoria Bibliográfica (Fase B): bibliotecas Calibre, espelho homologado, obras/edições, jobs, sugestões, duplicidade, alertas, A Classificar",
         include_str!("../migrations/0011_biblioteca.sql"),
     ),
+    Migracao::codigo(
+        "Curadoria Bibliográfica: título principal normalizado do espelho (pré-filtro de identidade)",
+        migrar_titulo_principal,
+    ),
 ];
+
+/// Migração 0012: coluna aditiva `titulo_principal` e preenchimento do que já está no espelho.
+fn migrar_titulo_principal(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute_batch(include_str!(
+        "../migrations/0012_biblioteca_titulo_principal.sql"
+    ))?;
+    let linhas = {
+        let mut st = tx.prepare("SELECT id, titulo FROM livros_homologados")?;
+        st.query_map([], |l| Ok((l.get::<_, i64>(0)?, l.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut up = tx.prepare("UPDATE livros_homologados SET titulo_principal = ?2 WHERE id = ?1")?;
+    for (id, titulo) in linhas {
+        up.execute(rusqlite::params![id, biblioteca::titulo_principal(&titulo)])?;
+    }
+    Ok(())
+}
 
 /// Migração 0010: SQL aditivo mais a ampliação do `CHECK` de `scan_runs.status`.
 ///

@@ -16,10 +16,13 @@ pub mod bibliotecas;
 pub mod cadastros;
 pub mod catalogo;
 pub mod curadoria;
+pub mod dispositivos;
 pub mod duplicidade;
 pub mod espelho;
+pub mod itens;
 pub mod jobs;
 pub mod obras;
+pub mod vocabulario;
 
 use rusqlite::Connection;
 use rusqlite::types::Type;
@@ -32,10 +35,13 @@ pub use bibliotecas::*;
 pub use cadastros::*;
 pub use catalogo::*;
 pub use curadoria::*;
+pub use dispositivos::*;
 pub use duplicidade::*;
 pub use espelho::*;
+pub use itens::*;
 pub use jobs::*;
 pub use obras::*;
+pub use vocabulario::*;
 
 use crate::{Erro, Resultado};
 
@@ -132,6 +138,13 @@ pub fn contador(conn: &Connection, chave: &str) -> Resultado<i64> {
             rusqlite::Error::QueryReturnedNoRows => Ok(0),
             e => Err(e),
         })?)
+}
+
+/// Título principal normalizado (sem artigo inicial, subtítulo nem volume): chave do pré-filtro
+/// de identidade bibliográfica (coluna `livros_homologados.titulo_principal`).
+#[must_use]
+pub fn titulo_principal(titulo: &str) -> String {
+    dag_biblio::normalizacao::normalizar_titulo(titulo).principal
 }
 
 /// Normaliza texto para comparação: minúsculas, sem acentos latinos, só letras/dígitos separados

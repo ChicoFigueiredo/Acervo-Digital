@@ -750,3 +750,1054 @@ fn calibredb_real_cadastra_na_a_classificar_sem_tocar_a_homologada() {
     // A Homologada continua exatamente como estava.
     assert_eq!(arvore(&e.m.homologada), antes);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fase 3 (agente): reconciliação, vocabulário, IA com contexto, compactados, fila, Homologada,
+// senha do servidor
+// ---------------------------------------------------------------------------------------------
+
+use dag_agent::SaidaMembro;
+use dag_biblio_ia::{
+    EntradaClassificacao, Metricas, PapelModelo, RegistroInferencia, ResultadoClassificacao,
+};
+use dag_core::{AcaoRevisao, AlvoRevisao, ItemDecisao, ItemRevisaoInfo};
+
+type Roteiro = dyn Fn(&str) -> Vec<(String, Vec<ValorSugerido>)> + Send + Sync;
+
+/// Extrator de roteiro: o teste diz, por nome de arquivo, quais livros (e metadados) saem.
+struct ExtratorRoteiro {
+    f: Box<Roteiro>,
+    capa: Option<Vec<u8>>,
+    paginas: Vec<dag_biblio::PaginaTexto>,
+}
+
+impl ExtratorRoteiro {
+    fn novo(
+        f: impl Fn(&str) -> Vec<(String, Vec<ValorSugerido>)> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            f: Box::new(f),
+            capa: None,
+            paginas: Vec::new(),
+        })
+    }
+}
+
+fn saida(
+    metadados: Vec<ValorSugerido>,
+    capa: Option<Vec<u8>>,
+    paginas: Vec<dag_biblio::PaginaTexto>,
+) -> SaidaExtracao {
+    SaidaExtracao {
+        resultado: ResultadoExtracao {
+            formato: FormatoLivro::Pdf,
+            estado: EstadoLeitura::Lido,
+            metadados,
+            isbns: Vec::new(),
+            sumario: Vec::new(),
+            paginas,
+            total_paginas: Some(10),
+            ficha_catalografica: None,
+            capa: None,
+            capa_mime: None,
+            paginas_ocr: Vec::new(),
+            avisos: Vec::new(),
+        },
+        paginas_ocr: 0,
+        capa,
+        avisos: Vec::new(),
+    }
+}
+
+impl ExtratorLivro for ExtratorRoteiro {
+    fn nome(&self) -> String {
+        "roteiro".into()
+    }
+
+    fn extrair(
+        &self,
+        caminho: &Path,
+        formato: FormatoLivro,
+        cfg: &ConfigBiblioteca,
+    ) -> Result<SaidaExtracao, String> {
+        Ok(self.extrair_membros(caminho, formato, cfg)?.remove(0).saida)
+    }
+
+    fn extrair_membros(
+        &self,
+        caminho: &Path,
+        formato: FormatoLivro,
+        _cfg: &ConfigBiblioteca,
+    ) -> Result<Vec<SaidaMembro>, String> {
+        let nome = caminho.file_name().unwrap().to_string_lossy().into_owned();
+        Ok((self.f)(&nome)
+            .into_iter()
+            .map(|(membro, valores)| SaidaMembro {
+                caminho_interno: membro,
+                formato: if formato == FormatoLivro::Outro {
+                    FormatoLivro::Epub
+                } else {
+                    formato
+                },
+                tamanho: 0,
+                saida: saida(valores, self.capa.clone(), self.paginas.clone()),
+            })
+            .collect())
+    }
+}
+
+fn texto_v(campo: Campo, valor: &str, origem: OrigemEvidencia, c: f32) -> ValorSugerido {
+    ValorSugerido {
+        campo,
+        valor: Some(valor.into()),
+        lista: Vec::new(),
+        confianca: c,
+        evidencias: vec![Evidencia {
+            origem,
+            pagina: None,
+            trecho: Some(valor.into()),
+            detalhe: None,
+            confianca: c,
+        }],
+    }
+}
+
+fn lista_v(campo: Campo, lista: &[&str], origem: OrigemEvidencia, c: f32) -> ValorSugerido {
+    ValorSugerido {
+        campo,
+        valor: None,
+        lista: lista.iter().map(|s| (*s).to_owned()).collect(),
+        confianca: c,
+        evidencias: vec![Evidencia {
+            origem,
+            pagina: None,
+            trecho: Some(lista.join(" & ")),
+            detalhe: None,
+            confianca: c,
+        }],
+    }
+}
+
+impl Ambiente {
+    fn agente_com(&self, autor: Autor, ext: Arc<dyn ExtratorLivro>) -> Agente {
+        self.agente(autor).com_extrator_livro(ext)
+    }
+}
+
+fn revisao(a: &mut Agente) -> Vec<ItemRevisaoInfo> {
+    match bib(a.executar(Comando::BibliotecaRevisao {
+        limite: Some(500),
+        cursor: None,
+    })) {
+        DadosBiblioteca::Revisao { itens, .. } => itens,
+        d => panic!("{d:?}"),
+    }
+}
+
+fn item_de<'a>(itens: &'a [ItemRevisaoInfo], sufixo: &str) -> &'a ItemRevisaoInfo {
+    itens
+        .iter()
+        .find(|i| i.caminho.as_deref().is_some_and(|c| c.ends_with(sufixo)))
+        .unwrap_or_else(|| panic!("item {sufixo} não está na revisão: {itens:#?}"))
+}
+
+fn campo<'a>(i: &'a ItemRevisaoInfo, nome: &str) -> Option<&'a dag_core::CampoLadoALado> {
+    i.campos.iter().find(|c| c.campo == nome)
+}
+
+fn decidir(a: &mut Agente, d: Vec<ItemDecisao>) {
+    match bib(a.executar(Comando::BibliotecaDecidir {
+        itens: d,
+        lote: None,
+    })) {
+        DadosBiblioteca::Decidida {
+            aplicadas,
+            ignoradas,
+            ..
+        } => {
+            assert!(ignoradas.is_empty(), "{ignoradas:?}");
+            assert!(aplicadas >= 1);
+        }
+        d => panic!("{d:?}"),
+    }
+}
+
+/// Acrescenta um livro à Homologada sintética (metadata.db + arquivo no disco), com tags.
+fn adicionar_livro(m: &Mundo, id: i64, titulo: &str, autor: &str, fmt: &str, tags: &[&str]) {
+    let conn = Connection::open(m.homologada.join("metadata.db")).unwrap();
+    let pasta = format!("{autor}/{titulo} ({id})");
+    conn.execute(
+        "INSERT INTO books(id,title,sort,pubdate,series_index,author_sort,path,uuid,has_cover,last_modified)
+         VALUES (?1,?2,?2,'0101-01-01 00:00:00+00:00',1.0,?3,?4,?5,0,'2024-01-01 00:00:00+00:00')",
+        params![id, titulo, autor, pasta, format!("uuid-{id}")],
+    )
+    .unwrap();
+    let autor_id: i64 =
+        match conn.query_row("SELECT id FROM authors WHERE name = ?1", [autor], |l| {
+            l.get(0)
+        }) {
+            Ok(i) => i,
+            Err(_) => {
+                conn.execute("INSERT INTO authors(name,sort) VALUES (?1,?1)", [autor])
+                    .unwrap();
+                conn.last_insert_rowid()
+            }
+        };
+    conn.execute(
+        "INSERT INTO books_authors_link(book,author) VALUES (?1,?2)",
+        params![id, autor_id],
+    )
+    .unwrap();
+    for t in tags {
+        let tid: i64 =
+            match conn.query_row("SELECT id FROM tags WHERE name = ?1", [t], |l| l.get(0)) {
+                Ok(i) => i,
+                Err(_) => {
+                    conn.execute("INSERT INTO tags(name) VALUES (?1)", [t])
+                        .unwrap();
+                    conn.last_insert_rowid()
+                }
+            };
+        conn.execute(
+            "INSERT INTO books_tags_link(book,tag) VALUES (?1,?2)",
+            params![id, tid],
+        )
+        .unwrap();
+    }
+    let dados = corpo(100 + id as u8, 20_000 + id as usize * 100);
+    conn.execute(
+        "INSERT INTO data(book,format,uncompressed_size,name) VALUES (?1,?2,?3,?4)",
+        params![id, fmt, dados.len() as i64, titulo],
+    )
+    .unwrap();
+    let dir = m.homologada.join(&pasta);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{titulo}.{}", fmt.to_lowercase())), &dados).unwrap();
+}
+
+/// Etiqueta livros que já existem em `mundo()`.
+fn etiquetar(m: &Mundo, livro: i64, tag: &str) {
+    let conn = Connection::open(m.homologada.join("metadata.db")).unwrap();
+    let tid: i64 = match conn.query_row("SELECT id FROM tags WHERE name = ?1", [tag], |l| l.get(0))
+    {
+        Ok(i) => i,
+        Err(_) => {
+            conn.execute("INSERT INTO tags(name) VALUES (?1)", [tag])
+                .unwrap();
+            conn.last_insert_rowid()
+        }
+    };
+    conn.execute(
+        "INSERT INTO books_tags_link(book,tag) VALUES (?1,?2)",
+        params![livro, tid],
+    )
+    .unwrap();
+}
+
+#[test]
+fn reconciliacao_com_divergencia_vai_para_revisao_e_humano_vence() {
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("div.pdf"), corpo(5, 30_000)).unwrap();
+    let ext = ExtratorRoteiro::novo(|_| {
+        vec![(
+            String::new(),
+            vec![
+                texto_v(
+                    Campo::Titulo,
+                    "Cálculo Volume Um",
+                    OrigemEvidencia::MetadadoInterno,
+                    0.9,
+                ),
+                texto_v(
+                    Campo::Titulo,
+                    "Álgebra Linear Aplicada",
+                    OrigemEvidencia::Conteudo,
+                    0.9,
+                ),
+                lista_v(
+                    Campo::Autores,
+                    &["Maria Exemplo"],
+                    OrigemEvidencia::MetadadoInterno,
+                    0.9,
+                ),
+            ],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+
+    let itens = revisao(&mut a);
+    let it = item_de(&itens, "div.pdf");
+    let t = campo(it, "titulo").expect("título sugerido");
+    // Fontes fortes divergentes: a de maior evidência vence, mas a confiança cai e vai para revisão.
+    assert_eq!(t.sugerido.as_deref(), Some("Álgebra Linear Aplicada"));
+    assert!(t.precisa_revisao, "{t:?}");
+    assert!(
+        t.motivos.iter().any(|m| m.contains("divergem")),
+        "{:?}",
+        t.motivos
+    );
+    assert!(t.confianca.unwrap() <= 0.75, "{:?}", t.confianca);
+    assert!(
+        t.motivos.iter().any(|m| m.contains("Cálculo Volume Um")),
+        "a alternativa que perdeu aparece: {:?}",
+        t.motivos
+    );
+
+    // O humano corrige: a decisão vence qualquer reprocessamento, sem pedir de novo.
+    decidir(
+        &mut a,
+        vec![ItemDecisao {
+            alvo: AlvoRevisao::Arquivo(it.file_id),
+            campo: "titulo".into(),
+            acao: AcaoRevisao::Corrigir,
+            valor: Some("Cálculo I".into()),
+        }],
+    );
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Reprocessar);
+    processar(&mut a);
+    let itens = revisao(&mut a);
+    if let Some(it) = itens.iter().find(|i| i.file_id == it.file_id) {
+        assert!(
+            campo(it, "titulo").is_none_or(|c| c.estado != "pendente"),
+            "título decidido não volta como pendente: {it:#?}"
+        );
+    }
+    drop(a);
+    let conn = Connection::open(&e.m.catalogo).unwrap();
+    let estado: String = conn
+        .query_row(
+            "SELECT estado FROM sugestoes WHERE campo = 'titulo' AND estado = 'corrigida'",
+            [],
+            |l| l.get(0),
+        )
+        .unwrap();
+    assert_eq!(estado, "corrigida");
+    let valor: String = conn
+        .query_row(
+            "SELECT valor_novo FROM decisoes_humanas WHERE campo = 'titulo' AND desfeita_em IS NULL",
+            [],
+            |l| l.get(0),
+        )
+        .unwrap();
+    assert_eq!(valor, "Cálculo I");
+}
+
+#[test]
+fn correcao_humana_muda_a_proxima_sugestao_de_tags() {
+    let e = Ambiente::novo();
+    etiquetar(&e.m, 1, "Literatura");
+    etiquetar(&e.m, 2, "Literatura");
+    etiquetar(&e.m, 3, "Literatura");
+    adicionar_livro(
+        &e.m,
+        4,
+        "Termodinâmica Clássica",
+        "Callen",
+        "PDF",
+        &["Matemática"],
+    );
+    adicionar_livro(
+        &e.m,
+        5,
+        "Cálculo Diferencial",
+        "Stewart",
+        "PDF",
+        &["Matemática"],
+    );
+    fs::write(e.m.downloads.join("quantica_a.pdf"), corpo(11, 30_000)).unwrap();
+    fs::write(e.m.downloads.join("quantica_b.pdf"), corpo(12, 30_000)).unwrap();
+    let ext = ExtratorRoteiro::novo(|nome| {
+        let t = if nome.starts_with("quantica_a") {
+            "Mecânica Quântica Aplicada"
+        } else {
+            "Mecânica Quântica Avançada"
+        };
+        vec![(
+            String::new(),
+            vec![
+                texto_v(Campo::Titulo, t, OrigemEvidencia::MetadadoInterno, 0.9),
+                lista_v(
+                    Campo::Autores,
+                    &["Fulano Quântico"],
+                    OrigemEvidencia::MetadadoInterno,
+                    0.9,
+                ),
+            ],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+
+    // ANTES: nada na Homologada liga esses títulos a Matemática.
+    let itens = revisao(&mut a);
+    let tem_mat = |i: &ItemRevisaoInfo| {
+        campo(i, "tags").is_some_and(|c| c.sugerido_lista.iter().any(|t| t == "Matemática"))
+    };
+    assert!(
+        !tem_mat(item_de(&itens, "quantica_a.pdf")),
+        "{:#?}",
+        campo(item_de(&itens, "quantica_a.pdf"), "tags")
+    );
+    assert!(!tem_mat(item_de(&itens, "quantica_b.pdf")));
+
+    // O humano corrige as tags do A.
+    let fid_a = item_de(&itens, "quantica_a.pdf").file_id;
+    decidir(
+        &mut a,
+        vec![ItemDecisao {
+            alvo: AlvoRevisao::Arquivo(fid_a),
+            campo: "tags".into(),
+            acao: AcaoRevisao::Corrigir,
+            valor: Some("Matemática".into()),
+        }],
+    );
+
+    // DEPOIS: o B, parecido com o A, passa a ser sugerido com a tag que o humano escolheu (Matemática), e a
+    // sugestão diz por quê (WOW-03): parecido com a decisão dele.
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Reprocessar);
+    processar(&mut a);
+    let itens = revisao(&mut a);
+    let b = item_de(&itens, "quantica_b.pdf");
+    let tags = campo(b, "tags").expect("tags sugeridas depois da correção");
+    assert!(
+        tags.sugerido_lista.iter().any(|t| t == "Matemática"),
+        "{tags:?}"
+    );
+    assert!(
+        tags.evidencias.iter().any(|x| x.contains("decisão sua")),
+        "a sugestão cita a decisão humana: {:?}",
+        tags.evidencias
+    );
+}
+
+#[test]
+fn compactado_com_dois_livros_gera_dois_itens_ligados_ao_conteiner() {
+    let e = Ambiente::novo();
+    // Um zip real com dois e-books dentro (a etapa de Contêineres da Fase A os cataloga).
+    let mut zip_bytes = Vec::new();
+    {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("colecao/primeiro.epub", o).unwrap();
+        z.write_all(&corpo(31, 3000)).unwrap();
+        z.start_file("colecao/segundo.epub", o).unwrap();
+        z.write_all(&corpo(32, 3100)).unwrap();
+        z.finish().unwrap();
+    }
+    fs::write(e.m.downloads.join("pacote.zip"), &zip_bytes).unwrap();
+    let ext = ExtratorRoteiro::novo(|_| {
+        ["colecao/primeiro.epub", "colecao/segundo.epub"]
+            .iter()
+            .map(|m| {
+                let t = if m.contains("primeiro") {
+                    "O Primeiro Livro"
+                } else {
+                    "O Segundo Tratado"
+                };
+                (
+                    (*m).to_owned(),
+                    vec![
+                        texto_v(Campo::Titulo, t, OrigemEvidencia::MetadadoInterno, 0.9),
+                        lista_v(
+                            Campo::Autores,
+                            &["Beltrano Coletor"],
+                            OrigemEvidencia::MetadadoInterno,
+                            0.9,
+                        ),
+                    ],
+                )
+            })
+            .collect()
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    let enf = enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    assert_eq!(enf.enfileirados, 1, "{enf:?}");
+    let r = processar(&mut a);
+    assert_eq!(r.membros_de_conteiner, 2, "{r:?}");
+
+    let itens = revisao(&mut a);
+    let do_zip: Vec<&ItemRevisaoInfo> = itens
+        .iter()
+        .filter(|i| {
+            i.caminho
+                .as_deref()
+                .is_some_and(|c| c.ends_with("pacote.zip"))
+        })
+        .collect();
+    assert_eq!(do_zip.len(), 2, "{itens:#?}");
+    assert_eq!(do_zip[0].file_id, do_zip[1].file_id, "mesmo Contêiner");
+    let mut membros: Vec<&str> = do_zip.iter().filter_map(|i| i.membro.as_deref()).collect();
+    membros.sort_unstable();
+    assert_eq!(membros, ["colecao/primeiro.epub", "colecao/segundo.epub"]);
+    let titulo_de = |m: &str| {
+        let i = do_zip
+            .iter()
+            .find(|i| i.membro.as_deref() == Some(m))
+            .unwrap();
+        campo(i, "titulo").unwrap().sugerido.clone().unwrap()
+    };
+    assert_eq!(titulo_de("colecao/primeiro.epub"), "O Primeiro Livro");
+    assert_eq!(titulo_de("colecao/segundo.epub"), "O Segundo Tratado");
+
+    // Decidir um Membro (pela Edição dele) não mexe no outro.
+    let p = do_zip
+        .iter()
+        .find(|i| i.membro.as_deref() == Some("colecao/primeiro.epub"))
+        .unwrap();
+    decidir(
+        &mut a,
+        vec![ItemDecisao {
+            alvo: AlvoRevisao::Edicao(p.edicao_id.unwrap()),
+            campo: "titulo".into(),
+            acao: AcaoRevisao::Aceitar,
+            valor: None,
+        }],
+    );
+    let itens = revisao(&mut a);
+    let do_zip: Vec<&ItemRevisaoInfo> = itens
+        .iter()
+        .filter(|i| {
+            i.caminho
+                .as_deref()
+                .is_some_and(|c| c.ends_with("pacote.zip"))
+        })
+        .collect();
+    let estado = |m: &str| {
+        let i = do_zip
+            .iter()
+            .find(|i| i.membro.as_deref() == Some(m))
+            .unwrap();
+        campo(i, "titulo").unwrap().estado.clone()
+    };
+    assert_eq!(estado("colecao/segundo.epub"), "pendente");
+    assert_ne!(estado("colecao/primeiro.epub"), "pendente");
+    // Reprocessar não duplica nada.
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Reprocessar);
+    let r = processar(&mut a);
+    assert_eq!(r.membros_de_conteiner, 2);
+    assert_eq!(
+        e.chamadas.load(Ordering::SeqCst),
+        0,
+        "extrator de roteiro não conta"
+    );
+}
+
+#[test]
+fn aging_nao_deixa_arquivo_pequeno_morrer_de_fome() {
+    let e = Ambiente::novo();
+    let mut a = e.agente(Autor::Gui);
+    let grande = |nome: &str, marca: u8| {
+        let f = fs::File::create(e.m.downloads.join(nome)).unwrap();
+        f.set_len(400 * 1024 * 1024).unwrap(); // esparso: não ocupa disco
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(&[marca; 64], 1000).unwrap();
+    };
+    grande("grande_1.pdf", 1);
+    fs::write(e.m.downloads.join("pequeno.pdf"), corpo(9, 30_000)).unwrap();
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let ordem = |a: &mut Agente| -> Vec<String> {
+        match bib(a.executar(Comando::BibliotecaFila {
+            estado: Some(EstadoFilaInfo::Pendente),
+            limite: Some(50),
+            cursor: None,
+        })) {
+            DadosBiblioteca::Fila { itens, .. } => itens
+                .into_iter()
+                .map(|i| {
+                    Path::new(&i.caminho.unwrap())
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            d => panic!("{d:?}"),
+        }
+    };
+    // No começo o grande (mais economia potencial) sai na frente do pequeno.
+    assert_eq!(ordem(&mut a), ["grande_1.pdf", "pequeno.pdf"]);
+
+    // 20 horas depois chega outro grande. Sem aging o pequeno ficaria para sempre atrás dos
+    // grandes que vão chegando; com aging ele passa o recém-chegado.
+    e.avancar(20 * 3600);
+    grande("grande_2.pdf", 2);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    assert_eq!(
+        ordem(&mut a),
+        ["grande_1.pdf", "pequeno.pdf", "grande_2.pdf"],
+        "o pequeno que espera há 20 h passa o grande recém-chegado"
+    );
+
+    // O aging é configurável.
+    drop(a);
+    let mut b = e.agente(Autor::Gui);
+    let r = b.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"aging_por_hora": 0.0}),
+    });
+    let DadosBiblioteca::Config { config } = bib(r) else {
+        panic!()
+    };
+    assert_eq!(config.aging_por_hora, 0.0, "o valor pedido é guardado");
+    let r = b.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"aging_por_hora": -1.0}),
+    });
+    assert!(matches!(r, Resposta::Erro { .. }));
+}
+
+#[test]
+fn item_da_homologada_com_catalogar_vira_proposta_sem_escrever_nela() {
+    let e = Ambiente::novo();
+    adicionar_livro(
+        &e.m,
+        4,
+        "Termodinâmica Clássica",
+        "Autor Físico",
+        "PDF",
+        &["Física"],
+    );
+    adicionar_livro(
+        &e.m,
+        5,
+        "Mecânica Clássica",
+        "Autor Físico",
+        "PDF",
+        &["Física"],
+    );
+    adicionar_livro(
+        &e.m,
+        6,
+        "Eletromagnetismo Clássico",
+        "Autor Físico",
+        "PDF",
+        &["!Catalogar"],
+    );
+    let mut a = e.agente(Autor::Gui);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    let s = sincronizar(&mut a, id);
+    assert!(s.biblioteca_intacta);
+    let antes = arvore(&e.m.homologada);
+    let r = processar(&mut a);
+    assert!(r.propostas_homologada >= 1, "{r:?}");
+
+    let itens = revisao(&mut a);
+    let it = itens
+        .iter()
+        .find(|i| {
+            i.proposta_homologada
+                .as_ref()
+                .is_some_and(|l| l.titulo == "Eletromagnetismo Clássico")
+        })
+        .unwrap_or_else(|| panic!("sem proposta para o livro !Catalogar: {itens:#?}"));
+    let tags = campo(it, "tags").expect("tags propostas");
+    assert!(
+        tags.sugerido_lista.iter().any(|t| t == "Física"),
+        "{tags:?}"
+    );
+    assert!(
+        tags.motivos.iter().any(|m| m.contains("nada é escrito")),
+        "{:?}",
+        tags.motivos
+    );
+    // O livro que já tem tag (Física) não vira proposta.
+    assert!(!itens.iter().any(|i| {
+        i.proposta_homologada
+            .as_ref()
+            .is_some_and(|l| l.titulo == "Mecânica Clássica")
+    }));
+    // Nada foi escrito na Homologada (nem no metadata.db).
+    assert_eq!(arvore(&e.m.homologada), antes);
+    // Reprocessar não repete a proposta.
+    let r2 = processar(&mut a);
+    assert_eq!(r2.propostas_homologada, 0);
+}
+
+#[test]
+fn senha_do_servidor_vai_ao_cofre_e_nunca_volta() {
+    use bancada_segredos::testes::ChaveiroEmMemoria;
+    const SENHA: &str = "S3nh@-Do-Servidor-9z";
+    let e = Ambiente::novo();
+    let kr = Arc::new(ChaveiroEmMemoria::novo());
+    let mut a = e.agente(Autor::Mcp).com_chaveiro(kr);
+    let ser = |r: &Resposta| serde_json::to_string(r).unwrap();
+
+    let r = a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"homologacao": {
+            "modo": "servidor", "url": "http://127.0.0.1:17790", "usuario": "dag", "senha": SENHA}}),
+    });
+    assert!(!ser(&r).contains(SENHA) && !format!("{r:?}").contains(SENHA));
+    let DadosBiblioteca::Config { config } = bib(r) else {
+        panic!()
+    };
+    assert!(
+        config.homologacao.senha_no_cofre,
+        "informa que há senha, sem revelá-la"
+    );
+
+    let r = a.executar(Comando::BibliotecaConfigObter);
+    assert!(!ser(&r).contains(SENHA), "{}", ser(&r));
+    let DadosBiblioteca::Config { config } = bib(r) else {
+        panic!()
+    };
+    assert!(config.homologacao.senha_no_cofre);
+    assert_eq!(config.homologacao.usuario.as_deref(), Some("dag"));
+
+    // Em disco: nem a configuração nem o arquivo do Catálogo carregam a senha em claro.
+    let conn = Connection::open(&e.m.catalogo).unwrap();
+    let valores: Vec<String> = conn
+        .prepare("SELECT valor FROM configuracoes")
+        .unwrap()
+        .query_map([], |l| l.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(valores.iter().any(|v| v.contains("servidor")));
+    assert!(valores.iter().all(|v| !v.contains(SENHA)), "{valores:?}");
+    drop(conn);
+    for sufixo in ["", "-wal"] {
+        let p = format!("{}{sufixo}", e.m.catalogo.display());
+        if let Ok(b) = fs::read(&p) {
+            assert!(
+                !b.windows(SENHA.len()).any(|w| w == SENHA.as_bytes()),
+                "a senha apareceu em {p}"
+            );
+        }
+    }
+
+    // Um patch inválido que traga a senha também não a devolve na mensagem de erro.
+    let r = a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"homologacao": {"modo": "inexistente", "senha": SENHA}}),
+    });
+    assert!(matches!(r, Resposta::Erro { .. }), "{r:?}");
+    assert!(!ser(&r).contains(SENHA) && !format!("{r:?}").contains(SENHA));
+
+    // Apagar a senha: patch com `senha` vazia.
+    let r = a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"homologacao": {"senha": ""}}),
+    });
+    let DadosBiblioteca::Config { config } = bib(r) else {
+        panic!()
+    };
+    assert!(!config.homologacao.senha_no_cofre);
+
+    // Sem chaveiro utilizável, recusa com erro claro (e sem a senha).
+    drop(a);
+    let mut b = e
+        .agente(Autor::Gui)
+        .com_chaveiro(Arc::new(ChaveiroEmMemoria::indisponivel()));
+    let r = b.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"homologacao": {"senha": SENHA}}),
+    });
+    match &r {
+        Resposta::Erro { codigo, mensagem } => {
+            assert_eq!(codigo, "cofre_indisponivel");
+            assert!(!mensagem.contains(SENHA));
+        }
+        outra => panic!("{outra:?}"),
+    }
+}
+
+#[test]
+fn ia_recebe_contexto_e_as_inferencias_guardam_tokens_e_tempo_reais() {
+    use std::sync::Mutex;
+    struct IaEspia {
+        vista: Arc<Mutex<Option<EntradaClassificacao>>>,
+    }
+    impl dag_agent::ClassificadorIa for IaEspia {
+        fn nome(&self) -> String {
+            "espia:1b".into()
+        }
+
+        fn classificar(
+            &self,
+            entrada: &EntradaClassificacao,
+        ) -> Result<ResultadoClassificacao, String> {
+            *self.vista.lock().unwrap() = Some(entrada.clone());
+            Ok(ResultadoClassificacao {
+                valores: vec![lista_v(
+                    Campo::Tags,
+                    &["Literatura"],
+                    OrigemEvidencia::Ia,
+                    0.8,
+                )],
+                registros: vec![RegistroInferencia {
+                    papel: PapelModelo::Primario,
+                    modelo: "espia:1b".into(),
+                    versao_modelo: "espia:1b-q4".into(),
+                    info_servidor: None,
+                    etapa: "texto".into(),
+                    versao_prompt: "p1".into(),
+                    hash_prompt: "não-é-hex-de-32-bytes".into(),
+                    seed: 1,
+                    temperatura: 0.0,
+                    metricas: Metricas {
+                        tokens_entrada: Some(1234),
+                        tokens_saida: Some(56),
+                        ..Metricas::default()
+                    },
+                    tempo_ms: 789,
+                    resposta_bruta: None,
+                    erro: None,
+                    decisao: None,
+                    material_truncado: false,
+                    suspeitas_injecao: Vec::new(),
+                    inicio_unix_ms: 0,
+                }],
+                ..ResultadoClassificacao::default()
+            })
+        }
+    }
+    let e = Ambiente::novo();
+    etiquetar(&e.m, 1, "Literatura");
+    etiquetar(&e.m, 2, "Literatura");
+    fs::write(e.m.downloads.join("ia.pdf"), corpo(21, 30_000)).unwrap();
+    let mut ext = ExtratorRoteiro {
+        f: Box::new(|_| {
+            vec![(
+                String::new(),
+                vec![
+                    texto_v(
+                        Campo::Titulo,
+                        "Quincas Borba",
+                        OrigemEvidencia::MetadadoInterno,
+                        0.9,
+                    ),
+                    lista_v(
+                        Campo::Autores,
+                        &["Machado de Assis"],
+                        OrigemEvidencia::MetadadoInterno,
+                        0.9,
+                    ),
+                ],
+            )]
+        }),
+        capa: None,
+        paginas: Vec::new(),
+    };
+    ext.capa = Some(vec![1, 2, 3, 4]);
+    let vista = Arc::new(Mutex::new(None));
+    let mut a = e
+        .agente_com(Autor::Gui, Arc::new(ext))
+        .com_classificador_ia(Arc::new(IaEspia {
+            vista: Arc::clone(&vista),
+        }));
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = match bib(a.executar(Comando::BibliotecaProcessar {
+        limite: None,
+        ia: true,
+    })) {
+        DadosBiblioteca::Processada { resumo } => resumo,
+        d => panic!("{d:?}"),
+    };
+    assert_eq!(r.consultas_ia, 1, "{r:?}");
+
+    let ent = vista.lock().unwrap().clone().expect("a IA foi consultada");
+    assert!(
+        ent.vocabulario.tags.iter().any(|t| t == "Literatura"),
+        "{:?}",
+        ent.vocabulario
+    );
+    assert!(
+        ent.vocabulario
+            .autores_parecidos
+            .iter()
+            .any(|x| x == "Machado de Assis"),
+        "{:?}",
+        ent.vocabulario.autores_parecidos
+    );
+    assert!(ent.vocabulario.estantes.len() <= 40);
+    assert_eq!(
+        ent.imagem_pagina1.as_deref(),
+        Some(&[1u8, 2, 3, 4][..]),
+        "capa para a visão"
+    );
+    assert!(ent.nome_arquivo.ends_with("ia.pdf"));
+
+    let conn = Connection::open(&e.m.catalogo).unwrap();
+    let (m, te, ts, ms): (String, i64, i64, i64) = conn
+        .query_row(
+            "SELECT modelo, tokens_entrada, tokens_saida, tempo_ms FROM inferencias",
+            [],
+            |l| Ok((l.get(0)?, l.get(1)?, l.get(2)?, l.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((m.as_str(), te, ts, ms), ("espia:1b", 1234, 56, 789));
+
+    // Autor igual ao da Homologada, sem outra evidência: identidade não confirmada, revisão.
+    let itens = revisao(&mut a);
+    let autores = campo(item_de(&itens, "ia.pdf"), "autores").unwrap();
+    assert_eq!(autores.sugerido_lista, ["Machado de Assis"], "{autores:?}");
+    assert!(
+        autores.homologado.is_some() || !autores.evidencias.is_empty(),
+        "{autores:?}"
+    );
+}
+
+#[test]
+fn resumo_do_periodo_conta_jobs_classificados_e_duplicatas() {
+    let e = Ambiente::novo();
+    let mut a = e.agente(Autor::Gui);
+    fs::write(e.m.downloads.join("novo.pdf"), corpo(77, 30_000)).unwrap();
+    // Cópia exata de um livro homologado: duplicata.
+    let copia = fs::read(
+        e.m.homologada
+            .join("Machado de Assis/Dom Casmurro (1)/Dom Casmurro.pdf"),
+    )
+    .unwrap();
+    fs::write(e.m.downloads.join("copia.pdf"), copia).unwrap();
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    let DadosBiblioteca::Resumo { resumo } =
+        bib(a.executar(Comando::BibliotecaResumo { desde: None }))
+    else {
+        panic!()
+    };
+    assert_eq!(resumo.jobs_concluidos_periodo, 2, "{resumo:?}");
+    assert_eq!(resumo.classificados_periodo, 1, "{resumo:?}");
+    assert!(resumo.revisoes_pendentes >= 2);
+    assert_eq!(resumo.duplicatas_exatas_periodo, 1, "{resumo:?}");
+    assert!(resumo.duplicatas_periodo >= 1);
+}
+
+#[test]
+fn revisao_traz_paginas_resumidas_e_marca_de_ocr_nos_avisos() {
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("imagem.pdf"), corpo(41, 30_000)).unwrap();
+    fs::write(e.m.downloads.join("texto.pdf"), corpo(42, 30_000)).unwrap();
+    let mut ext = ExtratorRoteiro {
+        f: Box::new(|nome| {
+            vec![(
+                String::new(),
+                vec![texto_v(
+                    Campo::Titulo,
+                    &format!("Livro {nome}"),
+                    OrigemEvidencia::MetadadoInterno,
+                    0.9,
+                )],
+            )]
+        }),
+        capa: None,
+        paginas: Vec::new(),
+    };
+    ext.paginas = vec![dag_biblio::PaginaTexto {
+        numero: 3,
+        texto: "Capítulo   um\n".repeat(40),
+        via_ocr: true,
+        qualidade: 0.8,
+        idioma_ocr: Some("por".into()),
+    }];
+    let mut a = e.agente_com(Autor::Gui, Arc::new(ext));
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    let itens = revisao(&mut a);
+    let it = item_de(&itens, "imagem.pdf");
+    assert_eq!(it.paginas_ocr, 1);
+    assert_eq!(it.paginas.len(), 1);
+    assert!(it.paginas[0].via_ocr && it.paginas[0].numero == 3);
+    assert!(
+        it.paginas[0].trecho.chars().count() <= 160
+            && it.paginas[0].trecho.starts_with("Capítulo um")
+    );
+    assert!(
+        it.avisos.iter().any(|a| a.starts_with("ocr:")),
+        "{:?}",
+        it.avisos
+    );
+}
+
+#[test]
+fn cadastros_lista_prontos_so_depois_da_revisao_e_e_somente_leitura() {
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("pronto.pdf"), corpo(51, 30_000)).unwrap();
+    let ext = ExtratorRoteiro::novo(|_| {
+        vec![(
+            String::new(),
+            vec![
+                texto_v(
+                    Campo::Titulo,
+                    "Livro Pronto",
+                    OrigemEvidencia::MetadadoInterno,
+                    0.95,
+                ),
+                lista_v(
+                    Campo::Autores,
+                    &["Autora Nova"],
+                    OrigemEvidencia::MetadadoInterno,
+                    0.95,
+                ),
+            ],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    let cmd = Comando::BibliotecaCadastros {
+        estado: None,
+        limite: None,
+        cursor: None,
+    };
+    assert!(dag_agent::somente_leitura(&cmd));
+    let listar = |a: &mut Agente| match bib(a.executar(Comando::BibliotecaCadastros {
+        estado: None,
+        limite: None,
+        cursor: None,
+    })) {
+        DadosBiblioteca::Cadastros { itens, .. } => itens,
+        d => panic!("{d:?}"),
+    };
+    let antes = listar(&mut a);
+    assert_eq!(antes.len(), 1, "{antes:?}");
+    assert!(
+        !antes[0].pronto_para_cadastrar,
+        "revisão pendente: {antes:?}"
+    );
+
+    let itens = revisao(&mut a);
+    let it = item_de(&itens, "pronto.pdf");
+    let decisoes = it
+        .campos
+        .iter()
+        .filter(|c| c.estado == "pendente")
+        .map(|c| ItemDecisao {
+            alvo: AlvoRevisao::Arquivo(it.file_id),
+            campo: c.campo.clone(),
+            acao: AcaoRevisao::Aceitar,
+            valor: None,
+        })
+        .collect();
+    decidir(&mut a, decisoes);
+    let depois = listar(&mut a);
+    assert!(depois[0].pronto_para_cadastrar, "{depois:?}");
+    assert_eq!(depois[0].cadastro_id, None);
+    assert_eq!(depois[0].titulo.as_deref(), Some("Livro Pronto"));
+    assert_eq!(depois[0].estado, None);
+}

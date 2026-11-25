@@ -8,7 +8,7 @@ use dag_core::{ConfigBiblioteca, MotivoFila};
 use dag_store::biblioteca as store;
 use rusqlite::Connection;
 
-use super::fila::{enfileirar_arquivo, nome_elegivel};
+use super::fila::{arquivo_elegivel, enfileirar_arquivo};
 use crate::agente::Agente;
 use crate::erro::ErroAgente;
 
@@ -66,7 +66,7 @@ pub(crate) fn vigiar(
             };
             if !info.ativo
                 || info.na_lixeira
-                || !nome_elegivel(&info.nome, &cfg.extensoes_ignoradas)
+                || !arquivo_elegivel(conn, info.file_id, &info.nome, &cfg.extensoes_ignoradas)?
             {
                 r.ignorados += 1;
                 continue;
@@ -106,14 +106,7 @@ pub(crate) fn vigiar(
                     r.alertas += u64::from(criado);
                 }
             }
-            match enfileirar_arquivo(
-                conn,
-                info.file_id,
-                info.tamanho,
-                motivo,
-                &cfg.versao_regras,
-                agora,
-            )? {
+            match enfileirar_arquivo(conn, info.file_id, info.tamanho, motivo, cfg, agora)? {
                 Some(true) => r.enfileirados += 1,
                 _ => r.ignorados += 1,
             }

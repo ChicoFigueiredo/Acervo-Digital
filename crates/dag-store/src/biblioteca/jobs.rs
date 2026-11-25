@@ -61,11 +61,11 @@ pub struct Job {
     pub concluido_em: Option<i64>,
 }
 
-const COLUNAS: &str =
+pub(super) const COLUNAS: &str =
     "id, file_id, motivo, prioridade, enfileirado_em, estado, etapa, checkpoint_json,
     tentativas, erro, versao_regras, iniciado_em, atualizado_em, concluido_em";
 
-fn de_linha(l: &Row<'_>) -> rusqlite::Result<Job> {
+pub(super) fn de_linha(l: &Row<'_>) -> rusqlite::Result<Job> {
     Ok(Job {
         id: l.get(0)?,
         file_id: l.get(1)?,

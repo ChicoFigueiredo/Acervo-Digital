@@ -168,7 +168,7 @@ pub fn gravar_resultado_extracao(
     )
 }
 
-fn extracao_de_linha(l: &Row<'_>) -> rusqlite::Result<Extracao> {
+pub(super) fn extracao_de_linha(l: &Row<'_>) -> rusqlite::Result<Extracao> {
     Ok(Extracao {
         id: l.get(0)?,
         job_id: l.get(1)?,
@@ -332,7 +332,7 @@ pub fn gravar_sugestao(conn: &Connection, s: &NovaSugestao, agora: i64) -> Resul
         )?)
 }
 
-fn sugestao_de_linha(l: &Row<'_>) -> rusqlite::Result<Sugestao> {
+pub(super) fn sugestao_de_linha(l: &Row<'_>) -> rusqlite::Result<Sugestao> {
     Ok(Sugestao {
         id: l.get(0)?,
         file_id: l.get(1)?,
@@ -349,7 +349,7 @@ fn sugestao_de_linha(l: &Row<'_>) -> rusqlite::Result<Sugestao> {
     })
 }
 
-const COLUNAS_SUGESTAO: &str = "id, file_id, edicao_id, campo, valor, lista_json, confianca, evidencias_json, origem, modelo, versao_regras, estado";
+pub(super) const COLUNAS_SUGESTAO: &str = "id, file_id, edicao_id, campo, valor, lista_json, confianca, evidencias_json, origem, modelo, versao_regras, estado";
 
 /// Sugestões de um arquivo (todas as origens), por campo e confiança decrescente.
 ///
@@ -530,7 +530,7 @@ pub fn registrar_decisao(conn: &Connection, d: &NovaDecisao, agora: i64) -> Resu
     Ok(id)
 }
 
-fn decisao_de_linha(l: &Row<'_>) -> rusqlite::Result<DecisaoHumana> {
+pub(super) fn decisao_de_linha(l: &Row<'_>) -> rusqlite::Result<DecisaoHumana> {
     let tipo: String = l.get(2)?;
     let alvo_id: i64 = l.get(3)?;
     let alvo = match tipo.as_str() {
@@ -553,7 +553,7 @@ fn decisao_de_linha(l: &Row<'_>) -> rusqlite::Result<DecisaoHumana> {
     })
 }
 
-const COLUNAS_DECISAO: &str = "id, lote_id, alvo_tipo, alvo_id, sugestao_id, campo, acao, valor_anterior, valor_novo, autor, quando, desfeita_em";
+pub(super) const COLUNAS_DECISAO: &str = "id, lote_id, alvo_tipo, alvo_id, sugestao_id, campo, acao, valor_anterior, valor_novo, autor, quando, desfeita_em";
 
 /// Decisões de um lote.
 ///

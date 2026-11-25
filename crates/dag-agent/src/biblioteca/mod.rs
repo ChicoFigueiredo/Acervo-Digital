@@ -16,9 +16,12 @@ mod cadastro;
 mod duplicatas;
 mod extracao;
 mod fila;
+mod item;
 mod processar;
 mod relatorios;
 mod revisao;
+mod segredo;
+mod vocab;
 pub(crate) mod watcher;
 
 pub use watcher::ResumoVigia;
@@ -44,7 +47,7 @@ use rusqlite::Connection;
 
 pub use extracao::{
     ClassificadorIa, ExtratorIndisponivel, ExtratorLivro, ExtratorPadrao, IaIndisponivel, IaLocal,
-    SaidaExtracao,
+    SaidaExtracao, SaidaMembro,
 };
 
 use crate::agente::{Agente, agora};
@@ -66,6 +69,8 @@ pub(crate) struct ContextoBiblioteca {
     pub processos: Option<Vec<ProcessoCalibre>>,
     pub relogio: Option<Relogio>,
     pub ultima_mensagem: Option<Instant>,
+    /// Classificador de vocabulário treinado (cache; refeito quando o espelho ou as decisões mudam).
+    pub vocab: Option<Arc<vocab::CacheVocab>>,
 }
 
 impl Default for ContextoBiblioteca {
@@ -77,6 +82,7 @@ impl Default for ContextoBiblioteca {
             processos: None,
             relogio: None,
             ultima_mensagem: None,
+            vocab: None,
         }
     }
 }
@@ -137,6 +143,14 @@ impl Agente {
 
     pub(crate) fn config_biblioteca(&self) -> ConfigBiblioteca {
         ler_config(self.conexao())
+    }
+
+    /// A configuração como vai às respostas: `homologacao.senha_no_cofre` diz se há senha do
+    /// servidor guardada; a senha em si nunca sai.
+    pub(crate) fn config_biblioteca_publica(&self) -> ConfigBiblioteca {
+        let mut c = self.config_biblioteca();
+        c.homologacao.senha_no_cofre = segredo::tem_senha_servidor(self.conexao());
+        c
     }
 
     /// Fluxo do trabalho: segue, ou para (cancelado). Pausado espera sem consumir CPU.
@@ -235,6 +249,11 @@ impl Agente {
             }
             Comando::BibliotecaDesfazer { lote } => self.desfazer_biblioteca(&lote),
             Comando::BibliotecaCadastrar { itens } => self.cadastrar_biblioteca(&itens),
+            Comando::BibliotecaCadastros {
+                estado,
+                limite,
+                cursor,
+            } => self.cadastros_biblioteca(estado, limite, cursor.as_deref()),
             Comando::BibliotecaHomologar { item, aprovacao } => {
                 self.homologar_biblioteca(item, aprovacao)
             }
@@ -249,7 +268,7 @@ impl Agente {
                 self.relatorio_espaco_biblioteca(volume.as_deref())
             }
             Comando::BibliotecaConfigObter => Ok(dados(DadosBiblioteca::Config {
-                config: self.config_biblioteca(),
+                config: self.config_biblioteca_publica(),
             })),
             Comando::BibliotecaConfigDefinir { alteracoes } => self.definir_config(&alteracoes),
             _ => Err(ErroAgente::NaoImplementado(0)),
@@ -274,6 +293,7 @@ pub(crate) fn e_biblioteca(c: &Comando) -> bool {
             | Comando::BibliotecaDecidir { .. }
             | Comando::BibliotecaDesfazer { .. }
             | Comando::BibliotecaCadastrar { .. }
+            | Comando::BibliotecaCadastros { .. }
             | Comando::BibliotecaHomologar { .. }
             | Comando::BibliotecaAlertas { .. }
             | Comando::BibliotecaMarcarVisto { .. }
@@ -295,6 +315,7 @@ pub(crate) fn somente_leitura_biblioteca(c: &Comando) -> bool {
             | Comando::BibliotecaPerfil { .. }
             | Comando::BibliotecaFila { .. }
             | Comando::BibliotecaRevisao { .. }
+            | Comando::BibliotecaCadastros { .. }
             | Comando::BibliotecaAlertas { .. }
             | Comando::BibliotecaResumo { .. }
             | Comando::BibliotecaRelatorioEspaco { .. }

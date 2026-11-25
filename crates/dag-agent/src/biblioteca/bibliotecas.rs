@@ -372,11 +372,25 @@ impl Agente {
         &mut self,
         alt: &serde_json::Value,
     ) -> Result<Resposta, ErroAgente> {
+        // A senha do servidor entra aqui (`homologacao.senha`), vai para o Cofre e é tirada do
+        // patch antes de qualquer mesclagem, validação ou mensagem de erro: nunca é gravada no
+        // JSON da configuração nem volta em resposta.
+        let mut alt = alt.clone();
+        let mut senha: Option<String> = None;
+        if let Some(h) = alt
+            .get_mut("homologacao")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(v) = h.remove("senha") {
+                senha = Some(v.as_str().map(str::to_owned).unwrap_or_default());
+            }
+            h.remove("senha_no_cofre");
+        }
         let atual = self.config_biblioteca();
         let mut v =
             serde_json::to_value(&atual).map_err(|e| ErroAgente::Invalido(e.to_string()))?;
-        mesclar(&mut v, alt);
-        let nova: ConfigBiblioteca = serde_json::from_value(v)
+        mesclar(&mut v, &alt);
+        let mut nova: ConfigBiblioteca = serde_json::from_value(v)
             .map_err(|e| ErroAgente::biblio("config_invalida", e.to_string()))?;
         if nova.ia.ativa && !endereco_local(&nova.ia.endpoint) {
             return Err(ErroAgente::biblio(
@@ -384,9 +398,21 @@ impl Agente {
                 "a IA só pode usar um endpoint local (loopback)",
             ));
         }
+        if !nova.aging_por_hora.is_finite() || nova.aging_por_hora < 0.0 {
+            return Err(ErroAgente::biblio(
+                "config_invalida",
+                "aging_por_hora precisa ser um número maior ou igual a zero",
+            ));
+        }
+        if let Some(s) = &senha {
+            self.guardar_senha_servidor(s)?;
+        }
+        nova.homologacao.senha_no_cofre = false; // derivado: nunca persistido
         let txt = serde_json::to_string(&nova).map_err(|e| ErroAgente::Invalido(e.to_string()))?;
         dag_store::configuracao::gravar(self.conexao(), CHAVE_CONFIG, &txt)?;
-        Ok(dados(DadosBiblioteca::Config { config: nova }))
+        Ok(dados(DadosBiblioteca::Config {
+            config: self.config_biblioteca_publica(),
+        }))
     }
 }
 

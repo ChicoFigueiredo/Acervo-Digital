@@ -35,7 +35,8 @@ Toda resposta bibliográfica é `Resposta::Biblioteca { dados }`, com `dados` et
 | `BibliotecaRevisao` | `limite?`, `cursor?` | `revisao` {itens, total_pendentes, proximo_cursor} | não |
 | `BibliotecaDecidir` | `itens` [{alvo, campo, acao, valor?}], `lote?` | `decidida` {lote, aplicadas, ignoradas} | sim |
 | `BibliotecaDesfazer` | `lote` | `desfeita` {lote, desfeitas} | sim |
-| `BibliotecaCadastrar` | `itens` (file_id) | `cadastrada` {resultados, bloqueado?} | sim (job) |
+| `BibliotecaCadastrar` | `itens` (file_id) | `cadastrada` {resultados (com `cadastro_id`), bloqueado?} | sim (job) |
+| `BibliotecaCadastros` | `estado?`, `limite?`, `cursor?` | `cadastros` {itens [{cadastro_id?, file_id, titulo?, calibre_id?, estado?, pronto_para_cadastrar, erro?}], proximo_cursor} | não |
 | `BibliotecaHomologar` | `item` (id do cadastro), `aprovacao?` {quem, quando?, motivo?} | `homologacao` {homologacao} | sim (job) |
 | `BibliotecaAlertas` | `nao_vistos`, `limite?`, `cursor?` | `alertas` {itens, nao_vistos_total, proximo_cursor} | não |
 | `BibliotecaMarcarVisto` | `ids` | `vistos` {marcados} | sim |
@@ -59,6 +60,47 @@ opacas (keyset, nunca `OFFSET`). `somente_leitura()` lista os comandos que não 
    Edição > Formato idempotentes; candidatos de duplicidade bibliográfica.
 4. `Revisao` / `Decidir` / `Desfazer`; `Cadastrar` na A Classificar; `Homologar`.
 
+## Fase 3: o que o pipeline passou a fazer
+
+- **Reconciliação real** (`dag_biblio::reconciliacao::reconciliar`): cada campo junta os
+  candidatos (metadado interno, ISBN, nome do arquivo, ficha, conteúdo, OCR, Homologada, IA,
+  decisões humanas). Divergência entre fontes fortes derruba a confiança e vira motivo de revisão
+  (`CampoLadoALado.motivos`); a decisão humana (100) vence qualquer reprocessamento e não volta a
+  ser pedida.
+- **Vocabulário e estante**: o `Classificador` (TF-IDF/kNN) é treinado com o espelho da
+  Homologada e com as decisões humanas (peso 3). O cache é invalidado quando o espelho ou as
+  decisões mudam. As sugestões do kNN entram com origem `Conteudo` (a origem `Homologada` do
+  reconciliador tem confiança fixa 0,99 e é reservada ao que vem do próprio livro homologado) e
+  dizem por quê ("parecido com «Título» (similaridade 0,52), decisão sua").
+- **IA com contexto**: `EntradaClassificacao` leva as tags candidatas (pré-filtradas, até 80), até
+  40 estantes, autores parecidos, até 5 exemplos aprovados e a imagem da página 1/capa. Tokens e
+  tempo reais gravados em `inferencias`.
+- **Identidade bibliográfica** (`identidade::comparar`) só entre candidatos pré-filtrados por
+  título principal (`livros_homologados.titulo_principal`, migração 0012): nunca quadrático.
+- **Compactados**: cada livro dentro de um compactado é um item de revisão próprio
+  (`ItemRevisaoInfo.membro`; `file_id` é o do Contêiner). A decisão do Membro usa
+  `AlvoRevisao::Edicao(edicao_id)`. O Membro é codificado em `versao_regras` como
+  `<regras>|m:<caminho interno>`: as chaves únicas já existentes passam a valer por Membro sem
+  mexer no esquema. PDF/DjVu de dentro do compactado vão da memória (memfd) ao extrator; nada é
+  extraído para disco (ADR 0006). Cadastrar um Membro é recusado com explicação.
+- **Fila**: prioridade de `dag_biblio::prioridade`; aging configurável (`aging_por_hora`,
+  mínimo 0,01) aplicado ao gravar a prioridade, sem mexer na coluna `ordem`; 1 extração por
+  Dispositivo Físico, até `max_discos_extracao` (2) dispositivos ao mesmo tempo; pausa/cancelamento
+  entre itens.
+- **Homologada**: livros com `!Catalogar` ou sem tag viram itens de revisão com
+  `proposta_homologada` (versão `|h`); só proposta, nada é escrito. A opção
+  `tag_controle_livro_novo` (desligada) aplica a tag de controle aos livros cadastrados na A
+  Classificar, nunca na Homologada.
+- **Senha do servidor Calibre**: `BibliotecaConfigDefinir {"homologacao": {"senha": "..."}}`
+  guarda a senha no Cofre (ADR 0006); nenhuma resposta a devolve (só `senha_no_cofre`). `senha`
+  vazia apaga. Sem chaveiro utilizável: `cofre_indisponivel`.
+- **Resumo (WOW-10)**: `jobs_concluidos_periodo`, `classificados_periodo`, `decisoes_periodo`,
+  `duplicatas_periodo` e `duplicatas_exatas_periodo`, além de revisões pendentes.
+- **Revisão** (campos novos, todos `#[serde(default)]`): `membro`, `proposta_homologada`,
+  `paginas` [{numero, via_ocr, qualidade, trecho}], `paginas_ocr` e `avisos` (começa com
+  `ocr: N de M páginas lidas por OCR` quando houve OCR, para distinguir PDF de imagem de PDF
+  textual). `HomologacaoInfo.resumo` {titulo, autores, formatos} mostra o plano antes da aprovação.
+
 ## Vigia (B-25, CA-B12)
 
 Dormente até a primeira sincronização. Depois, a cada varredura concluída e a cada
@@ -77,7 +119,8 @@ o hash é de um Formato homologado e enfileira. `Agente::vigiar_biblioteca()` fo
 
 `destino_a_classificar`, `ocr`, `ia` (desligada; Ollama em loopback, `gemma3:12b`),
 `extracoes_por_dispositivo`, `max_bytes_arquivo`, `tentativas_max`, `usar_unshare` (falso),
-`politica_trava`, `homologacao` (modo local/servidor; senha só por variável de ambiente),
+`politica_trava`, `homologacao` (modo local/servidor; senha no Cofre, `senha_env` só como legado),
+`max_discos_extracao`, `aging_por_hora`, `tag_controle_livro_novo`,
 `debounce_s`, `extensoes_ignoradas`, `tamanho_minimo_duplicata`, `pastas_a_classificar`,
 `versao_regras`. Endpoint de IA fora do loopback é recusado.
 

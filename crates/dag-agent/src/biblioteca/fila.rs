@@ -1,8 +1,10 @@
 //! Enfileiramento barato (só índices) e listagem da fila persistente.
 
+use dag_biblio::FormatoLivro;
+use dag_biblio::prioridade::{ItemFila, PoliticaPrioridade, pontuacao};
 use dag_core::{
-    ContagemFila, DadosBiblioteca, EstadoFilaInfo, ItemFilaInfo, MotivoFila, Resposta,
-    ResumoEnfileiramento,
+    ConfigBiblioteca, ContagemFila, DadosBiblioteca, EstadoFilaInfo, ItemFilaInfo, MotivoFila,
+    Resposta, ResumoEnfileiramento,
 };
 use dag_store::biblioteca as store;
 use rusqlite::Connection;
@@ -47,24 +49,90 @@ fn estado_store(e: EstadoFilaInfo) -> store::EstadoJob {
     }
 }
 
-/// Prioridade barata: arquivos maiores economizam mais; novos antes dos reprocessados.
-pub(super) fn prioridade(tamanho: u64, motivo: MotivoFila) -> i64 {
-    let mib = (tamanho >> 20).max(1);
-    let bits = i64::from(64 - mib.leading_zeros());
-    bits + match motivo {
-        MotivoFila::Novo => 2,
-        MotivoFila::Alterado => 3,
-        MotivoFila::Reprocessar => 0,
+/// Aging mínimo: nunca zero, para a fila não deixar ninguém morrer de fome.
+const AGING_MINIMO: f64 = 0.01;
+
+/// Prioridade gravada do job (maior sai primeiro): `dag_biblio::prioridade::pontuacao` (economia
+/// potencial pelo tamanho e pela suspeita de duplicidade, e novidade) dividida por
+/// `aging_por_hora`.
+///
+/// Por que assim: a migração 0011 fixa a `ordem` como `prioridade * 3600 - enfileirado_em`, uma
+/// coluna gerada e indexada em que cada hora de espera vale 1 ponto de `prioridade`. Dividir a
+/// pontuação por `aging_por_hora` converte a escala: `aging_por_hora` pontos de pontuação por hora
+/// de espera passam a valer exatamente 1 ponto gravado por hora. A ordem resultante é a da
+/// pontuação com aging configurável, e o índice `(estado, ordem, id)` continua entregando o
+/// próximo job em O(log n). Trocar a coluna (migração) obrigaria a reescrever a tabela e o índice
+/// da fila viva; aplicar o fator ao gravar não toca o esquema. Efeito colateral: mudar
+/// `aging_por_hora` só vale para o que entrar na fila depois (ou for reenfileirado com prioridade
+/// maior).
+pub(super) fn prioridade(
+    cfg: &ConfigBiblioteca,
+    tamanho: u64,
+    suspeita_duplicidade: f64,
+    motivo: MotivoFila,
+) -> i64 {
+    let aging = if cfg.aging_por_hora.is_finite() && cfg.aging_por_hora > 0.0 {
+        cfg.aging_por_hora.max(AGING_MINIMO)
+    } else {
+        AGING_MINIMO
+    };
+    // Sem aging aqui: ele é aplicado pela coluna `ordem` (1 ponto gravado por hora).
+    let pol = PoliticaPrioridade {
+        aging_por_hora: 0.0,
+        ..PoliticaPrioridade::default()
+    };
+    let item = ItemFila {
+        id: 0,
+        tamanho,
+        suspeita_duplicidade,
+        entrou_em: 0,
+    };
+    // Reprocessar não é novidade: a novidade já decaiu.
+    let espera_virtual = match motivo {
+        MotivoFila::Reprocessar => pol.meia_vida_novidade_s.saturating_mul(10),
+        _ => 0,
+    };
+    let mut base = pontuacao(&item, espera_virtual, &pol);
+    if motivo == MotivoFila::Alterado {
+        base += 0.2;
     }
+    (base / aging).round() as i64
 }
 
-/// Nome elegível: formato bibliográfico e não é arquivo temporário de download.
-pub(super) fn nome_elegivel(nome: &str, ignoradas: &[String]) -> bool {
+/// Formato bibliográfico do nome, ou `Outro` para compactado (que pode ter livros dentro).
+pub(super) fn formato_para_fila(nome: &str) -> Option<FormatoLivro> {
+    formato_do_nome(nome).or_else(|| nome_de_compactado(nome).then_some(FormatoLivro::Outro))
+}
+
+/// Nome de compactado genérico (zip, rar, 7z, tar...). Quadrinhos (CBZ...) já são formato.
+pub(super) fn nome_de_compactado(nome: &str) -> bool {
+    let b = nome.to_lowercase();
+    [
+        ".zip", ".rar", ".7z", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst",
+    ]
+    .iter()
+    .any(|e| b.ends_with(e))
+}
+
+/// O arquivo entra na fila? Formato bibliográfico, fora os downloads incompletos; compactado só
+/// se a etapa de Contêineres (Fase A) já o leu e há livro entre os Membros.
+pub(super) fn arquivo_elegivel(
+    conn: &Connection,
+    file_id: i64,
+    nome: &str,
+    ignoradas: &[String],
+) -> Result<bool, ErroAgente> {
     let baixo = nome.to_lowercase();
     if ignoradas.iter().any(|e| baixo.ends_with(&e.to_lowercase())) {
-        return false;
+        return Ok(false);
     }
-    formato_do_nome(nome).is_some()
+    if formato_do_nome(nome).is_some() {
+        return Ok(true);
+    }
+    if nome_de_compactado(nome) {
+        return Ok(store::conteiner_tem_livros(conn, file_id)?);
+    }
+    Ok(false)
 }
 
 /// Faixa `[lo, hi)` de `path_raw` que cobre tudo sob o diretório.
@@ -87,17 +155,19 @@ pub(super) fn enfileirar_arquivo(
     file_id: i64,
     tamanho: u64,
     motivo: MotivoFila,
-    versao: &str,
+    cfg: &ConfigBiblioteca,
     agora: i64,
 ) -> Result<Option<bool>, ErroAgente> {
+    let versao = cfg.versao_regras.as_str();
     if motivo == MotivoFila::Novo && store::processado_com_versao(conn, file_id, versao)? {
         return Ok(None);
     }
+    let suspeita = store::suspeita_de_duplicidade(conn, file_id)?;
     let r = store::enfileirar_job(
         conn,
         file_id,
         motivo_store(motivo),
-        prioridade(tamanho, motivo),
+        prioridade(cfg, tamanho, suspeita, motivo),
         Some(versao),
         agora,
     )?;
@@ -132,20 +202,13 @@ impl Agente {
                     let tx = conn.unchecked_transaction()?;
                     for a in &lote {
                         r.examinados += 1;
-                        if !nome_elegivel(&a.nome, &cfg.extensoes_ignoradas)
+                        if !arquivo_elegivel(&tx, a.file_id, &a.nome, &cfg.extensoes_ignoradas)?
                             || store::e_formato_homologado(&tx, a.file_id)?
                         {
                             r.ignorados += 1;
                             continue;
                         }
-                        match enfileirar_arquivo(
-                            &tx,
-                            a.file_id,
-                            a.tamanho,
-                            motivo,
-                            &cfg.versao_regras,
-                            agora,
-                        )? {
+                        match enfileirar_arquivo(&tx, a.file_id, a.tamanho, motivo, &cfg, agora)? {
                             None => r.ignorados += 1,
                             Some(true) => r.enfileirados += 1,
                             Some(false) => r.ja_na_fila += 1,

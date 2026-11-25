@@ -5,7 +5,8 @@
 
 use crate::ClasseVolume;
 use crate::biblioteca::{
-    AprovacaoHumana, DadosBiblioteca, EstadoFilaInfo, ItemDecisao, MotivoFila, PapelRegistro,
+    AprovacaoHumana, DadosBiblioteca, EstadoCadastroInfo, EstadoFilaInfo, ItemDecisao, MotivoFila,
+    PapelRegistro,
 };
 use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
@@ -344,6 +345,15 @@ pub enum Comando {
     /// `dag:<hash>`. Com o Calibre/servidor no ar devolve `calibre_ocupado`.
     BibliotecaCadastrar {
         itens: Vec<i64>,
+    },
+    /// Livros da A Classificar (cadastros) e os prontos para cadastrar. Somente leitura.
+    BibliotecaCadastros {
+        #[serde(default)]
+        estado: Option<EstadoCadastroInfo>,
+        #[serde(default)]
+        limite: Option<u32>,
+        #[serde(default)]
+        cursor: Option<String>,
     },
     /// Leva um cadastro aprovado da A Classificar à Homologada (B-24). Exige `aprovacao` de
     /// pessoa (GUI/CLI); o MCP só pode propor (sem `aprovacao`).

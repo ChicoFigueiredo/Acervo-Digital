@@ -92,6 +92,11 @@ impl Agente {
             candidatos_duplicidade_abertos: store::contar_candidatos_abertos(conn)?,
             bytes_recuperaveis_exatos: store::bytes_recuperaveis_exatos(conn)?,
             alertas_nao_vistos: store::contar_nao_vistos(conn)?,
+            jobs_concluidos_periodo: store::contar_jobs_concluidos_periodo(conn, de, ate)?,
+            classificados_periodo: store::contar_classificados_periodo(conn, de, ate)?,
+            decisoes_periodo: store::contar_decisoes_periodo(conn, de, ate)?,
+            duplicatas_periodo: store::contar_candidatos_periodo(conn, de, ate, false)?,
+            duplicatas_exatas_periodo: store::contar_candidatos_periodo(conn, de, ate, true)?,
         };
         Ok(dados(DadosBiblioteca::Resumo { resumo }))
     }

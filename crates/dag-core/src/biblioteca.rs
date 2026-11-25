@@ -157,9 +157,13 @@ pub struct ConfigHomologacao {
     pub url: Option<String>,
     pub id_biblioteca: Option<String>,
     pub usuario: Option<String>,
-    /// Nome da variável de ambiente que guarda a senha do servidor (a senha nunca passa pelo MCP
-    /// nem é gravada no Catálogo).
+    /// Legado: nome de uma variável de ambiente com a senha do servidor. Só vale se a senha não
+    /// estiver no Cofre (que é o lugar certo: `homologacao.senha` em `BibliotecaConfigDefinir`).
     pub senha_env: Option<String>,
+    /// Informativo (preenchido pelo agente na resposta): há senha do servidor no Cofre. A senha
+    /// em si NUNCA volta por nenhuma resposta.
+    #[serde(default)]
+    pub senha_no_cofre: bool,
 }
 
 impl Default for ConfigHomologacao {
@@ -170,6 +174,7 @@ impl Default for ConfigHomologacao {
             id_biblioteca: None,
             usuario: None,
             senha_env: None,
+            senha_no_cofre: false,
         }
     }
 }
@@ -195,14 +200,28 @@ pub struct ConfigBiblioteca {
     pub debounce_s: u64,
     /// Extensões de download incompleto, ignoradas pelo watcher.
     pub extensoes_ignoradas: Vec<String>,
-    /// Pontuação de aging por hora de espera (B-06).
+    /// Pontuação de aging por hora de espera (B-06), na mesma escala de
+    /// `dag_biblio::prioridade` (0 a ~2): com 0,05 um arquivo que espera 20 h ganha 1 ponto,
+    /// o que o põe à frente de qualquer chegada nova. Valores `<= 0` são tratados como 0,01
+    /// (a fila nunca deixa um item morrer de fome).
     pub aging_por_hora: f64,
+    /// Quantos Dispositivos Físicos extraem ao mesmo tempo (um arquivo por dispositivo).
+    #[serde(default = "um_por_padrao_discos")]
+    pub max_discos_extracao: u32,
+    /// Opção (desligada): tag de controle (p. ex. `!Catalogar`) aplicada aos livros cadastrados
+    /// na A Classificar. Nunca é aplicada na Homologada.
+    #[serde(default)]
+    pub tag_controle_livro_novo: Option<String>,
     /// Tamanho mínimo (bytes) para duplicata exata (ignora vazios e quebrados).
     pub tamanho_minimo_duplicata: u64,
     /// Trechos de caminho que identificam pastas de download / a classificar.
     pub pastas_a_classificar: Vec<String>,
     /// Versão das regras de extração/classificação: mudar reprocessa (CA-B11).
     pub versao_regras: String,
+}
+
+fn um_por_padrao_discos() -> u32 {
+    2
 }
 
 impl Default for ConfigBiblioteca {
@@ -229,6 +248,8 @@ impl Default for ConfigBiblioteca {
             .map(String::from)
             .to_vec(),
             aging_por_hora: 0.05,
+            max_discos_extracao: um_por_padrao_discos(),
+            tag_controle_livro_novo: None,
             tamanho_minimo_duplicata: 1024,
             pastas_a_classificar: ["classific", "download", "_novos"]
                 .map(String::from)
@@ -479,6 +500,12 @@ pub struct ResumoProcessamento {
     pub pendentes_restantes: i64,
     /// Itens que estavam `em_andamento` de um processo morto e foram retomados.
     pub orfaos_retomados: u64,
+    /// Itens de Contêiner (um por livro dentro de compactado) levados à revisão.
+    #[serde(default)]
+    pub membros_de_conteiner: u64,
+    /// Livros da Homologada (`!Catalogar` ou sem tag) com proposta de tags/estante.
+    #[serde(default)]
+    pub propostas_homologada: u64,
 }
 
 /// Valor de um campo, lado a lado (B-12).
@@ -526,11 +553,67 @@ pub struct ItemRevisaoInfo {
     pub obra_id: Option<i64>,
     pub edicao_id: Option<i64>,
     pub avisos: Vec<String>,
+    /// Item de um Contêiner: caminho interno do livro (o `file_id` é o do Contêiner). Um
+    /// compactado com vários livros gera um item por livro. Para decidir, use
+    /// `AlvoRevisao::Edicao(edicao_id)`.
+    #[serde(default)]
+    pub membro: Option<String>,
+    /// Sugestão para um livro que já está na Homologada (`!Catalogar` ou sem tag): só proposta,
+    /// nada é escrito na Homologada sem uma homologação aprovada.
+    #[serde(default)]
+    pub proposta_homologada: Option<LivroRef>,
+    /// Páginas extraídas, resumidas (amostra do conteúdo lido).
+    #[serde(default)]
+    pub paginas: Vec<PaginaResumo>,
+    /// Quantas páginas precisaram de OCR (`> 0`: PDF de imagem ou parte dele).
+    #[serde(default)]
+    pub paginas_ocr: u32,
+}
+
+/// Página extraída, resumida para a revisão.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaginaResumo {
+    /// 1-based.
+    pub numero: u32,
+    pub via_ocr: bool,
+    /// 0..=1.
+    pub qualidade: f32,
+    /// Começo do texto (até ~160 caracteres).
+    pub trecho: String,
+}
+
+/// Estado de um cadastro na A Classificar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EstadoCadastroInfo {
+    Pendente,
+    Cadastrando,
+    Cadastrado,
+    Falhou,
+    Removido,
+}
+
+/// Um livro da A Classificar (ou pronto para ir a ela), para as telas de cadastro.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CadastroInfo {
+    /// `None` enquanto o livro ainda não tem cadastro (só está pronto para cadastrar).
+    pub cadastro_id: Option<i64>,
+    pub file_id: i64,
+    pub titulo: Option<String>,
+    pub calibre_id: Option<i64>,
+    /// `None` = ainda sem cadastro.
+    pub estado: Option<EstadoCadastroInfo>,
+    /// Concluído na fila, sem revisão pendente e ainda não cadastrado.
+    pub pronto_para_cadastrar: bool,
+    pub erro: Option<String>,
 }
 
 /// Resultado do cadastro de um arquivo na A Classificar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultadoCadastro {
+    /// Id do cadastro (para `BibliotecaHomologar`), quando já existe.
+    #[serde(default)]
+    pub cadastro_id: Option<i64>,
     pub file_id: i64,
     /// `cadastrado`, `ja_cadastrado`, `recusado`, `pendente` ou `falhou`.
     pub estado: String,
@@ -549,6 +632,21 @@ pub struct HomologacaoInfo {
     pub aprovado_em: Option<i64>,
     pub calibre_id: Option<i64>,
     pub erro: Option<String>,
+    /// O que vai entrar na Homologada (título, autores e formatos), para mostrar o plano antes
+    /// da aprovação.
+    #[serde(default)]
+    pub resumo: Option<ResumoHomologacao>,
+}
+
+/// Resumo do livro de uma homologação.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumoHomologacao {
+    pub titulo: Option<String>,
+    #[serde(default)]
+    pub autores: Vec<String>,
+    /// Formatos (EPUB, PDF...) que o livro tem na A Classificar.
+    #[serde(default)]
+    pub formatos: Vec<String>,
 }
 
 /// Um alerta bibliográfico.
@@ -577,6 +675,20 @@ pub struct ResumoBiblioteca {
     pub candidatos_duplicidade_abertos: i64,
     pub bytes_recuperaveis_exatos: u64,
     pub alertas_nao_vistos: i64,
+    /// Jobs concluídos no período.
+    #[serde(default)]
+    pub jobs_concluidos_periodo: i64,
+    /// Itens que ganharam sugestões de classificação no período (arquivos distintos).
+    #[serde(default)]
+    pub classificados_periodo: i64,
+    /// Decisões humanas (aceitar, corrigir, rejeitar) no período.
+    #[serde(default)]
+    pub decisoes_periodo: i64,
+    /// Candidatos de duplicidade surgidos no período (exatas e bibliográficas).
+    #[serde(default)]
+    pub duplicatas_periodo: i64,
+    #[serde(default)]
+    pub duplicatas_exatas_periodo: i64,
 }
 
 /// Espaço por Volume (B-15, CA-B19).
@@ -666,6 +778,10 @@ pub enum DadosBiblioteca {
     Desfeita {
         lote: String,
         desfeitas: u64,
+    },
+    Cadastros {
+        itens: Vec<CadastroInfo>,
+        proximo_cursor: Option<String>,
     },
     Cadastrada {
         resultados: Vec<ResultadoCadastro>,

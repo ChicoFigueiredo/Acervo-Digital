@@ -38,7 +38,7 @@ pub use abertura::{PassadaAbertura, PoliticaAbertura, RelatorioAbertura, Verific
 pub use agente::{Agente, executar_comando, incremento_pendente, somente_leitura};
 pub use biblioteca::{
     ClassificadorIa, ExtratorIndisponivel, ExtratorLivro, ExtratorPadrao, IaIndisponivel, IaLocal,
-    ResumoVigia, SaidaExtracao,
+    ResumoVigia, SaidaExtracao, SaidaMembro,
 };
 pub use caminho::{
     VAR_CATALOGO, caminho_catalogo_do_ambiente, caminho_do_lock, resolver_caminho_catalogo,

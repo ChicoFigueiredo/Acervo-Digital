@@ -29,6 +29,18 @@ pub struct SaidaExtracao {
     pub avisos: Vec<String>,
 }
 
+/// Um livro extraído de um arquivo: o próprio arquivo (`caminho_interno` vazio) ou um Membro de
+/// compactado (`a.zip!/x/livro.epub`). Um compactado com vários livros devolve um por livro.
+#[derive(Debug, Clone)]
+pub struct SaidaMembro {
+    /// Vazio = o próprio arquivo.
+    pub caminho_interno: String,
+    pub formato: FormatoLivro,
+    /// Tamanho do Membro (0 = o do arquivo).
+    pub tamanho: u64,
+    pub saida: SaidaExtracao,
+}
+
 /// Extrai metadados, texto, capa e índice de um livro, em leitura apenas (ADR 0006: nada é
 /// extraído, montado ou gravado em disco; contêineres são lidos em memória).
 pub trait ExtratorLivro: Send + Sync {
@@ -43,6 +55,27 @@ pub trait ExtratorLivro: Send + Sync {
         formato: FormatoLivro,
         cfg: &ConfigBiblioteca,
     ) -> Result<SaidaExtracao, String>;
+
+    /// Extrai todos os livros do arquivo: um para arquivo comum; um por livro de compactado.
+    /// A implementação padrão devolve o resultado de [`ExtratorLivro::extrair`].
+    ///
+    /// # Errors
+    /// Falha da própria ferramenta (ausente, travou).
+    fn extrair_membros(
+        &self,
+        caminho: &Path,
+        formato: FormatoLivro,
+        cfg: &ConfigBiblioteca,
+    ) -> Result<Vec<SaidaMembro>, String> {
+        self.extrair(caminho, formato, cfg).map(|saida| {
+            vec![SaidaMembro {
+                caminho_interno: String::new(),
+                formato,
+                tamanho: 0,
+                saida,
+            }]
+        })
+    }
 }
 
 /// Extrator "indisponível": todo formato vira `NaoSuportado` com o motivo.
@@ -170,76 +203,127 @@ impl ExtratorLivro for ExtratorPadrao {
         formato: FormatoLivro,
         cfg: &ConfigBiblioteca,
     ) -> Result<SaidaExtracao, String> {
+        let mut v = self.extrair_membros(caminho, formato, cfg)?;
+        if v.is_empty() {
+            return Err("nada extraído".into());
+        }
+        Ok(v.remove(0).saida)
+    }
+
+    fn extrair_membros(
+        &self,
+        caminho: &Path,
+        formato: FormatoLivro,
+        cfg: &ConfigBiblioteca,
+    ) -> Result<Vec<SaidaMembro>, String> {
+        let um = |saida: SaidaExtracao| {
+            vec![SaidaMembro {
+                caminho_interno: String::new(),
+                formato,
+                tamanho: 0,
+                saida,
+            }]
+        };
         if matches!(formato, FormatoLivro::Pdf | FormatoLivro::Djvu) {
-            return self.por_pdf(Fonte::Caminho(caminho), formato, cfg);
+            return self.por_pdf(Fonte::Caminho(caminho), formato, cfg).map(um);
         }
         let opc = OpcoesExtracao {
             reter_dados_nao_tratados: true,
             ..OpcoesExtracao::default()
         };
-        let extraido = dag_biblio_ebook::extrair_arquivo(caminho, Some(formato), &opc)
-            .map_err(|e| e.to_string())?;
+        // `Outro` (compactado) não é dica: a assinatura decide.
+        let dica = (formato != FormatoLivro::Outro).then_some(formato);
+        let extraido =
+            dag_biblio_ebook::extrair_arquivo(caminho, dica, &opc).map_err(|e| e.to_string())?;
         match extraido {
             Extraido::Livro(mut r) => {
                 let capa = r.capa.take();
                 let avisos = r.avisos.clone();
-                Ok(SaidaExtracao {
+                Ok(um(SaidaExtracao {
                     resultado: r,
                     paginas_ocr: 0,
                     capa,
                     avisos,
-                })
+                }))
             }
             Extraido::Compactado(c) => {
                 let mut avisos = c.avisos.clone();
                 avisos.push(format!(
-                    "compactado ({}): {} livro(s) dentro; o primeiro legível representa o arquivo",
+                    "compactado ({}): {} livro(s) dentro",
                     c.conteiner,
                     c.membros.len()
                 ));
                 for (nome, motivo) in &c.rejeitados {
                     avisos.push(format!("membro rejeitado {nome}: {motivo}"));
                 }
-                // O primeiro membro legível representa o compactado; PDF/DjVu usam os bytes
-                // retidos (memória, sem disco).
+                // Todos os livros do compactado, cada um com o seu caminho interno. PDF/DjVu
+                // vão da memória (memfd) ao `dag-biblio-pdf`; nada toca o disco (ADR 0006).
+                let mut saidas = Vec::new();
                 for m in &c.membros {
-                    if let Some(dados) = &m.dados
+                    let saida = if let Some(dados) = &m.dados
                         && matches!(m.formato, FormatoLivro::Pdf | FormatoLivro::Djvu)
                     {
-                        let mut s = self.por_pdf(Fonte::Bytes(dados), m.formato, cfg)?;
-                        s.avisos.extend(avisos.clone());
-                        s.avisos.push(format!("membro: {}", m.caminho_interno));
-                        s.resultado.avisos.extend(avisos);
-                        return Ok(s);
-                    }
-                    if m.dados.is_none() && matches!(m.resultado.estado, EstadoLeitura::Lido) {
+                        match self.por_pdf(Fonte::Bytes(dados), m.formato, cfg) {
+                            Ok(s) => s,
+                            // A falha de um Membro não derruba os outros livros do compactado.
+                            Err(e) => SaidaExtracao {
+                                resultado: resultado_vazio(
+                                    m.formato,
+                                    EstadoLeitura::NaoSuportado { motivo: e },
+                                ),
+                                paginas_ocr: 0,
+                                capa: None,
+                                avisos: Vec::new(),
+                            },
+                        }
+                    } else {
                         let mut r = m.resultado.clone();
                         let capa = r.capa.take();
-                        avisos.push(format!("membro: {}", m.caminho_interno));
-                        r.avisos.extend(avisos.clone());
-                        return Ok(SaidaExtracao {
+                        let av = r.avisos.clone();
+                        SaidaExtracao {
                             resultado: r,
                             paginas_ocr: 0,
                             capa,
-                            avisos,
-                        });
-                    }
+                            avisos: av,
+                        }
+                    };
+                    let mut saida = saida;
+                    saida.avisos.extend(avisos.clone());
+                    saida.resultado.avisos.extend(avisos.clone());
+                    saida
+                        .resultado
+                        .avisos
+                        .push(format!("membro: {}", m.caminho_interno));
+                    saidas.push(SaidaMembro {
+                        caminho_interno: m.caminho_interno.clone(),
+                        formato: m.formato,
+                        tamanho: m.tamanho,
+                        saida,
+                    });
                 }
-                let estado = if matches!(c.estado, EstadoLeitura::Lido) {
-                    EstadoLeitura::NaoSuportado {
-                        motivo: "compactado sem livro legível".into(),
-                    }
-                } else {
-                    c.estado.clone()
-                };
-                let mut r = resultado_vazio(formato, estado);
-                r.avisos = avisos.clone();
-                Ok(SaidaExtracao {
-                    resultado: r,
-                    paginas_ocr: 0,
-                    capa: None,
-                    avisos,
-                })
+                if saidas.is_empty() {
+                    let estado = if matches!(c.estado, EstadoLeitura::Lido) {
+                        EstadoLeitura::NaoSuportado {
+                            motivo: "compactado sem livro legível".into(),
+                        }
+                    } else {
+                        c.estado.clone()
+                    };
+                    let mut r = resultado_vazio(formato, estado);
+                    r.avisos = avisos.clone();
+                    saidas.push(SaidaMembro {
+                        caminho_interno: String::new(),
+                        formato,
+                        tamanho: 0,
+                        saida: SaidaExtracao {
+                            resultado: r,
+                            paginas_ocr: 0,
+                            capa: None,
+                            avisos,
+                        },
+                    });
+                }
+                Ok(saidas)
             }
         }
     }

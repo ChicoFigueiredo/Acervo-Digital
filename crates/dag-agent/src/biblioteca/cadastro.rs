@@ -28,8 +28,40 @@ fn a_classificar_ativa(
         })
 }
 
-fn info_hom(h: &store::Homologacao) -> HomologacaoInfo {
+/// Título, autores e formatos do livro do cadastro, para o plano antes da aprovação.
+fn resumo_do_cadastro(
+    conn: &rusqlite::Connection,
+    cadastro_id: i64,
+    cfg: &dag_core::ConfigBiblioteca,
+) -> Option<dag_core::biblioteca::ResumoHomologacao> {
+    let cad = store::obter_cadastro(conn, cadastro_id).ok().flatten()?;
+    let (m, _) = metadados_do_arquivo(conn, cad.file_id, cfg).ok()?;
+    let mut formatos: Vec<String> = cad
+        .edicao_id
+        .and_then(|e| store::formatos_da_edicao(conn, e).ok())
+        .map(|v| v.into_iter().map(|f| f.formato.to_uppercase()).collect())
+        .unwrap_or_default();
+    if formatos.is_empty()
+        && let Some(i) = store::info_arquivo(conn, cad.file_id).ok().flatten()
+        && let Some((_, ext)) = i.nome.rsplit_once('.')
+    {
+        formatos.push(ext.to_uppercase());
+    }
+    formatos.dedup();
+    Some(dag_core::biblioteca::ResumoHomologacao {
+        titulo: m.titulo,
+        autores: m.autores.unwrap_or_default(),
+        formatos,
+    })
+}
+
+fn info_hom(
+    conn: &rusqlite::Connection,
+    cfg: &dag_core::ConfigBiblioteca,
+    h: &store::Homologacao,
+) -> HomologacaoInfo {
     HomologacaoInfo {
+        resumo: resumo_do_cadastro(conn, h.cadastro_id, cfg),
         id: h.id,
         cadastro_id: h.cadastro_id,
         estado: format!("{:?}", h.estado).to_lowercase(),
@@ -44,10 +76,17 @@ fn info_hom(h: &store::Homologacao) -> HomologacaoInfo {
 fn metadados_do_arquivo(
     conn: &rusqlite::Connection,
     file_id: i64,
+    cfg: &dag_core::ConfigBiblioteca,
 ) -> Result<(CamposMetadados, Option<f64>), ErroAgente> {
     use dag_biblio::Campo;
+    // Só as sugestões do próprio arquivo (nem as de Membros de compactado, nem as propostas
+    // para livros da Homologada).
     let mut sugs = store::sugestoes_do_arquivo(conn, file_id)?;
-    sugs.retain(|s| s.estado != store::EstadoSugestao::Rejeitada);
+    sugs.retain(|s| {
+        s.estado != store::EstadoSugestao::Rejeitada
+            && store::membro_da_versao(&s.versao_regras).is_empty()
+            && !s.versao_regras.ends_with("|h")
+    });
     let corrigidos: Vec<(Campo, String)> =
         store::decisoes_do_alvo(conn, store::AlvoDecisao::Arquivo(file_id))?
             .into_iter()
@@ -87,16 +126,20 @@ fn metadados_do_arquivo(
             .flat_map(|x| x.split(" & ").map(|y| y.trim().to_owned()))
             .filter(|x| !x.is_empty())
             .collect();
+        // `author_sort` das regras do Calibre (o `set_metadata` não o recalcula).
+        m.autor_ordenacao =
+            (!autores.is_empty()).then(|| dag_biblio::normalizacao::author_sort_lista(&autores));
         m.autores = (!autores.is_empty()).then_some(autores);
     }
     if let Some((l, _)) = melhor(Campo::Tags) {
         let t: Vec<String> = l
             .iter()
-            .flat_map(|x| x.split(',').map(|y| y.trim().to_owned()))
+            .flat_map(|x| x.split([',', '|']).map(|y| y.trim().to_owned()))
             .filter(|x| !x.is_empty())
             .collect();
         m.tags = (!t.is_empty()).then_some(t);
     }
+    m.tags = aplicar_tag_controle(m.tags.take(), cfg);
     if let Some(i) = primeiro(Campo::Idioma) {
         m.idiomas = Some(vec![i]);
     }
@@ -110,7 +153,78 @@ fn metadados_do_arquivo(
     Ok((m, conf))
 }
 
+/// Opção `tag_controle_livro_novo` (desligada por padrão): marca o livro cadastrado na A
+/// Classificar com a tag de controle (p. ex. `!Catalogar`). Nunca vale para a Homologada.
+pub(super) fn aplicar_tag_controle(
+    tags: Option<Vec<String>>,
+    cfg: &dag_core::ConfigBiblioteca,
+) -> Option<Vec<String>> {
+    let Some(c) = cfg
+        .tag_controle_livro_novo
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    else {
+        return tags;
+    };
+    let mut t = tags.unwrap_or_default();
+    if !t.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+        t.push(c.to_owned());
+    }
+    Some(t)
+}
+
 impl Agente {
+    /// Livros da A Classificar e os prontos para cadastrar (somente leitura).
+    pub(super) fn cadastros_biblioteca(
+        &mut self,
+        estado: Option<dag_core::biblioteca::EstadoCadastroInfo>,
+        limite: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<Resposta, ErroAgente> {
+        use dag_core::biblioteca::{CadastroInfo, EstadoCadastroInfo as E};
+        let cfg = self.config_biblioteca();
+        let conn = self.conexao();
+        let filtro = estado.map(|e| match e {
+            E::Pendente => store::EstadoCadastro::Pendente,
+            E::Cadastrando => store::EstadoCadastro::Cadastrando,
+            E::Cadastrado => store::EstadoCadastro::Cadastrado,
+            E::Falhou => store::EstadoCadastro::Falhou,
+            E::Removido => store::EstadoCadastro::Removido,
+        });
+        let pag = store::listar_cadastros_e_prontos(
+            conn,
+            filtro,
+            cursor.and_then(|c| c.parse().ok()),
+            super::limite_pagina(limite),
+        )?;
+        let itens = pag
+            .itens
+            .iter()
+            .map(|l| CadastroInfo {
+                cadastro_id: l.cadastro_id,
+                file_id: l.file_id,
+                titulo: metadados_do_arquivo(conn, l.file_id, &cfg)
+                    .ok()
+                    .and_then(|(m, _)| m.titulo),
+                calibre_id: l.calibre_id,
+                estado: l.estado.map(|e| match e {
+                    store::EstadoCadastro::Pendente => E::Pendente,
+                    store::EstadoCadastro::Cadastrando => E::Cadastrando,
+                    store::EstadoCadastro::Cadastrado => E::Cadastrado,
+                    store::EstadoCadastro::Falhou => E::Falhou,
+                    store::EstadoCadastro::Removido => E::Removido,
+                }),
+                pronto_para_cadastrar: l.pronto,
+                erro: l.erro.clone(),
+            })
+            .collect();
+        Ok(dados(DadosBiblioteca::Cadastros {
+            itens,
+            proximo_cursor: pag.proximo.map(|f| f.to_string()),
+        }))
+    }
+
     pub(super) fn cadastrar_biblioteca(&mut self, itens: &[i64]) -> Result<Resposta, ErroAgente> {
         let cfg = self.config_biblioteca();
         let agora = self.agora_biblio();
@@ -136,6 +250,7 @@ impl Agente {
             let conn = self.conexao();
             let Some(info) = store::info_arquivo(conn, fid)? else {
                 resultados.push(ResultadoCadastro {
+                    cadastro_id: None,
                     file_id: fid,
                     estado: "falhou".into(),
                     calibre_id: None,
@@ -149,6 +264,7 @@ impl Agente {
                     Ok(h) => h,
                     Err(e) => {
                         resultados.push(ResultadoCadastro {
+                            cadastro_id: None,
                             file_id: fid,
                             estado: "falhou".into(),
                             calibre_id: None,
@@ -158,8 +274,26 @@ impl Agente {
                     }
                 },
             };
+            if !store::membros_com_sugestoes(conn, fid)?
+                .iter()
+                .all(String::is_empty)
+            {
+                resultados.push(ResultadoCadastro {
+                    cadastro_id: None,
+                    file_id: fid,
+                    estado: "recusado".into(),
+                    calibre_id: None,
+                    erro: Some(
+                        "compactado com livros dentro: o DAG não extrai Membros para o disco \
+                         (ADR 0006); cadastre o livro depois de extraí-lo você mesmo"
+                            .into(),
+                    ),
+                });
+                continue;
+            }
             if !store::buscar_por_hash(conn, &hash, Some(info.tamanho))?.is_empty() {
                 resultados.push(ResultadoCadastro {
+                    cadastro_id: None,
                     file_id: fid,
                     estado: "ja_existe_na_homologada".into(),
                     calibre_id: None,
@@ -171,6 +305,7 @@ impl Agente {
             let (cad, _) = store::registrar_cadastro(conn, fid, edicao, destino.id, &hash, agora)?;
             if cad.estado == store::EstadoCadastro::Cadastrado {
                 resultados.push(ResultadoCadastro {
+                    cadastro_id: Some(cad.id),
                     file_id: fid,
                     estado: "cadastrado".into(),
                     calibre_id: cad.calibre_id,
@@ -178,7 +313,7 @@ impl Agente {
                 });
                 continue;
             }
-            let (metadados, confianca) = metadados_do_arquivo(conn, fid)?;
+            let (metadados, confianca) = metadados_do_arquivo(conn, fid, &cfg)?;
             let livro = NovoLivro {
                 arquivo: Path::new(&info.caminho).to_path_buf(),
                 hash_blake3: hex(&hash),
@@ -193,6 +328,7 @@ impl Agente {
                     store::marcar_cadastrando(conn, cad.id, agora)?;
                     store::marcar_cadastrado(conn, cad.id, r.id, agora)?;
                     resultados.push(ResultadoCadastro {
+                        cadastro_id: Some(cad.id),
                         file_id: fid,
                         estado: "cadastrado".into(),
                         calibre_id: Some(r.id),
@@ -211,6 +347,7 @@ impl Agente {
                     let conn = self.conexao();
                     store::marcar_cadastro_falhou(conn, cad.id, &e.to_string(), agora)?;
                     resultados.push(ResultadoCadastro {
+                        cadastro_id: Some(cad.id),
                         file_id: fid,
                         estado: "falhou".into(),
                         calibre_id: None,
@@ -281,7 +418,7 @@ impl Agente {
             let h = store::obter_homologacao(conn, hom_id)?
                 .ok_or_else(|| ErroAgente::biblio("homologacao_inexistente", "sumiu"))?;
             return Ok(dados(DadosBiblioteca::Homologacao {
-                homologacao: info_hom(&h),
+                homologacao: info_hom(conn, &cfg, &h),
             }));
         };
         if ap.quem.trim().is_empty() {
@@ -310,11 +447,16 @@ impl Agente {
         let alvo = match cfg.homologacao.modo {
             ModoHomologacao::Local => Alvo::Local(Path::new(&homologada.caminho).to_path_buf()),
             ModoHomologacao::Servidor => {
-                let senha = cfg
-                    .homologacao
-                    .senha_env
-                    .as_deref()
-                    .and_then(|v| std::env::var(v).ok())
+                // Senha do Cofre (ADR 0006). A variável de ambiente é só legado, quando o Cofre
+                // não tem a senha.
+                let senha = self
+                    .senha_servidor()
+                    .or_else(|| {
+                        cfg.homologacao
+                            .senha_env
+                            .as_deref()
+                            .and_then(|v| std::env::var(v).ok())
+                    })
                     .unwrap_or_default();
                 Alvo::Servidor(AcessoServidor {
                     url: cfg.homologacao.url.clone().unwrap_or_default(),
@@ -356,7 +498,7 @@ impl Agente {
         let h = store::obter_homologacao(conn, hom_id)?
             .ok_or_else(|| ErroAgente::biblio("homologacao_inexistente", "sumiu"))?;
         Ok(dados(DadosBiblioteca::Homologacao {
-            homologacao: info_hom(&h),
+            homologacao: info_hom(conn, &cfg, &h),
         }))
     }
 }

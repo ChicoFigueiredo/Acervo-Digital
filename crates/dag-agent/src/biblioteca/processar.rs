@@ -2,24 +2,30 @@
 //! (CA-B11), uma sugestão reconciliada por campo, Obra > Edição > Formato idempotentes e
 //! candidatos de duplicidade bibliográfica. Retomável: um job órfão volta à fila na abertura e a
 //! extração já gravada é reaproveitada (CA-B13).
+//!
+//! Extração em paralelo: no máximo um arquivo por Dispositivo Físico (até
+//! `max_discos_extracao` discos) em threads; tudo o que escreve no Catálogo, classifica e fala com
+//! a IA acontece na thread do agente (escritor único, ADR 0004). Pausa e cancelamento valem entre
+//! itens: nada novo sai da fila depois do pedido e o que já está lendo termina.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::time::{Duration, Instant};
 
-use dag_biblio::identidade::{RegistroBibliografico, comparar};
 use dag_biblio::{
     Campo, EstadoLeitura, FormatoLivro, OrigemEvidencia, ResultadoExtracao, TipoDuplicidade,
     ValorSugerido,
 };
-use dag_biblio_ia::EntradaClassificacao;
 use dag_core::{DadosBiblioteca, ProgressoBiblioteca, Resposta, ResumoProcessamento};
 use dag_store::biblioteca as store;
-use rusqlite::Connection;
 
-use super::extracao::{ClassificadorIa, IaIndisponivel, IaLocal};
-use super::{ConfigBiblioteca, blake3_arquivo, dados, formato_do_nome, hash_de_hex, hex};
+use super::extracao::{ClassificadorIa, IaIndisponivel, IaLocal, SaidaMembro};
+use super::fila::formato_para_fila;
+use super::item::EntradaItem;
+use super::vocab::CacheVocab;
+use super::{ConfigBiblioteca, blake3_arquivo, dados, hex};
 use crate::agente::Agente;
 use crate::erro::ErroAgente;
 
@@ -33,75 +39,56 @@ enum Desfecho {
         ocr: u64,
         paginas: u64,
         ia: bool,
+        membros: u64,
     },
     Excecao,
 }
 
-/// Valor escolhido por campo (o de maior confiança).
-fn melhor_por_campo(valores: Vec<ValorSugerido>) -> Vec<ValorSugerido> {
-    let mut v: Vec<ValorSugerido> = Vec::new();
-    for x in valores {
-        if x.valor.is_none() && x.lista.is_empty() {
-            continue;
-        }
-        match v.iter_mut().find(|y| y.campo == x.campo) {
-            Some(y) if x.confianca > y.confianca => *y = x,
-            Some(_) => {}
-            None => v.push(x),
-        }
+/// Um livro extraído (do arquivo ou de um Membro de compactado).
+struct ItemExtraido {
+    membro: String,
+    formato: FormatoLivro,
+    tamanho: u64,
+    resultado: ResultadoExtracao,
+    capa: Option<Vec<u8>>,
+    ocr: u64,
+}
+
+/// O que falta fazer com um job depois dos passos baratos.
+enum Preparo {
+    Feito(Desfecho),
+    Reusar {
+        info: store::InfoArquivo,
+        hash: [u8; 32],
+        itens: Vec<ItemExtraido>,
+    },
+    Extrair {
+        info: store::InfoArquivo,
+        hash: [u8; 32],
+        caminho: PathBuf,
+        formato: FormatoLivro,
+    },
+}
+
+/// Extração pronta, vinda de uma thread.
+struct Pronto {
+    job: store::Job,
+    dispositivo: i64,
+    info: store::InfoArquivo,
+    hash: [u8; 32],
+    saidas: Result<Vec<SaidaMembro>, String>,
+    ms: u64,
+}
+
+fn motivo_excecao(e: &EstadoLeitura) -> String {
+    match e {
+        EstadoLeitura::Drm => "drm".to_owned(),
+        EstadoLeitura::Senha => "senha".to_owned(),
+        EstadoLeitura::Corrompido { motivo } => format!("corrompido: {motivo}"),
+        EstadoLeitura::NaoSuportado { motivo } => format!("não suportado: {motivo}"),
+        EstadoLeitura::LimiteExcedido { limite } => format!("limite excedido: {limite}"),
+        EstadoLeitura::Lido => String::new(),
     }
-    v
-}
-
-fn origem_de(v: &ValorSugerido) -> OrigemEvidencia {
-    v.evidencias
-        .iter()
-        .max_by(|a, b| a.confianca.total_cmp(&b.confianca))
-        .map_or(OrigemEvidencia::MetadadoInterno, |e| e.origem)
-}
-
-fn valores_da_extracao(r: &ResultadoExtracao) -> Vec<ValorSugerido> {
-    let mut v = r.metadados.clone();
-    if let Some((isbn, ev)) = r
-        .isbns
-        .iter()
-        .max_by(|a, b| a.1.confianca.total_cmp(&b.1.confianca))
-    {
-        v.push(ValorSugerido {
-            campo: Campo::Isbn,
-            valor: Some(isbn.clone()),
-            lista: Vec::new(),
-            confianca: ev.confianca,
-            evidencias: vec![ev.clone()],
-        });
-    }
-    v
-}
-
-fn texto(v: &[ValorSugerido], c: Campo) -> Option<&str> {
-    v.iter()
-        .find(|x| x.campo == c)
-        .and_then(|x| x.valor.as_deref())
-}
-
-fn lista(v: &[ValorSugerido], c: Campo) -> Vec<String> {
-    v.iter()
-        .find(|x| x.campo == c)
-        .map(|x| {
-            if x.lista.is_empty() {
-                x.valor
-                    .as_deref()
-                    .map(|t| t.split(" & ").map(str::to_owned).collect())
-                    .unwrap_or_default()
-            } else {
-                x.lista.clone()
-            }
-        })
-        .unwrap_or_default()
-}
-
-fn nome_ia(cfg: &ConfigBiblioteca, ia: Option<&Arc<dyn ClassificadorIa>>) -> String {
-    ia.map_or_else(|| cfg.ia.modelo_primario.clone(), |i| i.nome())
 }
 
 impl Agente {
@@ -133,6 +120,7 @@ impl Agente {
         let agora = self.agora_biblio();
         let orfaos = store::retomar_orfaos(self.conexao(), agora)?;
         let ia_cls = self.ia_ativa(&cfg, ia);
+        let vocab = self.vocabulario(&cfg)?;
         let maximo = limite.map_or(u64::MAX, u64::from);
         let conta = store::contagem_jobs(self.conexao())?;
         let mut r = ResumoProcessamento {
@@ -143,105 +131,169 @@ impl Agente {
             itens_total: u64::try_from(conta.pendentes).unwrap_or(0).min(maximo),
             ..ProgressoBiblioteca::default()
         };
-        while r.processados < maximo {
-            if !self.seguir_biblioteca() {
-                r.interrompido = true;
-                break;
-            }
-            let agora = self.agora_biblio();
-            let Some(job) = store::pegar_proximo_job(self.conexao(), agora)? else {
-                break;
-            };
-            let info = store::info_arquivo(self.conexao(), job.file_id)?;
-            prog.item_atual = info.as_ref().map(|i| i.caminho.clone());
-            let t0 = Instant::now();
-            let res = catch_unwind(AssertUnwindSafe(|| {
-                self.processar_um(&job, &cfg, ia_cls.as_ref(), &mut r)
-            }))
-            .unwrap_or_else(|_| {
-                Err(ErroAgente::biblio(
-                    "pane",
-                    "a extração falhou de forma inesperada",
-                ))
-            });
-            let conn = self.conexao();
-            match res {
-                Ok(Desfecho::DuplicataExata { bytes }) => {
-                    store::concluir_job(conn, job.id, Some(&cfg.versao_regras), agora)?;
-                    r.duplicatas_exatas += 1;
-                    r.espaco_potencial_bytes += bytes;
-                    prog.duplicatas_exatas += 1;
-                    prog.espaco_potencial_bytes += bytes;
+        let max_discos = cfg.max_discos_extracao.max(1) as usize;
+        let (tx, rx): (Sender<Pronto>, Receiver<Pronto>) = channel();
+        let mut ocupados: Vec<i64> = Vec::new();
+        let mut em_voo = 0_usize;
+        let mut pegos = 0_u64;
+        loop {
+            // Despacha enquanto couber: um arquivo por disco, até `max_discos` discos.
+            let mut despachou = false;
+            while pegos < maximo && em_voo < max_discos {
+                if !self.seguir_biblioteca() {
+                    r.interrompido = true;
+                    break;
                 }
-                Ok(Desfecho::Revisao {
-                    reaproveitado,
-                    ocr,
-                    paginas,
-                    ia: usou,
-                }) => {
-                    store::concluir_job(conn, job.id, Some(&cfg.versao_regras), agora)?;
-                    r.revisao_pendente += 1;
-                    if reaproveitado {
-                        r.reaproveitados += 1;
-                    } else {
-                        r.extraidos += 1;
+                let agora = self.agora_biblio();
+                let Some((job, disp)) =
+                    store::pegar_proximo_job_fora(self.conexao(), agora, &ocupados)?
+                else {
+                    break;
+                };
+                pegos += 1;
+                despachou = true;
+                prog.item_atual =
+                    store::info_arquivo(self.conexao(), job.file_id)?.map(|i| i.caminho);
+                let t0 = Instant::now();
+                let preparo = catch_unwind(AssertUnwindSafe(|| self.preparar(&job, &cfg)))
+                    .unwrap_or_else(|_| {
+                        Err(ErroAgente::biblio(
+                            "pane",
+                            "o preparo da extração falhou de forma inesperada",
+                        ))
+                    });
+                match preparo {
+                    Ok(Preparo::Extrair {
+                        info,
+                        hash,
+                        caminho,
+                        formato,
+                    }) => {
+                        ocupados.push(disp);
+                        em_voo += 1;
+                        let extrator = Arc::clone(&self.biblio.extrator);
+                        let cfg2 = cfg.clone();
+                        let tx2 = tx.clone();
+                        std::thread::spawn(move || {
+                            let t = Instant::now();
+                            let saidas = catch_unwind(AssertUnwindSafe(|| {
+                                extrator.extrair_membros(&caminho, formato, &cfg2)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err("a extração falhou de forma inesperada".into())
+                            });
+                            let ms = u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
+                            let _ = tx2.send(Pronto {
+                                job,
+                                dispositivo: disp,
+                                info,
+                                hash,
+                                saidas,
+                                ms,
+                            });
+                        });
                     }
-                    r.paginas += paginas;
-                    r.paginas_ocr += ocr;
-                    r.consultas_ia += u64::from(usou);
-                    prog.paginas += paginas;
-                    prog.paginas_ocr += ocr;
-                }
-                Ok(Desfecho::Excecao) => {
-                    r.excecoes += 1;
-                    prog.excecoes += 1;
-                }
-                Err(e) => {
-                    let estado =
-                        store::falhar_job(conn, job.id, &e.to_string(), cfg.tentativas_max, agora)?;
-                    if estado == store::EstadoJob::Falhou {
-                        r.falhas += 1;
-                        prog.falhas += 1;
-                        let _ = store::emitir_alerta(
-                            conn,
-                            &store::NovoAlerta {
-                                chave: Some(format!("extracao_falhou:{}", job.file_id)),
-                                tipo: store::TipoAlerta::ExtracaoFalhou,
-                                file_id: Some(job.file_id),
-                                dados_json: serde_json::json!({"erro": e.to_string()}).to_string(),
-                            },
-                            agora,
+                    Ok(Preparo::Feito(d)) => {
+                        self.finalizar(
+                            &job,
+                            Ok(d),
+                            &info_ou_none(self, job.file_id),
+                            &cfg,
+                            &mut r,
+                            &mut prog,
+                            t0,
+                        )?;
+                    }
+                    Ok(Preparo::Reusar { info, hash, itens }) => {
+                        let res = self.concluir_extracao(
+                            &job,
+                            &info,
+                            hash,
+                            itens,
+                            true,
+                            &cfg,
+                            ia_cls.as_ref(),
+                            vocab.as_ref(),
                         );
+                        self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                    }
+                    Err(e) => {
+                        self.finalizar(
+                            &job,
+                            Err(e),
+                            &info_ou_none(self, job.file_id),
+                            &cfg,
+                            &mut r,
+                            &mut prog,
+                            t0,
+                        )?;
                     }
                 }
             }
-            r.processados += 1;
-            if let Some(i) = &info {
-                r.bytes += i.tamanho;
-                prog.bytes += i.tamanho;
+            if em_voo == 0 {
+                if despachou {
+                    continue; // o que saiu da fila já foi concluído sem extração
+                }
+                break;
             }
-            prog.itens_feitos = r.processados;
-            let forcar = t0.elapsed().as_secs() >= 1;
-            self.progresso_biblioteca(&prog, forcar);
+            // Espera uma extração (acordando para ver pausa/cancelamento).
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(p) => {
+                    em_voo -= 1;
+                    if let Some(i) = ocupados.iter().position(|d| *d == p.dispositivo) {
+                        ocupados.swap_remove(i);
+                    }
+                    let t0 = Instant::now();
+                    let Pronto {
+                        job,
+                        info,
+                        hash,
+                        saidas,
+                        ms,
+                        ..
+                    } = p;
+                    let res = match saidas {
+                        Ok(s) => self.gravar_e_concluir(
+                            &job,
+                            &info,
+                            hash,
+                            s,
+                            ms,
+                            &cfg,
+                            ia_cls.as_ref(),
+                            vocab.as_ref(),
+                        ),
+                        Err(e) => Err(ErroAgente::biblio("extracao", e)),
+                    };
+                    self.finalizar(&job, res, &Some(info), &cfg, &mut r, &mut prog, t0)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        // Itens da Homologada (`!Catalogar` ou sem tag): só propostas, nada é escrito nela.
+        if !r.interrompido && r.processados < maximo {
+            let restante = maximo - r.processados;
+            self.propostas_homologada(&cfg, vocab.as_ref(), restante, &mut r)?;
         }
         r.pendentes_restantes = store::contagem_jobs(self.conexao())?.pendentes;
         self.progresso_biblioteca(&prog, true);
         Ok(dados(DadosBiblioteca::Processada { resumo: r }))
     }
 
-    fn processar_um(
+    /// Passos baratos de um job: arquivo e hash, duplicata exata (antes de qualquer extração) e
+    /// extração já gravada. O que sobra é extrair.
+    fn preparar(
         &mut self,
         job: &store::Job,
         cfg: &ConfigBiblioteca,
-        ia: Option<&Arc<dyn ClassificadorIa>>,
-        resumo: &mut ResumoProcessamento,
-    ) -> Result<Desfecho, ErroAgente> {
+    ) -> Result<Preparo, ErroAgente> {
         let agora = self.agora_biblio();
         let conn = self.conexao();
         let info = store::info_arquivo(conn, job.file_id)?
             .ok_or_else(|| ErroAgente::biblio("arquivo_inexistente", "arquivo fora do Catálogo"))?;
         let caminho = Path::new(&info.caminho).to_path_buf();
-        let formato = formato_do_nome(&info.nome)
+        let formato = formato_para_fila(&info.nome)
             .ok_or_else(|| ErroAgente::biblio("formato_nao_bibliografico", info.nome.clone()))?;
         if !caminho.is_file() {
             return Err(ErroAgente::biblio(
@@ -294,323 +346,375 @@ impl Agente {
                     },
                     agora,
                 )?;
+                let titulo = a.livro.titulo.clone();
+                store::gravar_checkpoint(conn, job.id, "duplicata_exata", None, agora)?;
+                let bytes = info.tamanho;
                 if criado {
-                    self.mensagem(format!(
-                        "alerta: você já tem este livro — {}",
-                        a.livro.titulo
-                    ));
+                    self.mensagem(format!("alerta: você já tem este livro — {titulo}"));
                 }
-                store::gravar_checkpoint(self.conexao(), job.id, "duplicata_exata", None, agora)?;
-                return Ok(Desfecho::DuplicataExata {
-                    bytes: info.tamanho,
-                });
+                return Ok(Preparo::Feito(Desfecho::DuplicataExata { bytes }));
             }
         }
         // 2. Extração: reaproveita a vigente (mesmo hash e regras) ou extrai.
-        let conn = self.conexao();
-        let vigente = store::extracao_vigente(conn, job.file_id, &cfg.versao_regras, &hash)?;
-        let (rext, reaproveitado, capa, ocr): (ResultadoExtracao, bool, Option<Vec<u8>>, u64) =
-            if let Some(Some(r)) = vigente
-                .as_ref()
-                .map(|e| e.resultado_tipado().ok().flatten())
-            {
-                (r, true, None, 0)
-            } else {
-                store::gravar_checkpoint(conn, job.id, "extraindo", None, agora)?;
-                let t0 = Instant::now();
-                let s = self
-                    .biblio
-                    .extrator
-                    .extrair(&caminho, formato, cfg)
-                    .map_err(|e| ErroAgente::biblio("extracao", e))?;
-                let ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-                store::gravar_resultado_extracao(
-                    self.conexao(),
-                    Some(job.id),
-                    job.file_id,
-                    &s.resultado,
-                    Some(hash),
-                    &cfg.versao_regras,
-                    ms,
-                    agora,
-                )?;
-                store::gravar_checkpoint(self.conexao(), job.id, "extraido", None, agora)?;
-                (s.resultado, false, s.capa, u64::from(s.paginas_ocr))
-            };
-        let conn = self.conexao();
-        let paginas = rext.paginas.len() as u64;
-        // 3. Exceções: DRM, senha, ilegível, limite. Nunca contorna; vai para revisão humana.
-        if !matches!(rext.estado, EstadoLeitura::Lido) {
-            let motivo = match &rext.estado {
-                EstadoLeitura::Drm => "drm".to_owned(),
-                EstadoLeitura::Senha => "senha".to_owned(),
-                EstadoLeitura::Corrompido { motivo } => format!("corrompido: {motivo}"),
-                EstadoLeitura::NaoSuportado { motivo } => format!("não suportado: {motivo}"),
-                EstadoLeitura::LimiteExcedido { limite } => format!("limite excedido: {limite}"),
-                EstadoLeitura::Lido => String::new(),
-            };
-            store::marcar_excecao(conn, job.id, &motivo, agora)?;
-            let _ = store::emitir_alerta(
-                conn,
-                &store::NovoAlerta {
-                    chave: Some(format!("excecao:{}", job.file_id)),
-                    tipo: store::TipoAlerta::ExtracaoFalhou,
-                    file_id: Some(job.file_id),
-                    dados_json: serde_json::json!({"motivo": motivo}).to_string(),
-                },
-                agora,
-            );
-            return Ok(Desfecho::Excecao);
-        }
-        // 4. Valores: extração + (opcional) IA; um por campo, o de maior confiança.
-        let mut valores = valores_da_extracao(&rext);
-        let mut usou_ia = false;
-        let mut modelo = String::new();
-        if let Some(c) = ia {
-            let entrada = EntradaClassificacao {
-                id: job.file_id.to_string(),
-                nome_arquivo: info.nome.clone(),
-                extracao: rext.clone(),
-                vocabulario: dag_biblio_ia::VocabularioHomologado::default(),
-                exemplos: Vec::new(),
-                referencias: Vec::new(),
-                imagem_pagina1: capa,
-            };
-            match c.classificar(&entrada) {
-                Ok(res) => {
-                    usou_ia = true;
-                    resumo.consultas_ia += 0;
-                    modelo = nome_ia(cfg, ia);
-                    for reg in &res.registros {
-                        if let Some(h) = hash_de_hex(&reg.hash_prompt) {
-                            let _ = store::gravar_inferencia(
-                                self.conexao(),
-                                &store::NovaInferencia {
-                                    job_id: Some(job.id),
-                                    file_id: Some(job.file_id),
-                                    modelo: reg.modelo.clone(),
-                                    versao_modelo: reg.versao_modelo.clone(),
-                                    hash_prompt: h,
-                                    tokens_entrada: 0,
-                                    tokens_saida: 0,
-                                    tempo_ms: 0,
-                                    bruto_json: None,
-                                },
-                                agora,
-                            );
-                        }
-                    }
-                    valores.extend(res.valores);
-                }
-                Err(e) => {
-                    self.mensagem(format!("IA indisponível ({e}); seguindo só com a extração"))
+        let vigentes =
+            store::extracoes_vigentes_do_arquivo(conn, job.file_id, &cfg.versao_regras, &hash)?;
+        if !vigentes.is_empty() {
+            let mut itens = Vec::with_capacity(vigentes.len());
+            let mut completo = true;
+            for (membro, ex) in &vigentes {
+                match ex.resultado_tipado().ok().flatten() {
+                    Some(r) => itens.push(ItemExtraido {
+                        membro: membro.clone(),
+                        formato: r.formato,
+                        tamanho: if membro.is_empty() { info.tamanho } else { 0 },
+                        resultado: r,
+                        capa: None,
+                        ocr: 0,
+                    }),
+                    None => completo = false,
                 }
             }
+            if completo {
+                return Ok(Preparo::Reusar { info, hash, itens });
+            }
         }
-        let escolhidos = melhor_por_campo(valores);
-        // 5. Obra > Edição > Formato (idempotentes por chave).
-        let conn = self.conexao();
-        let titulo = texto(&escolhidos, Campo::Titulo)
-            .unwrap_or(&info.nome)
-            .to_owned();
-        let autores = lista(&escolhidos, Campo::Autores);
-        let isbn = texto(&escolhidos, Campo::Isbn).map(str::to_owned);
-        let tnorm = store::normalizar_texto(&titulo);
-        let anorm = autores
-            .first()
-            .map(|a| store::normalizar_texto(a))
-            .unwrap_or_default();
-        let chave_obra = format!("t:{tnorm}|a:{anorm}");
-        let chave_edicao = isbn
-            .as_ref()
-            .map_or_else(|| chave_obra.clone(), |i| format!("isbn:{i}"));
-        let obra = store::garantir_obra(
-            conn,
-            &store::NovaObra {
-                chave: &chave_obra,
-                titulo: &titulo,
-                idioma_original: None,
-            },
-            agora,
-        )?;
-        let editora = texto(&escolhidos, Campo::Editora).map(str::to_owned);
-        let idioma = texto(&escolhidos, Campo::Idioma).map(str::to_owned);
-        let edicao = store::garantir_edicao(
-            conn,
-            &store::NovaEdicao {
-                obra_id: obra,
-                chave: &chave_edicao,
-                titulo: &titulo,
-                editora: editora.as_deref(),
-                idioma: idioma.as_deref(),
-                isbn13: isbn.as_deref(),
-                ..store::NovaEdicao::default()
-            },
-            agora,
-        )?;
-        for (i, a) in autores.iter().enumerate() {
-            let id = store::garantir_autor(
-                conn,
-                &store::NovoAutor {
-                    nome: a,
-                    ..store::NovoAutor::default()
-                },
+        store::gravar_checkpoint(conn, job.id, "extraindo", None, agora)?;
+        Ok(Preparo::Extrair {
+            info,
+            hash,
+            caminho,
+            formato,
+        })
+    }
+
+    /// Grava a extração de cada livro e conclui o job.
+    #[allow(clippy::too_many_arguments)]
+    fn gravar_e_concluir(
+        &mut self,
+        job: &store::Job,
+        info: &store::InfoArquivo,
+        hash: [u8; 32],
+        saidas: Vec<SaidaMembro>,
+        ms: u64,
+        cfg: &ConfigBiblioteca,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+    ) -> Result<Desfecho, ErroAgente> {
+        let agora = self.agora_biblio();
+        let mut itens = Vec::with_capacity(saidas.len());
+        for s in saidas {
+            let versao = store::versao_do_item(&cfg.versao_regras, &s.caminho_interno);
+            store::gravar_resultado_extracao(
+                self.conexao(),
+                Some(job.id),
+                job.file_id,
+                &s.saida.resultado,
+                Some(hash),
+                &versao,
+                ms,
                 agora,
             )?;
-            store::vincular_autoria(conn, edicao, id, store::PapelAutoria::Autor, i as i64)?;
+            itens.push(ItemExtraido {
+                membro: s.caminho_interno,
+                formato: s.formato,
+                tamanho: if s.tamanho == 0 {
+                    info.tamanho
+                } else {
+                    s.tamanho
+                },
+                resultado: s.saida.resultado,
+                capa: s.saida.capa,
+                ocr: u64::from(s.saida.paginas_ocr),
+            });
         }
-        store::garantir_formato_biblio(
-            conn,
-            &store::NovoFormatoBiblio {
-                edicao_id: edicao,
-                formato: formato_para(formato),
-                file_id: Some(job.file_id),
-                hash,
-                tamanho: info.tamanho,
-                estado: store::EstadoFormatoBiblio::Candidato,
-            },
-            agora,
-        )?;
-        // 6. Sugestões (uma por campo; as pendentes antigas fora da escolha saem).
-        let mut manter = Vec::new();
-        for v in &escolhidos {
-            let mut s = store::NovaSugestao::de_valor(
-                job.file_id,
-                v,
-                origem_de(v),
-                &modelo,
-                &cfg.versao_regras,
-            );
-            s.edicao_id = Some(edicao);
-            manter.push(store::gravar_sugestao(conn, &s, agora)?);
+        store::gravar_checkpoint(self.conexao(), job.id, "extraido", None, agora)?;
+        self.concluir_extracao(job, info, hash, itens, false, cfg, ia, vocab)
+    }
+
+    /// Cada livro extraído vira um item de revisão (um por Membro de compactado).
+    #[allow(clippy::too_many_arguments)]
+    fn concluir_extracao(
+        &mut self,
+        job: &store::Job,
+        info: &store::InfoArquivo,
+        hash: [u8; 32],
+        itens: Vec<ItemExtraido>,
+        reaproveitado: bool,
+        cfg: &ConfigBiblioteca,
+        ia: Option<&Arc<dyn ClassificadorIa>>,
+        vocab: Option<&Arc<CacheVocab>>,
+    ) -> Result<Desfecho, ErroAgente> {
+        let agora = self.agora_biblio();
+        let (mut ocr, mut paginas, mut membros) = (0_u64, 0_u64, 0_u64);
+        let (mut revisao, mut usou_ia) = (0_u64, false);
+        let mut motivos: Vec<String> = Vec::new();
+        for it in itens {
+            paginas += it.resultado.paginas.len() as u64;
+            ocr += it.ocr;
+            // Exceções: DRM, senha, ilegível, limite. Nunca contorna; vai para revisão humana.
+            if !matches!(it.resultado.estado, EstadoLeitura::Lido) {
+                let motivo = motivo_excecao(&it.resultado.estado);
+                let _ = store::emitir_alerta(
+                    self.conexao(),
+                    &store::NovoAlerta {
+                        chave: Some(format!("excecao:{}:{}", job.file_id, it.membro)),
+                        tipo: store::TipoAlerta::ExtracaoFalhou,
+                        file_id: Some(job.file_id),
+                        dados_json: serde_json::json!({
+                            "motivo": motivo,
+                            "membro": (!it.membro.is_empty()).then_some(&it.membro),
+                        })
+                        .to_string(),
+                    },
+                    agora,
+                );
+                motivos.push(if it.membro.is_empty() {
+                    motivo
+                } else {
+                    format!("{}: {motivo}", it.membro)
+                });
+                continue;
+            }
+            let entrada = EntradaItem {
+                job_id: job.id,
+                info,
+                membro: &it.membro,
+                formato: it.formato,
+                tamanho: it.tamanho,
+                hash_arquivo: hash,
+                resultado: &it.resultado,
+                capa: it.capa.clone(),
+            };
+            let s = self.processar_item(&entrada, cfg, ia, vocab)?;
+            usou_ia |= s.usou_ia;
+            revisao += 1;
+            membros += u64::from(!it.membro.is_empty());
         }
-        store::limpar_pendentes_exceto(conn, job.file_id, &cfg.versao_regras, &manter)?;
-        // 7. Candidatos bibliográficos contra a Homologada.
-        candidatos_bibliograficos(
-            conn,
-            &info,
-            &titulo,
-            &autores,
-            editora.as_deref(),
-            idioma.as_deref(),
-            isbn.as_deref(),
-            formato,
-            &hash,
-            agora,
-        )?;
+        let conn = self.conexao();
+        if revisao == 0 {
+            store::marcar_excecao(conn, job.id, &motivos.join("; "), agora)?;
+            return Ok(Desfecho::Excecao);
+        }
         store::gravar_checkpoint(conn, job.id, "revisao_pendente", None, agora)?;
         Ok(Desfecho::Revisao {
             reaproveitado,
             ocr,
             paginas,
             ia: usou_ia,
+            membros,
         })
     }
+
+    /// Contabiliza e persiste o desfecho de um job (concluído, exceção ou falha).
+    #[allow(clippy::too_many_arguments)]
+    fn finalizar(
+        &mut self,
+        job: &store::Job,
+        res: Result<Desfecho, ErroAgente>,
+        info: &Option<store::InfoArquivo>,
+        cfg: &ConfigBiblioteca,
+        r: &mut ResumoProcessamento,
+        prog: &mut ProgressoBiblioteca,
+        t0: Instant,
+    ) -> Result<(), ErroAgente> {
+        let agora = self.agora_biblio();
+        let conn = self.conexao();
+        match res {
+            Ok(Desfecho::DuplicataExata { bytes }) => {
+                store::concluir_job(conn, job.id, Some(&cfg.versao_regras), agora)?;
+                r.duplicatas_exatas += 1;
+                r.espaco_potencial_bytes += bytes;
+                prog.duplicatas_exatas += 1;
+                prog.espaco_potencial_bytes += bytes;
+            }
+            Ok(Desfecho::Revisao {
+                reaproveitado,
+                ocr,
+                paginas,
+                ia: usou,
+                membros,
+            }) => {
+                store::concluir_job(conn, job.id, Some(&cfg.versao_regras), agora)?;
+                r.revisao_pendente += 1;
+                if reaproveitado {
+                    r.reaproveitados += 1;
+                } else {
+                    r.extraidos += 1;
+                }
+                r.paginas += paginas;
+                r.paginas_ocr += ocr;
+                r.consultas_ia += u64::from(usou);
+                r.membros_de_conteiner += membros;
+                prog.paginas += paginas;
+                prog.paginas_ocr += ocr;
+            }
+            Ok(Desfecho::Excecao) => {
+                r.excecoes += 1;
+                prog.excecoes += 1;
+            }
+            Err(e) => {
+                let estado =
+                    store::falhar_job(conn, job.id, &e.to_string(), cfg.tentativas_max, agora)?;
+                if estado == store::EstadoJob::Falhou {
+                    r.falhas += 1;
+                    prog.falhas += 1;
+                    let _ = store::emitir_alerta(
+                        conn,
+                        &store::NovoAlerta {
+                            chave: Some(format!("extracao_falhou:{}", job.file_id)),
+                            tipo: store::TipoAlerta::ExtracaoFalhou,
+                            file_id: Some(job.file_id),
+                            dados_json: serde_json::json!({"erro": e.to_string()}).to_string(),
+                        },
+                        agora,
+                    );
+                }
+            }
+        }
+        r.processados += 1;
+        if let Some(i) = info {
+            r.bytes += i.tamanho;
+            prog.bytes += i.tamanho;
+        }
+        prog.itens_feitos = r.processados;
+        let forcar = t0.elapsed().as_secs() >= 1;
+        self.progresso_biblioteca(prog, forcar);
+        Ok(())
+    }
+
+    /// Livros da Homologada com `!Catalogar` ou sem nenhuma tag: propostas de tags e estante
+    /// (WOW-03/WOW-06), gravadas como sugestões do arquivo ligado ao livro. NADA é escrito na
+    /// Homologada: aplicar exige uma homologação aprovada por pessoa.
+    fn propostas_homologada(
+        &mut self,
+        cfg: &ConfigBiblioteca,
+        vocab: Option<&Arc<CacheVocab>>,
+        restante: u64,
+        r: &mut ResumoProcessamento,
+    ) -> Result<(), ErroAgente> {
+        let Some(vocab) = vocab else { return Ok(()) };
+        let Some(h) = super::homologada_ativa(self.conexao())? else {
+            return Ok(());
+        };
+        let agora = self.agora_biblio();
+        let versao = format!("{}|h", cfg.versao_regras);
+        let mut apos = 0_i64;
+        let mut feitas = 0_u64;
+        'tudo: loop {
+            let lote = store::livros_a_catalogar(self.conexao(), h.id, apos, 200)?;
+            if lote.is_empty() {
+                break;
+            }
+            for l in lote {
+                apos = l.id;
+                if feitas >= restante || !self.seguir_biblioteca() {
+                    break 'tudo;
+                }
+                let conn = self.conexao();
+                let Some(file_id) = store::arquivo_do_livro(conn, l.id)? else {
+                    continue; // sem arquivo no Catálogo não há onde ligar a proposta
+                };
+                if store::tem_sugestao_da_versao(conn, file_id, &versao)? {
+                    continue;
+                }
+                let treino = dag_biblio::vocabulario::LivroTreino {
+                    id: l.id,
+                    titulo: l.titulo.clone(),
+                    autores: l.autores.clone(),
+                    editora: l.editora.clone(),
+                    serie: l.serie.clone(),
+                    ..Default::default()
+                };
+                let s = vocab.sugerir(&treino);
+                let nota =
+                    "proposta para a Homologada: nada é escrito nela sem homologação aprovada";
+                let mut manter = Vec::new();
+                let mut gravou = false;
+                if !s.tags.is_empty() {
+                    let lista: Vec<String> = s.tags.iter().map(|t| t.tag.clone()).collect();
+                    let media =
+                        s.tags.iter().map(|t| t.confianca).sum::<f32>() / s.tags.len() as f32;
+                    let mut evidencias: Vec<dag_biblio::Evidencia> = s
+                        .tags
+                        .iter()
+                        .map(|t| dag_biblio::Evidencia {
+                            origem: OrigemEvidencia::Homologada,
+                            pagina: None,
+                            trecho: Some(t.tag.clone()),
+                            detalhe: Some(vocab.explicar(conn, &t.exemplos).join("; ")),
+                            confianca: t.confianca,
+                        })
+                        .collect();
+                    evidencias.push(dag_biblio::Evidencia {
+                        origem: OrigemEvidencia::MetadadoInterno,
+                        pagina: None,
+                        trecho: None,
+                        detalhe: Some(format!("{}{nota}", super::item::PREFIXO_REVISAO)),
+                        confianca: 0.0,
+                    });
+                    let v = ValorSugerido {
+                        campo: Campo::Tags,
+                        valor: Some(lista.join("|")),
+                        lista,
+                        confianca: media,
+                        evidencias,
+                    };
+                    let nova = store::NovaSugestao::de_valor(
+                        file_id,
+                        &v,
+                        OrigemEvidencia::Conteudo,
+                        "",
+                        &versao,
+                    );
+                    manter.push(store::gravar_sugestao(conn, &nova, agora)?);
+                    gravou = true;
+                }
+                if l.estante.is_none()
+                    && let Some(est) = &s.estante
+                {
+                    let v = ValorSugerido {
+                        campo: Campo::Estante,
+                        valor: Some(est.estante.clone()),
+                        lista: Vec::new(),
+                        confianca: est.confianca,
+                        evidencias: vec![
+                            dag_biblio::Evidencia {
+                                origem: OrigemEvidencia::Homologada,
+                                pagina: None,
+                                trecho: Some(est.estante.clone()),
+                                detalhe: Some(vocab.explicar(conn, &est.exemplos).join("; ")),
+                                confianca: est.confianca,
+                            },
+                            dag_biblio::Evidencia {
+                                origem: OrigemEvidencia::MetadadoInterno,
+                                pagina: None,
+                                trecho: None,
+                                detalhe: Some(format!("{}{nota}", super::item::PREFIXO_REVISAO)),
+                                confianca: 0.0,
+                            },
+                        ],
+                    };
+                    let nova = store::NovaSugestao::de_valor(
+                        file_id,
+                        &v,
+                        OrigemEvidencia::Conteudo,
+                        "",
+                        &versao,
+                    );
+                    manter.push(store::gravar_sugestao(conn, &nova, agora)?);
+                    gravou = true;
+                }
+                if gravou {
+                    store::limpar_pendentes_exceto(conn, file_id, &versao, &manter)?;
+                    r.propostas_homologada += 1;
+                    feitas += 1;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-fn formato_para(f: FormatoLivro) -> FormatoLivro {
-    f
-}
-
-#[allow(clippy::too_many_arguments)]
-fn candidatos_bibliograficos(
-    conn: &Connection,
-    info: &store::InfoArquivo,
-    titulo: &str,
-    autores: &[String],
-    editora: Option<&str>,
-    idioma: Option<&str>,
-    isbn: Option<&str>,
-    formato: FormatoLivro,
-    hash: &[u8; 32],
-    agora: i64,
-) -> Result<(), ErroAgente> {
-    let mut vistos = Vec::new();
-    let mut livros = Vec::new();
-    if let Some(i) = isbn {
-        livros.extend(store::buscar_livros_por_isbn(conn, i)?);
-    }
-    livros.extend(store::livros_por_titulo_norm(
-        conn,
-        &store::normalizar_texto(titulo),
-        5,
-    )?);
-    let a = RegistroBibliografico {
-        id: info.file_id.to_string(),
-        titulo: titulo.to_owned(),
-        autores: autores.to_vec(),
-        editora: editora.map(str::to_owned),
-        idioma: idioma.map(str::to_owned),
-        isbns: isbn.map(str::to_owned).into_iter().collect(),
-        formato: Some(formato),
-        hash: Some(hex(hash)),
-        tamanho: info.tamanho,
-        ..RegistroBibliografico::default()
-    };
-    for l in livros {
-        if vistos.contains(&l.id) {
-            continue;
-        }
-        vistos.push(l.id);
-        let b = RegistroBibliografico {
-            id: format!("livro:{}", l.id),
-            titulo: l.titulo.clone(),
-            autores: l.autores.clone(),
-            editora: l.editora.clone(),
-            idioma: l.idioma.clone(),
-            isbns: l.isbn13.clone().into_iter().collect(),
-            serie: l.serie.clone(),
-            indice_serie: l.indice,
-            ..RegistroBibliografico::default()
-        };
-        let v = comparar(&a, &b);
-        let Some(tipo) = v.tipo else { continue };
-        if tipo == TipoDuplicidade::Exata {
-            continue; // exata só por hash, já tratada antes
-        }
-        let risco = match v.risco {
-            dag_biblio::identidade::Risco::Baixo => store::RiscoDuplicidade::Baixo,
-            dag_biblio::identidade::Risco::Medio => store::RiscoDuplicidade::Medio,
-            dag_biblio::identidade::Risco::Alto => store::RiscoDuplicidade::Alto,
-        };
-        let formato_ref: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM formatos_homologados WHERE livro_id = ?1 ORDER BY id LIMIT 1",
-                [l.id],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(alvo) = formato_ref else { continue };
-        store::registrar_candidato(
-            conn,
-            &store::NovoCandidato {
-                file_id: info.file_id,
-                alvo: store::AlvoDuplicidade::FormatoHomologado(alvo),
-                tipo,
-                evidencias_json: serde_json::json!({
-                    "evidencias": v.evidencias, "contra": v.contraevidencias,
-                    "similaridade_titulo": v.similaridade_titulo, "livro": l.titulo,
-                })
-                .to_string(),
-                risco,
-                bytes: 0,
-            },
-            agora,
-        )?;
-        let tipo_alerta = match tipo {
-            TipoDuplicidade::MesmaEdicao => store::TipoAlerta::MesmaEdicaoOutroFormato,
-            _ => store::TipoAlerta::PossivelMesmaObra,
-        };
-        store::emitir_alerta(
-            conn,
-            &store::NovoAlerta {
-                chave: Some(format!("bib:{}:{}", info.file_id, l.id)),
-                tipo: tipo_alerta,
-                file_id: Some(info.file_id),
-                dados_json: serde_json::json!({"livro_id": l.id, "titulo": l.titulo}).to_string(),
-            },
-            agora,
-        )?;
-    }
-    Ok(())
+fn info_ou_none(a: &Agente, file_id: i64) -> Option<store::InfoArquivo> {
+    store::info_arquivo(a.conexao(), file_id).ok().flatten()
 }

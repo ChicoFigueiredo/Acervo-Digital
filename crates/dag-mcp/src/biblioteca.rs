@@ -316,19 +316,14 @@ fn validar_config(alt: &Value) -> Result<(), String> {
             configuração sensível; peça ao usuário para mudar pela GUI ou pela CLI. Nada foi alterado."
             .into());
     }
-    if let Some(h) = m.get("homologacao").and_then(Value::as_object) {
-        if h.get("senha_env").is_some_and(|v| !v.is_null()) {
-            return Err(
-                "o MCP não altera `homologacao.senha_env`: a senha do servidor nunca \
-                passa pelo MCP; configure pela GUI ou pela CLI. Nada foi alterado."
-                    .into(),
-            );
-        }
-        if let Some(u) = h.get("url").and_then(Value::as_str)
-            && !loopback(u)
-        {
+    // O destino e o modo da escrita aprovada na Homologada (e a política da trava do
+    // calibredb) só mudam pela GUI ou pela CLI: assim o alvo não pode ser redirecionado
+    // entre a proposta e a aprovação humana (ADR 0008).
+    for chave in ["homologacao", "politica_trava"] {
+        if m.get(chave).is_some_and(|v| !v.is_null()) {
             return Err(format!(
-                "`homologacao.url` ({u}) fora do loopback: só 127.0.0.1, localhost ou ::1. Nada foi alterado."
+                "o MCP não altera `{chave}`: o destino e o modo da homologação e a trava do \
+                calibredb só mudam pela GUI ou pela CLI. Nada foi alterado."
             ));
         }
     }

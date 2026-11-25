@@ -655,7 +655,7 @@ fn aprovacao_humana_exigida_vira_explicacao_clara() {
 fn config_definir_recusa_chaves_sensiveis() {
     for (alt, trecho) in [
         (json!({"usar_unshare": true}), "usar_unshare"),
-        (json!({"homologacao": {"senha_env": "X"}}), "senha"),
+        (json!({"homologacao": {"senha_env": "X"}}), "homologacao"),
         (
             json!({"ia": {"endpoint": "http://10.0.0.5:11434"}}),
             "loopback",
@@ -666,7 +666,7 @@ fn config_definir_recusa_chaves_sensiveis() {
         ),
         (
             json!({"homologacao": {"url": "http://exemplo.com:17790"}}),
-            "loopback",
+            "homologacao",
         ),
     ] {
         let t = recusa_de("biblioteca_config_definir", json!({"alteracoes": alt}));
@@ -679,11 +679,17 @@ fn config_definir_recusa_chaves_sensiveis() {
         )
         .contains("desconhecido")
     );
+    for alt in [
+        json!({"homologacao": {"modo": "servidor", "url": "http://127.0.0.1:17790"}}),
+        json!({"politica_trava": "apenas_servidor"}),
+    ] {
+        let t = recusa_de("biblioteca_config_definir", json!({"alteracoes": alt}));
+        assert!(t.contains("só mudam pela GUI ou pela CLI"), "{t}");
+    }
     // O resto passa, inclusive loopback.
     let (c, a) = comando_de(
         "biblioteca_config_definir",
         json!({"alteracoes": {"ia": {"ativa": true, "endpoint": "http://localhost:11434"},
-            "homologacao": {"modo": "servidor", "url": "http://127.0.0.1:17790"},
             "usar_unshare": false, "debounce_s": 10}}),
     );
     assert_eq!(a, Autor::Mcp);

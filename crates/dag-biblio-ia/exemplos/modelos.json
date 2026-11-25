@@ -1,0 +1,41 @@
+{
+  "limiar_confianca": 0.75,
+  "caracteres_por_token": 3.5,
+  "modelos": [
+    {
+      "nome": "gemma3:12b",
+      "quantizacao": "Q4_K_M",
+      "contexto": 8192,
+      "multimodal": true,
+      "endpoint": "http://127.0.0.1:11434",
+      "backend": "ollama",
+      "papel": "primario",
+      "max_tokens_saida": 2048,
+      "seed": 42,
+      "nota": "instalado no computador do Chico (Ollama 0.33.3)"
+    },
+    {
+      "nome": "qwen2.5:14b-instruct-q4_K_M",
+      "quantizacao": "Q4_K_M",
+      "contexto": 8192,
+      "multimodal": false,
+      "endpoint": "http://127.0.0.1:11434",
+      "backend": "ollama",
+      "papel": "secundario",
+      "nota": "a instalar pelo usuário: ollama pull qwen2.5:14b-instruct-q4_K_M (alternativa: qwen3:14b com extras {\"think\": false})"
+    },
+    {
+      "nome": "llama-server-local",
+      "arquivo_gguf": "/modelos/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "quantizacao": "Q4_K_M",
+      "contexto": 8192,
+      "multimodal": false,
+      "endpoint": "http://127.0.0.1:8080",
+      "backend": "open_ai",
+      "modo_saida": "json_schema",
+      "papel": "secundario",
+      "ngl": 99,
+      "nota": "exemplo para llama.cpp (llama-server); não instalado no computador do Chico"
+    }
+  ]
+}

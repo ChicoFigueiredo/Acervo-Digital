@@ -58,7 +58,17 @@ pub struct ConfigExtracaoPdf {
     pub max_paginas_ocr: u32,
     /// Lado maior da capa renderizada, em pixels. Padrão 480.
     pub tamanho_capa: u32,
+    /// Páginas passadas por OCR ao mesmo tempo (um processo `tesseract` cada). Padrão: metade
+    /// dos núcleos, entre 1 e 6.
+    pub paralelo_ocr: u32,
     pub limites: LimitesExecucao,
+}
+
+/// Metade dos núcleos lógicos, entre 1 e 6.
+#[must_use]
+pub fn paralelo_ocr_padrao() -> u32 {
+    let n = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+    u32::try_from(n / 2).unwrap_or(1).clamp(1, 6)
 }
 
 impl Default for ConfigExtracaoPdf {
@@ -74,6 +84,7 @@ impl Default for ConfigExtracaoPdf {
             qualidade_minima_texto: 0.85,
             max_paginas_ocr: 40,
             tamanho_capa: 480,
+            paralelo_ocr: paralelo_ocr_padrao(),
             limites: LimitesExecucao::default(),
         }
     }

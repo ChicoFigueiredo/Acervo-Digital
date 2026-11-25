@@ -3,8 +3,9 @@
 //! candidatos de duplicidade bibliográfica. Retomável: um job órfão volta à fila na abertura e a
 //! extração já gravada é reaproveitada (CA-B13).
 //!
-//! Extração em paralelo: no máximo um arquivo por Dispositivo Físico (até
-//! `max_discos_extracao` discos) em threads; tudo o que escreve no Catálogo, classifica e fala com
+//! Extração em paralelo: até `extracoes_por_dispositivo` arquivos por Dispositivo Físico (e até
+//! `max_discos_extracao × extracoes_por_dispositivo` no total) em threads, cada uma com o OCR de
+//! várias páginas ao mesmo tempo; tudo o que escreve no Catálogo, classifica e fala com
 //! a IA acontece na thread do agente (escritor único, ADR 0004). Pausa e cancelamento valem entre
 //! itens: nada novo sai da fila depois do pedido e o que já está lendo termina.
 
@@ -131,22 +132,36 @@ impl Agente {
             itens_total: u64::try_from(conta.pendentes).unwrap_or(0).min(maximo),
             ..ProgressoBiblioteca::default()
         };
-        let max_discos = cfg.max_discos_extracao.max(1) as usize;
+        // Até `extracoes_por_dispositivo` arquivos por Dispositivo Físico e até
+        // `max_discos_extracao × extracoes_por_dispositivo` no total. A extração (OCR) é CPU; a IA
+        // fica na thread do agente, numa fila única (a placa de vídeo comporta um modelo por vez).
+        let por_disp = cfg.extracoes_por_dispositivo.max(1) as usize;
+        let max_em_voo = cfg.max_discos_extracao.max(1) as usize * por_disp;
         let (tx, rx): (Sender<Pronto>, Receiver<Pronto>) = channel();
         let mut ocupados: Vec<i64> = Vec::new();
         let mut em_voo = 0_usize;
         let mut pegos = 0_u64;
         loop {
-            // Despacha enquanto couber: um arquivo por disco, até `max_discos` discos.
+            // Despacha enquanto couber.
             let mut despachou = false;
-            while pegos < maximo && em_voo < max_discos {
+            while pegos < maximo && em_voo < max_em_voo {
                 if !self.seguir_biblioteca() {
                     r.interrompido = true;
                     break;
                 }
                 let agora = self.agora_biblio();
+                let cheios: Vec<i64> = {
+                    let mut v: Vec<i64> = ocupados
+                        .iter()
+                        .copied()
+                        .filter(|d| ocupados.iter().filter(|x| *x == d).count() >= por_disp)
+                        .collect();
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                };
                 let Some((job, disp)) =
-                    store::pegar_proximo_job_fora(self.conexao(), agora, &ocupados)?
+                    store::pegar_proximo_job_fora(self.conexao(), agora, &cheios)?
                 else {
                     break;
                 };

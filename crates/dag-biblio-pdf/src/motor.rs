@@ -59,8 +59,11 @@ impl From<ErroProc> for ErroMotor {
     }
 }
 
-/// Acesso às páginas de um documento.
-pub trait Motor {
+/// OCR de uma página: saída e milissegundos gastos.
+type ResultadoOcr = Result<(ocr::SaidaOcr, f64), ErroMotor>;
+
+/// Acesso às páginas de um documento. `Sync`: o OCR roda várias páginas em paralelo.
+pub trait Motor: Sync {
     /// Texto nativo das páginas `de..=ate` (1-based), uma `String` por página, nessa ordem.
     fn texto_nativo(&self, de: u32, ate: u32, timeout: Duration) -> Result<Vec<String>, ErroMotor>;
     /// Páginas (dentro do intervalo) com imagem grande. `None` se não for possível saber.
@@ -368,11 +371,82 @@ impl<'a> Analise<'a> {
                 para_ocr.push(p);
             }
         }
-        for p in para_ocr {
+        self.ocr_em_paralelo(&para_ocr);
+    }
+
+    /// OCR de várias páginas ao mesmo tempo (`paralelo_ocr` processos), aplicando os resultados
+    /// na ordem das páginas. Os limites (páginas de OCR, tempo total) valem por lote.
+    fn ocr_em_paralelo(&mut self, paginas: &[u32]) {
+        let lote = self.cfg.paralelo_ocr.max(1) as usize;
+        let mut resto = paginas;
+        while !resto.is_empty() {
             if self.limite.is_some() {
                 break;
             }
-            self.fazer_ocr(p);
+            let Some(ocr_cfg) = &self.ocr else {
+                // Sem OCR: o caminho sequencial só registra o aviso uma vez.
+                self.fazer_ocr(resto[0]);
+                return;
+            };
+            let livres = self
+                .cfg
+                .max_paginas_ocr
+                .saturating_sub(self.paginas_ocr.len() as u32) as usize;
+            if livres == 0 || self.restante().is_zero() {
+                // Deixa o caminho sequencial registrar o aviso/limite certo.
+                self.fazer_ocr(resto[0]);
+                return;
+            }
+            let n = lote.min(livres).min(resto.len());
+            let (agora, depois) = resto.split_at(n);
+            resto = depois;
+            if n == 1 {
+                self.fazer_ocr(agora[0]);
+                continue;
+            }
+            let motor = self.motor;
+            let cfg = self.cfg;
+            let tesseract = ocr_cfg.tesseract;
+            let idiomas = ocr_cfg.idiomas.clone();
+            let timeout = cfg.limites.timeout_pagina.min(self.restante());
+            let resultados: Vec<(u32, ResultadoOcr)> = std::thread::scope(|s| {
+                let alcas: Vec<_> = agora
+                    .iter()
+                    .map(|&p| {
+                        let idiomas = idiomas.as_str();
+                        s.spawn(move || {
+                            let t0 = Instant::now();
+                            let r = motor
+                                .imagem_para_ocr(p, cfg.dpi_ocr, timeout)
+                                .and_then(|img| {
+                                    ocr::reconhecer(
+                                        tesseract,
+                                        &img,
+                                        idiomas,
+                                        timeout,
+                                        cfg.limites.max_bytes_saida,
+                                    )
+                                    .map_err(ErroMotor::from)
+                                })
+                                .map(|s| (s, ms(t0.elapsed())));
+                            (p, r)
+                        })
+                    })
+                    .collect();
+                alcas
+                    .into_iter()
+                    .map(|a| {
+                        a.join()
+                            .unwrap_or_else(|_| (0, Err(ErroMotor::Falha("OCR em pânico".into()))))
+                    })
+                    .collect()
+            });
+            for (p, r) in resultados {
+                match r {
+                    Ok((saida, gasto)) => self.aplicar_ocr(p, saida, gasto, &idiomas),
+                    Err(e) => self.falha_ocr(p, &e),
+                }
+            }
         }
     }
 
@@ -445,6 +519,10 @@ impl<'a> Analise<'a> {
             Err(e) => return self.falha_ocr(p, &ErroMotor::from(e)),
         };
         let gasto = ms(t0.elapsed());
+        self.aplicar_ocr(p, saida, gasto, &idiomas);
+    }
+
+    fn aplicar_ocr(&mut self, p: u32, saida: ocr::SaidaOcr, gasto: f64, idiomas: &str) {
         self.paginas_ocr.push(p);
         if let Some(m) = self.medicoes.get_mut(&p) {
             m.tempo_ocr_ms = Some(gasto);
@@ -462,7 +540,13 @@ impl<'a> Analise<'a> {
             .map_or(0, |pt| contar_alfanumericos(&pt.texto));
         if contar_alfanumericos(&saida.texto) > nativo {
             self.paginas.remove(&p);
-            self.registrar_texto(p, saida.texto, true, saida.confianca, Some(idiomas));
+            self.registrar_texto(
+                p,
+                saida.texto,
+                true,
+                saida.confianca,
+                Some(idiomas.to_owned()),
+            );
         }
     }
 

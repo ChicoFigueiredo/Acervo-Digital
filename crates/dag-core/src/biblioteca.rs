@@ -134,6 +134,9 @@ pub struct ConfigOcrBiblioteca {
     pub dpi: u32,
     pub max_paginas: u32,
     pub paginas_iniciais: u32,
+    /// Páginas em OCR ao mesmo tempo dentro de um livro; 0 = automático (metade dos núcleos,
+    /// dividida pelas extrações simultâneas).
+    pub paralelo: u32,
 }
 
 impl Default for ConfigOcrBiblioteca {
@@ -144,6 +147,7 @@ impl Default for ConfigOcrBiblioteca {
             dpi: 300,
             max_paginas: 6,
             paginas_iniciais: 20,
+            paralelo: 0,
         }
     }
 }
@@ -188,7 +192,7 @@ pub struct ConfigBiblioteca {
     pub destino_a_classificar: String,
     pub ocr: ConfigOcrBiblioteca,
     pub ia: ConfigIaBiblioteca,
-    /// Extrações simultâneas por Dispositivo Físico (a fila processa uma por vez; 1 = padrão).
+    /// Extrações simultâneas por Dispositivo Físico (padrão 2: o OCR é CPU, não disco).
     pub extracoes_por_dispositivo: u32,
     pub max_bytes_arquivo: u64,
     pub tentativas_max: u32,
@@ -245,7 +249,7 @@ impl Default for ConfigBiblioteca {
             destino_a_classificar: "/mnt/e2/Livros_A_Classificar".into(),
             ocr: ConfigOcrBiblioteca::default(),
             ia: ConfigIaBiblioteca::default(),
-            extracoes_por_dispositivo: 1,
+            extracoes_por_dispositivo: 2,
             max_bytes_arquivo: 4 * 1024 * 1024 * 1024,
             tentativas_max: 3,
             usar_unshare: false,

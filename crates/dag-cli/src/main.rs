@@ -4,8 +4,13 @@
 //!
 //! Códigos de saída: 0 ok; 1 erro; 2 ainda não implementado; 130 varredura cancelada (Ctrl-C).
 
+mod biblioteca;
+mod escrita;
 mod lixeira;
+mod modelos;
+mod ouro;
 mod saida;
+mod saida_biblioteca;
 mod seguir;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -483,6 +488,13 @@ enum Sub {
     /// Operações sobre o Catálogo
     #[command(subcommand)]
     Catalogo(Catalogo),
+    /// Curadoria Bibliográfica (Calibre): registrar, sincronizar, duplicatas, fila, revisão,
+    /// cadastro e homologação. A Biblioteca Homologada é só leitura
+    #[command(subcommand)]
+    Biblioteca(biblioteca::Biblioteca),
+    /// Modelos de IA local: perfis e benchmark (não usa o agente)
+    #[command(subcommand)]
+    Modelos(modelos::Modelos),
     /// Servidor MCP por stdio
     Mcp,
     /// Agente em segundo plano: único escritor do Catálogo, serve o socket local e monitora as
@@ -943,7 +955,12 @@ fn montar(sub: Sub) -> Option<Comando> {
             },
         },
         Sub::Catalogo(Catalogo::Backup { destino }) => Comando::BackupCatalogo { destino },
-        Sub::Mcp | Sub::Agente { .. } | Sub::Acompanhar | Sub::Desktop(_) => return None,
+        Sub::Mcp
+        | Sub::Agente { .. }
+        | Sub::Acompanhar
+        | Sub::Desktop(_)
+        | Sub::Biblioteca(_)
+        | Sub::Modelos(_) => return None,
     })
 }
 
@@ -969,6 +986,12 @@ fn codigo_de_saida(r: &Resposta) -> u8 {
         Resposta::Erro { codigo, .. } if codigo == "nao_implementado" => 2,
         Resposta::Erro { .. } => 1,
         Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada" => 130,
+        Resposta::Biblioteca {
+            dados: dag_core::DadosBiblioteca::Processada { resumo },
+        } if resumo.interrompido => 130,
+        Resposta::Biblioteca {
+            dados: dag_core::DadosBiblioteca::Enfileirada { resumo },
+        } if resumo.interrompido => 130,
         Resposta::Lixeira { resultado }
             if resultado.total_arquivos == 0 && !resultado.recusados.is_empty() =>
         {
@@ -1005,11 +1028,24 @@ fn executar(cli: Cli) -> Execucao {
         }),
         _ => None,
     };
-    let Some(comando) = montar(cli.comando) else {
-        return sem(Resposta::Erro {
-            codigo: "nao_implementado".into(),
-            mensagem: "subcomando sem comando associado".into(),
-        });
+    let mut fluxo = biblioteca::Fluxo::Simples;
+    let comando = match cli.comando {
+        Sub::Biblioteca(b) => match biblioteca::preparar(b, saida::agora_s()) {
+            Ok((c, f)) => {
+                fluxo = f;
+                c
+            }
+            Err(e) => return sem(*e),
+        },
+        outro => match montar(outro) {
+            Some(c) => c,
+            None => {
+                return sem(Resposta::Erro {
+                    codigo: "nao_implementado".into(),
+                    mensagem: "subcomando sem comando associado".into(),
+                });
+            }
+        },
     };
     if let Some(n) = incremento_pendente(&comando) {
         return sem(Resposta::Erro {
@@ -1043,6 +1079,46 @@ fn executar(cli: Cli) -> Execucao {
         Err(e) => return sem(e.para_resposta()),
     };
     instalar_ctrl_c(conexao.cancelador());
+    // Fluxos de vários passos da curadoria (homologação com confirmação dupla, conjunto ouro).
+    match fluxo {
+        biblioteca::Fluxo::Simples => {}
+        biblioteca::Fluxo::Homologar(op) => {
+            let mut exibidor = ExibidorStderr::novo();
+            let mut enviar = |c: Comando| match conexao.enviar(
+                Pedido {
+                    autor: Autor::Cli,
+                    comando: c,
+                },
+                &mut |p| exibidor.mostrar(p),
+            ) {
+                Ok(r) => r,
+                Err(e) => e.para_resposta(),
+            };
+            let stdin = std::io::stdin();
+            let tem_terminal = std::io::IsTerminal::is_terminal(&stdin);
+            return sem(biblioteca::fluxo_homologar(
+                &op,
+                &mut enviar,
+                tem_terminal,
+                &mut stdin.lock(),
+                &mut std::io::stderr(),
+            ));
+        }
+        biblioteca::Fluxo::OuroExportar(op) => {
+            let mut exibidor = ExibidorStderr::novo();
+            let mut enviar = |c: Comando| match conexao.enviar(
+                Pedido {
+                    autor: Autor::Cli,
+                    comando: c,
+                },
+                &mut |p| exibidor.mostrar(p),
+            ) {
+                Ok(r) => r,
+                Err(e) => e.para_resposta(),
+            };
+            return sem(biblioteca::fluxo_ouro_exportar(&op, &mut enviar));
+        }
+    }
     if let (
         Some(conf),
         Comando::MoverParaLixeira {
@@ -1084,6 +1160,15 @@ fn executar(cli: Cli) -> Execucao {
         }
     }
     let eh_status = matches!(comando, Comando::Status { .. });
+    // Trabalhos longos da curadoria terminam mostrando `dag jobs` (o que o agente ainda faz).
+    let quer_jobs = eh_status
+        || matches!(
+            comando,
+            Comando::BibliotecaProcessar { .. }
+                | Comando::BibliotecaSincronizar { .. }
+                | Comando::BibliotecaEnfileirar { .. }
+                | Comando::BibliotecaCadastrar { .. }
+        );
     let mut exibidor = ExibidorStderr::novo();
     let resposta = match conexao.enviar(
         Pedido {
@@ -1097,7 +1182,7 @@ fn executar(cli: Cli) -> Execucao {
     };
     let agente = eh_status.then(|| conexao.info_daemon());
     // O estado de um agente inclui o que ele está fazendo, seja quem for que pediu.
-    let jobs = (eh_status && conexao.eh_daemon())
+    let jobs = (quer_jobs && conexao.eh_daemon())
         .then(|| {
             conexao
                 .enviar(
@@ -1352,6 +1437,14 @@ fn main() -> ExitCode {
     }
     if let Sub::Desktop(d) = &cli.comando {
         return atalho_desktop(d);
+    }
+    if let Sub::Modelos(m) = cli.comando {
+        return modelos::executar(m, cli.json);
+    }
+    if let Sub::Biblioteca(biblioteca::Biblioteca::Ouro(biblioteca::Ouro::Avaliar { casos })) =
+        cli.comando
+    {
+        return ouro::comando_avaliar(&casos, cli.json);
     }
     let json = cli.json;
     if matches!(cli.comando, Sub::Acompanhar)

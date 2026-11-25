@@ -6,8 +6,10 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+mod biblioteca;
 mod ferramentas;
 mod resumo;
+mod resumo_biblioteca;
 mod servidor;
 
 pub use ferramentas::{Ferramenta, montar, todas};

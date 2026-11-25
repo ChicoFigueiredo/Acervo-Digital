@@ -1125,3 +1125,49 @@ fn tabelas_tem_cabecalho_ordenavel_com_seta_e_larguras_guardadas() {
         assert!(a.quadro_texto().contains(&marca), "{pagina}: seta ▼");
     }
 }
+
+#[test]
+fn paginas_da_biblioteca_desenham_vazias_e_em_janela_baixa() {
+    let mut a = ambiente_populado();
+    let paginas_bib = paginas::biblioteca::todas();
+    assert_eq!(paginas_bib.len(), 9);
+    for p in &paginas_bib {
+        a.abrir(p.id);
+        for _ in 0..3 {
+            a.quadro();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..2 {
+            let entrada = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(720.0, 300.0))),
+                ..Default::default()
+            };
+            a.ctx
+                .run_ui(entrada, |ui| a.casca.desenhar(ui))
+                .drop_without_applying_deltas();
+        }
+    }
+}
+
+#[test]
+fn biblioteca_visao_geral_pergunta_ao_agente_e_mostra_a_configuracao() {
+    let mut a = ambiente_populado();
+    a.abrir("biblioteca");
+    a.ate("bibliotecas e resumo chegarem", |app| {
+        app.biblioteca.bibliotecas.is_some() && app.biblioteca.resumo.is_some()
+    });
+    assert!(
+        a.casca
+            .app
+            .biblioteca
+            .bibliotecas
+            .as_ref()
+            .unwrap()
+            .is_empty()
+    );
+    a.abrir("biblioteca-configuracoes");
+    a.ate("configuração chegar", |app| {
+        app.biblioteca.config.is_some()
+    });
+    assert!(!a.quadro_texto().is_empty());
+}

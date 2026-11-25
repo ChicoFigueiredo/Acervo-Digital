@@ -51,10 +51,10 @@ pub fn campo_do_nome(nome: &str) -> Option<Campo> {
     CAMPOS_IA.iter().copied().find(|c| nome_campo(*c) == nome)
 }
 
-fn esquema_evidencias() -> Value {
+fn esquema_evidencias(max: u32) -> Value {
     json!({
         "type": "array",
-        "maxItems": 2,
+        "maxItems": max,
         "items": {
             "type": "object",
             "properties": {
@@ -67,13 +67,13 @@ fn esquema_evidencias() -> Value {
     })
 }
 
-fn esquema_campo(valor: Value) -> Value {
+fn esquema_campo(valor: Value, max_evidencias: u32) -> Value {
     // A confiança autodeclarada pelo modelo não é pedida nem usada (medição: sempre 1,0).
     json!({
         "type": "object",
         "properties": {
             "valor": valor,
-            "evidencias": esquema_evidencias()
+            "evidencias": esquema_evidencias(max_evidencias)
         },
         "required": ["valor", "evidencias"],
         "additionalProperties": false
@@ -132,7 +132,10 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
             }
             _ => texto_ou_nulo(),
         };
-        props.insert(nome_campo(c), esquema_campo(valor));
+        // Duas evidências só nos campos críticos; nos demais basta uma (cada evidência custa
+        // dezenas de tokens de saída, e a saída longa é o que mais pesa na IA local).
+        let max_ev = if CAMPOS_CRITICOS.contains(&c) { 2 } else { 1 };
+        props.insert(nome_campo(c), esquema_campo(valor, max_ev));
     }
     let nomes: Vec<String> = CAMPOS_IA.iter().map(|c| nome_campo(*c)).collect();
     json!({
@@ -151,7 +154,7 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
                     "type": "object",
                     "properties": {
                         "tag": {"type": "string", "maxLength": 80},
-                        "evidencias": esquema_evidencias()
+                        "evidencias": esquema_evidencias(1)
                     },
                     "required": ["tag", "evidencias"],
                     "additionalProperties": false

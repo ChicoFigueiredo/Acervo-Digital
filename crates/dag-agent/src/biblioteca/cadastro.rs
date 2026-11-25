@@ -260,7 +260,7 @@ impl Agente {
             };
             let hash = match info.hash {
                 Some(h) => h,
-                None => match blake3_arquivo(Path::new(&info.caminho)) {
+                None => match blake3_arquivo(&info.caminho_no_disco()) {
                     Ok(h) => h,
                     Err(e) => {
                         resultados.push(ResultadoCadastro {
@@ -315,7 +315,7 @@ impl Agente {
             }
             let (metadados, confianca) = metadados_do_arquivo(conn, fid, &cfg)?;
             let livro = NovoLivro {
-                arquivo: Path::new(&info.caminho).to_path_buf(),
+                arquivo: info.caminho_no_disco(),
                 hash_blake3: hex(&hash),
                 capa: None,
                 confianca,

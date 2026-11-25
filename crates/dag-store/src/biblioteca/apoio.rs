@@ -34,6 +34,16 @@ pub struct InfoArquivo {
     pub alocado: Option<u64>,
 }
 
+impl InfoArquivo {
+    /// Caminho de verdade no disco, a partir dos bytes (`path_raw`). `caminho` é só para exibir e
+    /// perde bytes inválidos em UTF-8 (nomes antigos em Latin-1): abrir por ele falha.
+    #[must_use]
+    pub fn caminho_no_disco(&self) -> std::path::PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&self.path_raw))
+    }
+}
+
 const SELECT_INFO: &str =
     "SELECT f.id, f.volume_id, v.rotulo, v.device_id, v.mounted, f.path_raw, f.path_display,
         f.name_display, f.logical_bytes, f.mtime_ns, f.state, f.na_lixeira,

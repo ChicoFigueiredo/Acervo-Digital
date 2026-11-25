@@ -224,7 +224,11 @@ impl Agente {
                 }
                 if let Ok(m) = std::fs::metadata(&f.caminho) {
                     use std::os::unix::fs::MetadataExt;
-                    f.mtime_ns = Some(m.mtime() * 1_000_000_000 + m.mtime_nsec());
+                    f.mtime_ns = Some(
+                        m.mtime()
+                            .saturating_mul(1_000_000_000)
+                            .saturating_add(m.mtime_nsec()),
+                    );
                 }
             }
             formatos += e.formatos.len() as u64;
@@ -417,10 +421,7 @@ impl Agente {
 }
 
 fn endereco_local(e: &str) -> bool {
-    let sem = e
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    sem.starts_with("127.0.0.1") || sem.starts_with("localhost") || sem.starts_with("[::1]")
+    dag_biblio_ia::cliente::endpoint_e_loopback(e)
 }
 
 fn mesclar(base: &mut serde_json::Value, patch: &serde_json::Value) {

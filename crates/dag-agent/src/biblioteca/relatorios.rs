@@ -107,6 +107,10 @@ impl Agente {
         &mut self,
         volume: Option<&str>,
     ) -> Result<Resposta, ErroAgente> {
+        // Abaixo do tamanho mínimo (1 KiB) não há duplicata: a Homologada real tem formatos de 0
+        // byte, que casariam com as ~139 mil entradas vazias do Catálogo.
+        let minimo =
+            i64::try_from(self.config_biblioteca().tamanho_minimo_duplicata).unwrap_or(i64::MAX);
         let conn = self.conexao();
         let vol: Option<i64> = volume.and_then(|v| {
             v.parse().ok().or_else(|| {
@@ -124,10 +128,11 @@ impl Agente {
              JOIN hashes h INDEXED BY idx_hashes_dup ON h.size_bytes = fh.tamanho AND h.hash = fh.hash
              JOIN files f ON f.id = h.file_id
              WHERE fh.hash IS NOT NULL AND f.state = 'ativo' AND f.na_lixeira = 0
+               AND fh.tamanho >= ?2
                AND (?1 IS NULL OR f.volume_id = ?1)",
         )?;
         let arquivos: Vec<ArquivoEspaco> = st
-            .query_map([vol], |l| {
+            .query_map(rusqlite::params![vol, minimo], |l| {
                 let dev: Option<i64> = l.get(2)?;
                 let ino: Option<i64> = l.get(3)?;
                 let hash: Option<Vec<u8>> = l.get(7)?;

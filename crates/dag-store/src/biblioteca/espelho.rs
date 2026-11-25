@@ -170,6 +170,11 @@ pub fn gravar_lote(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(livro_id, formato) DO UPDATE SET
             caminho = excluded.caminho,
+            -- Renomeado no Calibre (título ou autor editado): o vínculo antigo aponta para um
+            -- caminho que não é mais o do formato e faria o arquivo atual parecer uma cópia
+            -- de fora. Zera; `ligar_formatos_por_caminho` religa pelo caminho novo.
+            file_id = CASE WHEN formatos_homologados.caminho = excluded.caminho
+                           THEN formatos_homologados.file_id ELSE NULL END,
             hash = CASE WHEN formatos_homologados.tamanho = excluded.tamanho
                          AND formatos_homologados.mtime_ns IS excluded.mtime_ns
                         THEN formatos_homologados.hash ELSE NULL END,

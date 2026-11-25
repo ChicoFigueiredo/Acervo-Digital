@@ -42,6 +42,11 @@ pub(crate) fn vigiar(
     };
     let debounce = i64::try_from(cfg.debounce_s).unwrap_or(i64::MAX);
     let mut ultimo = marca;
+    // Topo dos eventos no começo da passada: se nada que interessa sobrou até ele, a marca-d'água
+    // anda até lá. Sem isso, uma enxurrada de eventos `removido` depois do último `criado` seria
+    // relida inteira a cada passada do monitor.
+    let topo = store::ultimo_evento_id(conn)?;
+    let mut completo = true;
     'fora: loop {
         let eventos = store::eventos_de_novidade(conn, ultimo, LOTE)?;
         if eventos.is_empty() {
@@ -51,6 +56,7 @@ pub(crate) fn vigiar(
             if agora - ev.observado_em < debounce {
                 // Não avança além do primeiro evento instável: mantém a ordem.
                 r.adiados += 1;
+                completo = false;
                 break 'fora;
             }
             r.examinados += 1;
@@ -114,6 +120,9 @@ pub(crate) fn vigiar(
         if eventos.len() < LOTE {
             break;
         }
+    }
+    if completo {
+        ultimo = ultimo.max(topo);
     }
     if ultimo != marca {
         dag_store::configuracao::gravar(conn, CHAVE_MARCA, &ultimo.to_string())?;

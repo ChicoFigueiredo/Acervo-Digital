@@ -333,6 +333,78 @@ fn ligacao_com_o_catalogo_reusa_hashes_e_acha_iguais() {
 }
 
 #[test]
+fn formato_renomeado_no_calibre_perde_o_vinculo_e_hash_velho_nao_e_importado() {
+    let cat = cat();
+    let c = cat.armazem().conexao();
+    let (vol, f) = volume_e_arquivos(c, 2);
+    let b = bib(c, "/lib/h", PapelBiblioteca::Homologada);
+    let mut l1 = livro(1, "A", &[("PDF", 1000)]);
+    l1.formatos[0].caminho = "/b/f0".into();
+    sincronizar_espelho(c, b, vec![l1.clone()], 1).unwrap();
+    assert_eq!(
+        ligar_formatos_por_caminho(c, b, vol, "", 0, 100).unwrap().0,
+        1
+    );
+    // O Catálogo tem o hash de f0, mas o arquivo mudou depois (mtime diferente): não vale.
+    c.execute("UPDATE files SET mtime_ns = 5 WHERE id = ?1", [f[0]])
+        .unwrap();
+    c.execute(
+        "INSERT INTO hashes (file_id, hash, hashed_at, size_bytes, mtime_ns) VALUES (?1, ?2, 1, 1000, 4)",
+        rusqlite::params![f[0], hash(1).as_slice()],
+    )
+    .unwrap();
+    assert_eq!(importar_hashes_do_catalogo(c, b, 0, 100, 5).unwrap().0, 0);
+    c.execute("UPDATE hashes SET mtime_ns = 5 WHERE file_id = ?1", [f[0]])
+        .unwrap();
+    assert_eq!(importar_hashes_do_catalogo(c, b, 0, 100, 5).unwrap().0, 1);
+    // O Calibre renomeou a pasta (título editado): mesmo conteúdo, caminho novo. O vínculo
+    // velho não pode ficar, ou o arquivo atual da Homologada viraria "cópia de fora".
+    l1.formatos[0].caminho = "/b/f1".into();
+    sincronizar_espelho(c, b, vec![l1], 2).unwrap();
+    let livro_id: i64 = c
+        .query_row(
+            "SELECT id FROM livros_homologados WHERE calibre_id = 1",
+            [],
+            |l| l.get(0),
+        )
+        .unwrap();
+    let fm = formatos_do_livro(c, livro_id).unwrap().remove(0);
+    assert_eq!(fm.file_id, None, "vínculo antigo zerado");
+    assert!(fm.hash.is_some(), "o conteúdo é o mesmo: o hash fica");
+    assert_eq!(
+        ligar_formatos_por_caminho(c, b, vol, "", 0, 100).unwrap().0,
+        1
+    );
+    assert_eq!(
+        formatos_do_livro(c, fm.livro_id).unwrap()[0].file_id,
+        Some(f[1])
+    );
+}
+
+#[test]
+fn caminho_no_disco_usa_os_bytes_e_nao_o_texto_de_exibicao() {
+    use std::os::unix::ffi::OsStrExt;
+    let cat = cat();
+    let c = cat.armazem().conexao();
+    let (_, f) = volume_e_arquivos(c, 1);
+    let bruto: Vec<u8> = b"/b/Caf\xe9.pdf".to_vec(); // Latin-1: inválido em UTF-8
+    c.execute(
+        "UPDATE files SET path_raw = ?2, path_display = '/b/Caf\u{fffd}.pdf' WHERE id = ?1",
+        rusqlite::params![f[0], bruto],
+    )
+    .unwrap();
+    let info = info_arquivo(c, f[0]).unwrap().unwrap();
+    assert_eq!(
+        info.caminho_no_disco().as_os_str().as_bytes(),
+        b"/b/Caf\xe9.pdf"
+    );
+    assert_ne!(
+        info.caminho.as_bytes(),
+        info.caminho_no_disco().as_os_str().as_bytes()
+    );
+}
+
+#[test]
 fn listagem_de_livros_pagina_por_cursor() {
     let cat = cat();
     let c = cat.armazem().conexao();

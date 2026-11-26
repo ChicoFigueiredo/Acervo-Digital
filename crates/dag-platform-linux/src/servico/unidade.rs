@@ -102,7 +102,11 @@ pub fn gerar(c: &ConfigUnidade) -> Result<String, ErroServico> {
          # ProtectSystem=full mantém /usr, /boot e /etc somente leitura.\n\
          NoNewPrivileges=yes\n\
          ProtectSystem=full\n\
-         PrivateTmp=yes\n",
+         PrivateTmp=yes\n\
+         # O systemd cria $XDG_RUNTIME_DIR/dag (socket do agente) antes de montar o namespace: sem\n\
+         # isso, depois de um reboot a pasta não existe e ReadWritePaths falha (226/NAMESPACE).\n\
+         RuntimeDirectory=dag\n\
+         RuntimeDirectoryPreserve=yes\n",
     );
     if !rw.is_empty() {
         u.push_str(&format!("ReadWritePaths={}\n", rw.join(" ")));

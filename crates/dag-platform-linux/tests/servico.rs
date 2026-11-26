@@ -173,6 +173,7 @@ fn conteudo_da_unidade() {
         "NoNewPrivileges=yes",
         "ProtectSystem=full",
         "PrivateTmp=yes",
+        "RuntimeDirectory=dag\n",
         "Nice=10",
         "IOSchedulingClass=idle",
         "ReadWritePaths=\"/home/u/.local/share/dag\" \"/home/u/dir com espaço\" \"/run/user/1000/dag\"\n",

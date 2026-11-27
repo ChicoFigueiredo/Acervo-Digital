@@ -401,6 +401,29 @@ fn limite_de_membros_e_de_tempo() {
     );
 }
 
+/// A classificação do zip (EPUB? CBZ? compactado?) percorre os Membros uma vez e a extração
+/// percorre de novo: cada Membro conta uma vez só no limite, não duas.
+#[test]
+fn membros_nao_contam_duas_vezes_entre_classificar_e_extrair() {
+    let entradas: Vec<(String, Vec<u8>)> = (0..7)
+        .map(|i| (format!("f{i}.txt"), vec![b'x'; 10]))
+        .collect();
+    let refs: Vec<(&str, Vec<u8>)> = entradas
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.clone()))
+        .collect();
+    let opc = OpcoesExtracao {
+        limites: LimitesConteiner {
+            membros_max: 10,
+            ..LimitesConteiner::default()
+        },
+        ..OpcoesExtracao::default()
+    };
+    let c = compactado(&zip(&refs), &opc);
+    assert_eq!(c.estado, EstadoLeitura::Lido, "{:?}", c.estado);
+    assert_eq!(c.membros_vistos, 7);
+}
+
 #[test]
 fn zip_com_senha_e_corrompido() {
     let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));

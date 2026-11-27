@@ -63,6 +63,20 @@ impl Medidor {
         }
     }
 
+    /// Medidor para uma passada de reconhecimento sobre a mesma entrada: mesmo relógio, contagens
+    /// zeradas. A classificação e a extração percorrem os mesmos Membros; sem isto cada Membro
+    /// contaria duas vezes (um zip de 30 mil Membros estourava o limite de 50 mil).
+    pub(crate) fn para_reconhecer(&self) -> Self {
+        Self {
+            limites: self.limites.clone(),
+            inicio: self.inicio,
+            entrada: self.entrada,
+            lidos: Cell::new(0),
+            declarados: Cell::new(0),
+            membros: Cell::new(0),
+        }
+    }
+
     pub(crate) fn limites(&self) -> &LimitesConteiner {
         &self.limites
     }

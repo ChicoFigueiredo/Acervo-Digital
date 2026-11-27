@@ -2604,3 +2604,46 @@ fn priorizar_por_tamanho_poe_o_maior_na_frente_mesmo_com_espera_menor() {
     );
     assert!(primeiro(&mut a).ends_with("grande.pdf"));
 }
+
+#[test]
+fn copias_identicas_na_mesma_rodada_extraem_uma_vez_so() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let e = Ambiente::novo();
+    let conteudo = corpo(43, 60_000);
+    for d in ["a", "b", "c"] {
+        fs::create_dir_all(e.m.downloads.join(d)).unwrap();
+        fs::write(e.m.downloads.join(format!("{d}/livro.pdf")), &conteudo).unwrap();
+    }
+    let extracoes = Arc::new(AtomicUsize::new(0));
+    let cont = Arc::clone(&extracoes);
+    let ext = ExtratorRoteiro::novo(move |_| {
+        cont.fetch_add(1, Ordering::SeqCst);
+        // Devagar o bastante para as três cópias serem pegas antes de a primeira terminar.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Um Livro",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"extracoes_por_dispositivo": 4}),
+    });
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1, "{r:?}");
+    assert_eq!(r.pendentes_restantes, 0, "{r:?}");
+    let copias = alertas(&mut a)
+        .iter()
+        .filter(|al| format!("{al:?}").contains("arquivo_igual"))
+        .count();
+    assert_eq!(copias, 2);
+}

@@ -22,6 +22,7 @@ use dag_biblio::{
 use dag_biblio_ia::ResultadoClassificacao;
 use dag_core::{DadosBiblioteca, ProgressoBiblioteca, Resposta, ResumoProcessamento};
 use dag_store::biblioteca as store;
+use rusqlite::Connection;
 
 use super::extracao::{ClassificadorIa, IaIndisponivel, IaLocal, SaidaMembro};
 use super::fila::formato_para_fila;
@@ -211,10 +212,15 @@ impl Agente {
         let mut ocupados: Vec<i64> = Vec::new();
         let mut em_voo = 0_usize;
         let mut pegos = 0_u64;
+        // Cópias idênticas ficam lado a lado na fila (ordem por tamanho): a segunda espera a
+        // primeira terminar e sai como Duplicata Exata dela, sem extrair de novo. `voando`: jobs
+        // em extração ou no lote, com o hash; `adiados`: cópias à espera do original.
+        let mut voando: Vec<(i64, [u8; 32])> = Vec::new();
+        let mut adiados: Vec<(store::Job, i64, [u8; 32])> = Vec::new();
         loop {
             // Despacha enquanto couber.
             let mut despachou = false;
-            while pegos < maximo && em_voo < max_em_voo {
+            while (pegos < maximo || !adiados.is_empty()) && em_voo < max_em_voo {
                 if !pend.is_empty()
                     && !matches!(
                         self.controle.estado(),
@@ -247,12 +253,25 @@ impl Agente {
                     v.dedup();
                     v
                 };
-                let Some((job, disp)) =
-                    store::pegar_proximo_job_fora(self.conexao(), agora, &cheios)?
-                else {
-                    break;
+                podar_voando(self.conexao(), &mut voando)?;
+                let pronto_adiado = adiados.iter().position(|(_, d, h)| {
+                    !cheios.contains(d) && !voando.iter().any(|(_, v)| v == h)
+                });
+                let (job, disp, retomado) = if let Some(i) = pronto_adiado {
+                    let (j, d, _) = adiados.swap_remove(i);
+                    (j, d, true)
+                } else {
+                    if pegos >= maximo {
+                        break;
+                    }
+                    let Some((j, d)) =
+                        store::pegar_proximo_job_fora(self.conexao(), agora, &cheios)?
+                    else {
+                        break;
+                    };
+                    pegos += 1;
+                    (j, d, false)
                 };
-                pegos += 1;
                 despachou = true;
                 prog.item_atual =
                     store::info_arquivo(self.conexao(), job.file_id)?.map(|i| i.caminho);
@@ -265,12 +284,18 @@ impl Agente {
                         ))
                     });
                 match preparo {
+                    Ok(Preparo::Extrair { hash, .. })
+                        if !retomado && voando.iter().any(|(_, v)| *v == hash) =>
+                    {
+                        adiados.push((job, disp, hash));
+                    }
                     Ok(Preparo::Extrair {
                         info,
                         hash,
                         caminho,
                         formato,
                     }) => {
+                        voando.push((job.id, hash));
                         ocupados.push(disp);
                         em_voo += 1;
                         let extrator = Arc::clone(&self.biblio.extrator);
@@ -381,6 +406,10 @@ impl Agente {
                 if despachou {
                     continue; // o que saiu da fila já foi concluído sem extração
                 }
+                if !adiados.is_empty() && !r.interrompido {
+                    voando.clear(); // nada em extração nem no lote: os originais terminaram
+                    continue;
+                }
                 break;
             }
             // Espera uma extração (acordando para ver pausa/cancelamento).
@@ -449,6 +478,10 @@ impl Agente {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+        }
+        // Cópias que esperavam o original voltam à fila (interrupção): retomáveis.
+        for (job, _, _) in adiados {
+            store::devolver_job(self.conexao(), job.id, self.agora_biblio())?;
         }
         // Nada fica para trás: o lote pendente é concluído antes de sair.
         self.descarregar_lote(
@@ -1171,4 +1204,20 @@ impl Agente {
 
 fn info_ou_none(a: &Agente, file_id: i64) -> Option<store::InfoArquivo> {
     store::info_arquivo(a.conexao(), file_id).ok().flatten()
+}
+
+/// Tira de `voando` os jobs que já saíram de `em_andamento` (concluídos, exceção, falha ou
+/// devolvidos à fila).
+fn podar_voando(conn: &Connection, voando: &mut Vec<(i64, [u8; 32])>) -> Result<(), ErroAgente> {
+    let mut i = 0;
+    while i < voando.len() {
+        let ativo = store::obter_job(conn, voando[i].0)?
+            .is_some_and(|j| j.estado == store::EstadoJob::EmAndamento);
+        if ativo {
+            i += 1;
+        } else {
+            voando.swap_remove(i);
+        }
+    }
+    Ok(())
 }

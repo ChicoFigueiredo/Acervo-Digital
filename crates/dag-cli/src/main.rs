@@ -973,8 +973,12 @@ fn instalar_ctrl_c(cancelador: Cancelador) {
         if INTERROMPIDO.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
         }
+        if !cancelador.cancelar() {
+            // Ainda na fila: o trabalho em andamento é de outro e segue.
+            eprintln!("\nsaindo: o pedido ainda esperava na fila; o trabalho em andamento segue");
+            std::process::exit(130);
+        }
         eprintln!("\ncancelando: gravando o que já foi lido (Ctrl-C de novo aborta)...");
-        cancelador.cancelar();
     });
     if let Err(e) = r {
         eprintln!("aviso: Ctrl-C não tratado ({e})");

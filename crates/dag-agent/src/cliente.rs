@@ -5,6 +5,8 @@ use std::ffi::OsString;
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::time::Duration;
 
@@ -66,6 +68,9 @@ pub struct Cliente {
     leitor: BufReader<UnixStream>,
     escritor: UnixStream,
     proximo_id: u64,
+    /// O pedido em curso já começou a rodar no agente (chegou progresso dele). Enquanto está
+    /// na fila, o Ctrl-C deste cliente não pode cancelar o trabalho de outro.
+    em_curso: Arc<AtomicBool>,
 }
 
 impl Cliente {
@@ -85,6 +90,7 @@ impl Cliente {
             leitor,
             escritor,
             proximo_id: 1,
+            em_curso: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -100,6 +106,12 @@ impl Cliente {
         &self.socket
     }
 
+    /// Alça para cancelar (Ctrl-C) de outra thread o pedido deste cliente, e só ele.
+    #[must_use]
+    pub fn cancelador(&self) -> Cancelador {
+        Cancelador::Remoto(self.socket.clone(), Arc::clone(&self.em_curso))
+    }
+
     /// Envia o pedido e devolve a resposta; cada evento de progresso chama `progresso`.
     ///
     /// # Errors
@@ -111,6 +123,7 @@ impl Cliente {
         progresso: &mut dyn FnMut(&Progresso),
     ) -> Result<Resposta, ErroAgente> {
         let id = self.novo_id();
+        self.em_curso.store(false, Ordering::SeqCst);
         let envio = self.escrever(&Requisicao {
             id,
             pedido: Some(pedido),
@@ -126,9 +139,11 @@ impl Cliente {
                 continue;
             }
             if let Some(p) = &q.progresso {
+                self.em_curso.store(true, Ordering::SeqCst);
                 progresso(p);
             }
             if let Some(r) = q.resposta {
+                self.em_curso.store(false, Ordering::SeqCst);
                 return Ok(r);
             }
         }
@@ -278,15 +293,24 @@ impl Assinatura {
 #[derive(Debug, Clone)]
 pub enum Cancelador {
     Local(ControleScan),
-    Remoto(PathBuf),
+    /// Socket do agente e se o pedido deste cliente já começou a rodar lá.
+    Remoto(PathBuf, Arc<AtomicBool>),
 }
 
 impl Cancelador {
     /// Cancela com checkpoint; falhas de conexão são ignoradas (nada a cancelar).
-    pub fn cancelar(&self) {
+    ///
+    /// Devolve `false` sem pedir nada ao agente quando o pedido deste cliente ainda espera na
+    /// fila: o trabalho em andamento é de outro cliente (a curadoria, um scan) e não pode parar
+    /// porque este cliente desistiu de esperar.
+    pub fn cancelar(&self) -> bool {
         match self {
-            Self::Local(c) => c.cancelar(),
-            Self::Remoto(socket) => {
+            Self::Local(c) => {
+                c.cancelar();
+                true
+            }
+            Self::Remoto(_, em_curso) if !em_curso.load(Ordering::SeqCst) => false,
+            Self::Remoto(socket, _) => {
                 if let Ok(mut c) = Cliente::conectar(socket) {
                     let _ = c.enviar(
                         Pedido {
@@ -296,6 +320,7 @@ impl Cancelador {
                         &mut |_| {},
                     );
                 }
+                true
             }
         }
     }
@@ -469,7 +494,7 @@ impl Conexao {
     #[must_use]
     pub fn cancelador(&self) -> Cancelador {
         match self {
-            Self::Daemon(c) => Cancelador::Remoto(c.socket.clone()),
+            Self::Daemon(c) => c.cancelador(),
             Self::Sessao(a) => Cancelador::Local(a.controle()),
         }
     }

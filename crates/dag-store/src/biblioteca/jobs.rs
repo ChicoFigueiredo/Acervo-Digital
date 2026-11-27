@@ -143,6 +143,24 @@ pub fn enfileirar_job(
     Ok(Enfileirado::JaAtivo(id))
 }
 
+/// Põe a `prioridade` de cada job pendente no tamanho do arquivo em KiB (arredondado para cima;
+/// no mínimo 1). Como a ordem é `prioridade * 3600 - enfileirado_em`, 1 KiB vale 1 hora de espera:
+/// os maiores saem primeiro, seja quando for que entraram. Devolve quantos jobs mudaram.
+///
+/// # Errors
+/// Falha do SQLite.
+pub fn priorizar_pendentes_por_tamanho(conn: &Connection) -> Resultado<u64> {
+    let n = conn.execute(
+        "UPDATE jobs_bibliograficos
+            SET prioridade = max(1, (SELECT (f.logical_bytes + 1023) / 1024 FROM files f
+                                     WHERE f.id = jobs_bibliograficos.file_id))
+          WHERE estado = 'pendente'
+            AND EXISTS (SELECT 1 FROM files f WHERE f.id = jobs_bibliograficos.file_id)",
+        [],
+    )?;
+    Ok(n as u64)
+}
+
 /// Pega o próximo job (maior `prioridade` com aging) e o marca `em_andamento`, numa única
 /// instrução atômica: dois trabalhadores nunca recebem o mesmo job.
 ///

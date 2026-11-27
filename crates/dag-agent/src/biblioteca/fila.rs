@@ -228,6 +228,22 @@ impl Agente {
         Ok(dados(DadosBiblioteca::Enfileirada { resumo: r }))
     }
 
+    pub(super) fn priorizar_biblioteca(
+        &mut self,
+        criterio: dag_core::CriterioPrioridade,
+    ) -> Result<Resposta, ErroAgente> {
+        let n = match criterio {
+            dag_core::CriterioPrioridade::Tamanho => {
+                store::priorizar_pendentes_por_tamanho(self.conexao())?
+            }
+        };
+        Ok(Resposta::Ok {
+            mensagem: Some(format!(
+                "{n} job(s) pendente(s) reordenado(s) por tamanho, do maior para o menor"
+            )),
+        })
+    }
+
     pub(super) fn fila_biblioteca(
         &mut self,
         estado: Option<EstadoFilaInfo>,

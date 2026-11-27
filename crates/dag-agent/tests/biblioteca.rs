@@ -2566,3 +2566,41 @@ fn copia_de_arquivo_ja_curado_vira_duplicata_sem_nova_extracao() {
         "{itens:#?}"
     );
 }
+
+#[test]
+fn priorizar_por_tamanho_poe_o_maior_na_frente_mesmo_com_espera_menor() {
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("pequeno.pdf"), corpo(31, 20_000)).unwrap();
+    fs::write(e.m.downloads.join("grande.pdf"), corpo(32, 900_000)).unwrap();
+    let mut a = e.agente(Autor::Gui);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    // O pequeno espera há 60 h: pelo aging, passa na frente do grande.
+    Connection::open(&e.m.catalogo)
+        .unwrap()
+        .execute(
+            "UPDATE jobs_bibliograficos SET enfileirado_em = enfileirado_em - 60 * 3600
+             WHERE file_id IN (SELECT id FROM files WHERE name_display = 'pequeno.pdf')",
+            [],
+        )
+        .unwrap();
+    let primeiro = |a: &mut Agente| match bib(a.executar(Comando::BibliotecaFila {
+        estado: Some(EstadoFilaInfo::Pendente),
+        limite: None,
+        cursor: None,
+    })) {
+        DadosBiblioteca::Fila { itens, .. } => itens[0].caminho.clone().unwrap(),
+        d => panic!("{d:?}"),
+    };
+    assert!(primeiro(&mut a).ends_with("pequeno.pdf"));
+    let r = a.executar(Comando::BibliotecaPriorizar {
+        criterio: dag_core::CriterioPrioridade::Tamanho,
+    });
+    assert!(
+        matches!(&r, Resposta::Ok { mensagem: Some(m) } if m.starts_with("2 ")),
+        "{r:?}"
+    );
+    assert!(primeiro(&mut a).ends_with("grande.pdf"));
+}

@@ -38,6 +38,15 @@ pub enum MotivoFila {
     Reprocessar,
 }
 
+/// Critério para reordenar os pendentes da fila (`dag biblioteca priorizar`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterioPrioridade {
+    /// Do maior arquivo para o menor: 1 KiB vale 1 hora de espera, então o tempo na fila deixa
+    /// de pesar.
+    Tamanho,
+}
+
 /// Ação humana sobre uma sugestão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

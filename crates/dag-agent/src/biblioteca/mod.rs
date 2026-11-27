@@ -264,6 +264,7 @@ impl Agente {
                 limite,
                 cursor,
             } => self.fila_biblioteca(estado, limite, cursor.as_deref()),
+            Comando::BibliotecaPriorizar { criterio } => self.priorizar_biblioteca(criterio),
             Comando::BibliotecaProcessar { limite, ia } => self.processar_biblioteca(limite, ia),
             Comando::BibliotecaRevisao { limite, cursor } => {
                 self.revisao_biblioteca(limite, cursor.as_deref())
@@ -316,6 +317,7 @@ pub(crate) fn e_biblioteca(c: &Comando) -> bool {
             | Comando::BibliotecaDuplicatas { .. }
             | Comando::BibliotecaEnfileirar { .. }
             | Comando::BibliotecaFila { .. }
+            | Comando::BibliotecaPriorizar { .. }
             | Comando::BibliotecaProcessar { .. }
             | Comando::BibliotecaRevisao { .. }
             | Comando::BibliotecaDecidir { .. }

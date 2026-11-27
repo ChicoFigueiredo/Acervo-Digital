@@ -2647,3 +2647,36 @@ fn copias_identicas_na_mesma_rodada_extraem_uma_vez_so() {
         .count();
     assert_eq!(copias, 2);
 }
+
+/// Um original que saiu em Exceção (limite excedido, corrompido) também serve de atalho:
+/// a cópia idêntica é a mesma coisa e não precisa ser lida de novo (backups com dezenas de
+/// cópias de um zip que estoura o limite de Membros gastavam minutos cada uma).
+#[test]
+fn copia_de_original_em_excecao_nao_e_lida_de_novo() {
+    let e = Ambiente::novo();
+    let conteudo = corpo(44, 60_000);
+    for d in ["a", "b", "c"] {
+        fs::create_dir_all(e.m.downloads.join(d)).unwrap();
+        fs::write(e.m.downloads.join(format!("{d}/backup.pdf")), &conteudo).unwrap();
+    }
+    let chamadas = Arc::new(AtomicUsize::new(0));
+    let ext = Arc::new(ExtratorContavel {
+        chamadas: Arc::clone(&chamadas),
+        estado: EstadoLeitura::LimiteExcedido {
+            limite: "quantidade de membros (> 50000)".into(),
+        },
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(chamadas.load(Ordering::SeqCst), 1, "{r:?}");
+    assert_eq!(r.pendentes_restantes, 0, "{r:?}");
+    let copias = alertas(&mut a)
+        .iter()
+        .filter(|al| format!("{al:?}").contains("arquivo_igual"))
+        .count();
+    assert_eq!(copias, 2);
+}

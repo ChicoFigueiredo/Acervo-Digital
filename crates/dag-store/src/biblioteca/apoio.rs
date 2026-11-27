@@ -329,7 +329,7 @@ pub fn ultimo_evento_id(conn: &Connection) -> Resultado<i64> {
 }
 
 /// Outro arquivo do Catálogo, com o mesmo conteúdo (hash), que já passou pela curadoria (job
-/// concluído com extração). Uma cópia do mesmo arquivo em outra pasta não precisa de outra
+/// concluído ou em Exceção, com extração gravada). Uma cópia do mesmo arquivo em outra pasta não precisa de outra
 /// extração nem de outra consulta à IA: é Duplicata Exata daquele arquivo.
 ///
 /// # Errors
@@ -344,7 +344,7 @@ pub fn arquivo_curado_com_mesmo_hash(
             "SELECT e.file_id FROM extracoes e
               WHERE e.hash_arquivo = ?1 AND e.file_id <> ?2
                 AND EXISTS (SELECT 1 FROM jobs_bibliograficos j
-                             WHERE j.file_id = e.file_id AND j.estado = 'concluido')
+                             WHERE j.file_id = e.file_id AND j.estado IN ('concluido', 'excecao'))
               ORDER BY e.file_id LIMIT 1",
             params![hash.as_slice(), exceto_file_id],
             |l| l.get::<_, i64>(0),

@@ -349,3 +349,16 @@ fn configuracao_de_hash_persiste_entre_aberturas() {
     let o = configuracao::ler_hash(c.armazem().conexao()).unwrap();
     assert_eq!((o.threads_por_disco, o.max_discos), (Some(3), Some(5)));
 }
+
+/// O WAL do Catálogo tem teto depois de cada checkpoint (no cerebro ele chegou a 3 GB).
+#[test]
+fn catalogo_em_arquivo_limita_o_tamanho_do_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Catalogo::abrir(dir.path().join("catalogo.sqlite")).unwrap();
+    let limite: i64 = c
+        .armazem()
+        .conexao()
+        .query_row("PRAGMA journal_size_limit", [], |l| l.get(0))
+        .unwrap();
+    assert_eq!(limite, dag_store::LIMITE_WAL_BYTES);
+}

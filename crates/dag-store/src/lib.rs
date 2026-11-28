@@ -123,6 +123,9 @@ pub const fn versao_do_esquema() -> u32 {
     MIGRACOES.len() as u32
 }
 
+/// Teto do arquivo `-wal` depois de um checkpoint completo (`journal_size_limit`).
+pub const LIMITE_WAL_BYTES: i64 = 256 * 1024 * 1024;
+
 fn pragmas() -> Pragmas {
     Pragmas {
         espera_ocupado: Duration::from_secs(30),
@@ -155,6 +158,14 @@ impl Catalogo {
 
     fn migrado(mut armazem: Armazem) -> Resultado<Self> {
         let _: RelatorioMigracao = armazem.migrar(&Escada::nova(MIGRACOES))?;
+        // Sem teto, o WAL nunca encolhe depois de um checkpoint: em 27/11/2026 ele chegou a
+        // 3 GB no cerebro durante a curadoria, e o agente morreu com SIGBUS ao estender o
+        // índice do WAL. Com o teto, cada checkpoint completo devolve o arquivo a este tamanho.
+        armazem.conexao().query_row(
+            &format!("PRAGMA journal_size_limit = {LIMITE_WAL_BYTES}"),
+            [],
+            |_| Ok(()),
+        )?;
         Ok(Self { armazem })
     }
 

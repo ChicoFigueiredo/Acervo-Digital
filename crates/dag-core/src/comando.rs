@@ -5,8 +5,8 @@
 
 use crate::ClasseVolume;
 use crate::biblioteca::{
-    AprovacaoHumana, DadosBiblioteca, EstadoCadastroInfo, EstadoFilaInfo, ItemDecisao, MotivoFila,
-    PapelRegistro,
+    AprovacaoHumana, CriterioPrioridade, DadosBiblioteca, EstadoCadastroInfo, EstadoFilaInfo,
+    ItemDecisao, MotivoFila, PapelRegistro,
 };
 use crate::{
     ArquivoId, Autor, DadosRelatorio, DetalheGrupo, DispositivoId, EstadoExecucao, EtapaVarredura,
@@ -315,6 +315,11 @@ pub enum Comando {
         limite: Option<u32>,
         #[serde(default)]
         cursor: Option<String>,
+    },
+    /// Recalcula a prioridade de todos os jobs pendentes pelo `criterio` (os em andamento e os
+    /// concluídos não mudam).
+    BibliotecaPriorizar {
+        criterio: CriterioPrioridade,
     },
     /// Processa a fila (job longo, pausável, cancelável, retomável). `ia`: consulta a IA local
     /// quando configurada.
@@ -938,6 +943,9 @@ mod tests {
             },
             Comando::BibliotecaConfigDefinir {
                 alteracoes: serde_json::json!({"usar_unshare": true}),
+            },
+            Comando::BibliotecaPriorizar {
+                criterio: CriterioPrioridade::Tamanho,
             },
         ] {
             ida_e_volta(&c);

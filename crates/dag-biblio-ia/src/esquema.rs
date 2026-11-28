@@ -51,15 +51,15 @@ pub fn campo_do_nome(nome: &str) -> Option<Campo> {
     CAMPOS_IA.iter().copied().find(|c| nome_campo(*c) == nome)
 }
 
-fn esquema_evidencias() -> Value {
+fn esquema_evidencias(max: u32) -> Value {
     json!({
         "type": "array",
-        "maxItems": 3,
+        "maxItems": max,
         "items": {
             "type": "object",
             "properties": {
                 "pagina": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                "trecho": {"type": "string", "maxLength": 500}
+                "trecho": {"type": "string", "maxLength": 200}
             },
             "required": ["pagina", "trecho"],
             "additionalProperties": false
@@ -67,13 +67,13 @@ fn esquema_evidencias() -> Value {
     })
 }
 
-fn esquema_campo(valor: Value) -> Value {
+fn esquema_campo(valor: Value, max_evidencias: u32) -> Value {
     // A confiança autodeclarada pelo modelo não é pedida nem usada (medição: sempre 1,0).
     json!({
         "type": "object",
         "properties": {
             "valor": valor,
-            "evidencias": esquema_evidencias()
+            "evidencias": esquema_evidencias(max_evidencias)
         },
         "required": ["valor", "evidencias"],
         "additionalProperties": false
@@ -126,10 +126,18 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
             Campo::Autores => esquema_pessoas(),
             Campo::Tags => json!({"type": "array", "items": tags_itens, "maxItems": 12}),
             Campo::Estante => estante.clone(),
+            // Resumo curto: a geração longa é o que mais custa na IA local (medição de 25/11).
+            Campo::Resumo => {
+                json!({"anyOf": [{"type": "string", "maxLength": 400}, {"type": "null"}]})
+            }
             _ => texto_ou_nulo(),
         };
-        props.insert(nome_campo(c), esquema_campo(valor));
+        // Até 2 evidências em todos os campos: com só 1 nos não críticos (prompt/4) o validador
+        // aceitou ~20% menos campos por item, quase sem ganho de tempo (medição de 25/11).
+        props.insert(nome_campo(c), esquema_campo(valor, 2));
     }
+    // Todos os campos são obrigatórios (valor ou null): com campos opcionais (prompt/5) o modelo
+    // passou a omitir data, tags, resumo e até título (medição de 25/11).
     let nomes: Vec<String> = CAMPOS_IA.iter().map(|c| nome_campo(*c)).collect();
     json!({
         "type": "object",
@@ -147,7 +155,7 @@ pub fn esquema_saida(tags_candidatas: &[String], estantes: &[String]) -> Value {
                     "type": "object",
                     "properties": {
                         "tag": {"type": "string", "maxLength": 80},
-                        "evidencias": esquema_evidencias()
+                        "evidencias": esquema_evidencias(1)
                     },
                     "required": ["tag", "evidencias"],
                     "additionalProperties": false

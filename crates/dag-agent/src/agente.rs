@@ -149,6 +149,7 @@ impl Agente {
         let caminho = caminho.into();
         let guarda = GuardaEscritor::adquirir(&caminho)?;
         preparar(&caminho)?;
+        dag_scanner::proteger_catalogo(&caminho);
         let catalogo = Catalogo::abrir(&caminho)?;
         Ok(Self::montar(catalogo, caminho, Some(guarda)))
     }
@@ -175,6 +176,7 @@ impl Agente {
                 esperada,
             });
         }
+        dag_scanner::proteger_catalogo(&caminho);
         let catalogo = Catalogo::abrir(&caminho)?;
         Ok(Self::montar(catalogo, caminho, None))
     }

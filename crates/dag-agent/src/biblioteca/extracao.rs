@@ -152,6 +152,14 @@ fn config_pdf(cfg: &ConfigBiblioteca) -> ConfigExtracaoPdf {
         ..ConfigExtracaoPdf::default()
     };
     c.limites.max_bytes_arquivo = cfg.max_bytes_arquivo;
+    c.paralelo_ocr = if cfg.ocr.paralelo > 0 {
+        cfg.ocr.paralelo
+    } else {
+        // Automático: metade dos núcleos repartida entre as extrações simultâneas.
+        let em_voo = cfg.max_discos_extracao.max(1) * cfg.extracoes_por_dispositivo.max(1);
+        let n = std::thread::available_parallelism().map_or(2, std::num::NonZeroUsize::get);
+        (u32::try_from(n / 2).unwrap_or(1) / em_voo).clamp(1, 6)
+    };
     c
 }
 
@@ -341,6 +349,15 @@ pub trait ClassificadorIa: Send + Sync {
     /// Falhas do modelo viram revisão humana dentro do resultado.
     fn classificar(&self, entrada: &EntradaClassificacao)
     -> Result<ResultadoClassificacao, String>;
+
+    /// Classifica vários livros de uma vez, na ordem das entradas. A implementação padrão chama
+    /// `classificar` item a item; `IaLocal` agrupa as chamadas por modelo (menos trocas na GPU).
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        entradas.iter().map(|e| self.classificar(e)).collect()
+    }
 }
 
 /// IA indisponível.
@@ -388,8 +405,14 @@ impl IaLocal {
         if let Some(s) = &cfg.ia.modelo_secundario {
             let mut p = PerfilModelo::ollama(s, false, PapelModelo::Secundario);
             p.endpoint.clone_from(&cfg.ia.endpoint);
-            // Segundo parecer com contexto menor: cabe na VRAM junto dos outros programas.
-            p.contexto = 4096;
+            // Segundo parecer com contexto menor: cabe na VRAM junto dos outros programas. Se for
+            // o mesmo modelo do primário, usa o mesmo contexto: o Ollama recarrega o modelo a cada
+            // troca de `num_ctx` (medido no cerebro em 25/11: duas recargas por livro).
+            p.contexto = if s == &cfg.ia.modelo_primario {
+                modelos[0].contexto
+            } else {
+                4096
+            };
             modelos.push(p);
         }
         // Qwen3 (e outros com "thinking") respondem direto no JSON Schema só com `think: false`.
@@ -426,5 +449,16 @@ impl ClassificadorIa for IaLocal {
     ) -> Result<ResultadoClassificacao, String> {
         // `classificar` nunca entra em pânico nem devolve erro: falhas viram revisão humana.
         Ok(self.inner.classificar(entrada))
+    }
+
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        self.inner
+            .classificar_lote(entradas)
+            .into_iter()
+            .map(Ok)
+            .collect()
     }
 }

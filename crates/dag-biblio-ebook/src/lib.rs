@@ -247,7 +247,7 @@ pub(crate) fn detectar(
         return Ok(Detectado::Livro(FormatoLivro::Fb2));
     }
     if p.starts_with(b"PK\x03\x04") || p.starts_with(b"PK\x05\x06") {
-        return classificar_zip(origem, dica, med);
+        return classificar_zip(origem, dica, &med.para_reconhecer());
     }
     if p.starts_with(b"Rar!\x1a\x07") {
         return Ok(if quadrinho || dica == Some(FormatoLivro::Cbr) {

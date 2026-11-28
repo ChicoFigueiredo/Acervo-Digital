@@ -160,6 +160,43 @@ fn pdf_so_imagem_usa_ocr() {
 }
 
 #[test]
+fn ocr_em_paralelo_da_o_mesmo_resultado_que_sequencial() {
+    let doc = DocPdf::novo(vec![
+        PaginaPdf::imagem(&["PRIMEIRA PAGINA", "ALFA"]),
+        PaginaPdf::imagem(&["SEGUNDA PAGINA", "BETA"]),
+        PaginaPdf::imagem(&["TERCEIRA PAGINA", "GAMA"]),
+        PaginaPdf::imagem(&["QUARTA PAGINA", "DELTA"]),
+        PaginaPdf::imagem(&["QUINTA PAGINA", "EPSILON"]),
+    ]);
+    let bytes = gerar(&doc);
+    let rodar = |paralelo: u32, max: u32| {
+        extrator_com_ocr(ConfigExtracaoPdf {
+            idiomas_ocr: vec!["eng".into()],
+            paralelo_ocr: paralelo,
+            max_paginas_ocr: max,
+            ..Default::default()
+        })
+        .map(|ex| ex.extrair_pdf(Fonte::Bytes(&bytes)).resultado)
+    };
+    let (Some(seq), Some(par)) = (rodar(1, 40), rodar(4, 40)) else {
+        return;
+    };
+    assert_eq!(seq.paginas_ocr, vec![1, 2, 3, 4, 5]);
+    assert_eq!(par.paginas_ocr, seq.paginas_ocr);
+    let textos = |r: &dag_biblio::ResultadoExtracao| {
+        r.paginas
+            .iter()
+            .map(|p| p.texto.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(textos(&par), textos(&seq));
+    assert!(textos(&par)[3].to_uppercase().contains("DELTA"));
+    // O teto de páginas de OCR vale também em paralelo.
+    let teto = rodar(4, 3).unwrap();
+    assert_eq!(teto.paginas_ocr, vec![1, 2, 3], "{:?}", teto.avisos);
+}
+
+#[test]
 fn pdf_hibrido_so_passa_por_ocr_nas_paginas_sem_texto() {
     let Some(ex) = extrator_com_ocr(ConfigExtracaoPdf {
         idiomas_ocr: vec!["eng".into()],

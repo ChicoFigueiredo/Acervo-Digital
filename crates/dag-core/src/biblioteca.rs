@@ -38,6 +38,15 @@ pub enum MotivoFila {
     Reprocessar,
 }
 
+/// Critério para reordenar os pendentes da fila (`dag biblioteca priorizar`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterioPrioridade {
+    /// Do maior arquivo para o menor: 1 KiB vale 1 hora de espera, então o tempo na fila deixa
+    /// de pesar.
+    Tamanho,
+}
+
 /// Ação humana sobre uma sugestão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +119,12 @@ pub struct ConfigIaBiblioteca {
     pub modelo_secundario: Option<String>,
     pub usar_visao: bool,
     pub timeout_s: u64,
+    /// Livros por lote: o primário roda para o lote todo e o segundo parecer só depois, para
+    /// trocar o modelo na GPU uma vez por lote. 1 = um livro por vez (sem agrupar).
+    pub lote: usize,
+    /// Teto de Membros de um mesmo compactado que passam pela IA (os de formato de livro e os
+    /// maiores primeiro); os demais ficam só com a extração. 0 = sem teto.
+    pub max_membros_conteiner: usize,
 }
 
 impl Default for ConfigIaBiblioteca {
@@ -121,6 +136,8 @@ impl Default for ConfigIaBiblioteca {
             modelo_secundario: None,
             usar_visao: true,
             timeout_s: 300,
+            lote: 8,
+            max_membros_conteiner: 12,
         }
     }
 }
@@ -134,6 +151,9 @@ pub struct ConfigOcrBiblioteca {
     pub dpi: u32,
     pub max_paginas: u32,
     pub paginas_iniciais: u32,
+    /// Páginas em OCR ao mesmo tempo dentro de um livro; 0 = automático (metade dos núcleos,
+    /// dividida pelas extrações simultâneas).
+    pub paralelo: u32,
 }
 
 impl Default for ConfigOcrBiblioteca {
@@ -144,6 +164,7 @@ impl Default for ConfigOcrBiblioteca {
             dpi: 300,
             max_paginas: 6,
             paginas_iniciais: 20,
+            paralelo: 0,
         }
     }
 }
@@ -188,7 +209,7 @@ pub struct ConfigBiblioteca {
     pub destino_a_classificar: String,
     pub ocr: ConfigOcrBiblioteca,
     pub ia: ConfigIaBiblioteca,
-    /// Extrações simultâneas por Dispositivo Físico (a fila processa uma por vez; 1 = padrão).
+    /// Extrações simultâneas por Dispositivo Físico (padrão 2: o OCR é CPU, não disco).
     pub extracoes_por_dispositivo: u32,
     pub max_bytes_arquivo: u64,
     pub tentativas_max: u32,
@@ -245,7 +266,7 @@ impl Default for ConfigBiblioteca {
             destino_a_classificar: "/mnt/e2/Livros_A_Classificar".into(),
             ocr: ConfigOcrBiblioteca::default(),
             ia: ConfigIaBiblioteca::default(),
-            extracoes_por_dispositivo: 1,
+            extracoes_por_dispositivo: 2,
             max_bytes_arquivo: 4 * 1024 * 1024 * 1024,
             tentativas_max: 3,
             usar_unshare: false,

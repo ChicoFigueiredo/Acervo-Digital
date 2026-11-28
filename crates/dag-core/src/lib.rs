@@ -28,13 +28,13 @@ pub mod tipos;
 pub use biblioteca::{
     AcaoRevisao, AlertaInfo, AlvoRevisao, AprovacaoHumana, BibliotecaInfo, CampoInfo,
     CampoLadoALado, ConfigBiblioteca, ConfigHomologacao, ConfigIaBiblioteca, ConfigOcrBiblioteca,
-    ContagemFila, CopiaDuplicata, DadosBiblioteca, DecisaoDescarteInfo, EspacoVolumeInfo,
-    EstadoFilaInfo, FormatoHomologadoRef, FormatoSemCoberturaInfo, GrupoDuplicata, GrupoEspacoInfo,
-    HomologacaoInfo, ItemDecisao, ItemFilaInfo, ItemRevisaoInfo, LivroRef, ModoHomologacao,
-    MotivoFila, PapelCopiaInfo, PapelRegistro, ParecidoHomologado, PerfilResumo,
-    PoliticaTravaCalibre, ProgressoBiblioteca, RelatorioEspacoInfo, ResultadoCadastro,
-    ResumoBiblioteca, ResumoCobertura, ResumoEnfileiramento, ResumoProcessamento,
-    ResumoSincronizacao,
+    ContagemFila, CopiaDuplicata, CriterioPrioridade, DadosBiblioteca, DecisaoDescarteInfo,
+    EspacoVolumeInfo, EstadoFilaInfo, FormatoHomologadoRef, FormatoSemCoberturaInfo,
+    GrupoDuplicata, GrupoEspacoInfo, HomologacaoInfo, ItemDecisao, ItemFilaInfo, ItemRevisaoInfo,
+    LivroRef, ModoHomologacao, MotivoFila, PapelCopiaInfo, PapelRegistro, ParecidoHomologado,
+    PerfilResumo, PoliticaTravaCalibre, ProgressoBiblioteca, RelatorioEspacoInfo,
+    ResultadoCadastro, ResumoBiblioteca, ResumoCobertura, ResumoEnfileiramento,
+    ResumoProcessamento, ResumoSincronizacao,
 };
 pub use classificacao::{
     BYTES_RECOMENDADOS, CategoriaFormato, ClassificacaoFinalidade, ConsolidacaoPasta, Divergencia,

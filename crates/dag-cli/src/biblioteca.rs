@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use dag_core::{
-    AcaoRevisao, AlvoRevisao, AprovacaoHumana, Comando, DadosBiblioteca, EstadoFilaInfo,
-    ItemDecisao, MotivoFila, PapelRegistro, Resposta,
+    AcaoRevisao, AlvoRevisao, AprovacaoHumana, Comando, CriterioPrioridade, DadosBiblioteca,
+    EstadoFilaInfo, ItemDecisao, MotivoFila, PapelRegistro, Resposta,
 };
 
 /// Papel de uma biblioteca ao registrar.
@@ -28,6 +28,13 @@ pub enum MotivoArg {
     Novo,
     Alterado,
     Reprocessar,
+}
+
+/// Critério para reordenar a fila.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CriterioArg {
+    /// Do maior arquivo para o menor
+    Tamanho,
 }
 
 /// Estado de um item da fila.
@@ -198,6 +205,11 @@ pub enum Biblioteca {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Reordena os pendentes da fila (hoje só por tamanho, do maior para o menor)
+    Priorizar {
+        #[arg(long, value_enum, default_value = "tamanho")]
+        por: CriterioArg,
+    },
     /// Processa a fila (Ctrl-C pausa; rodar de novo retoma)
     Processar {
         /// Máximo de itens nesta rodada
@@ -360,6 +372,11 @@ pub fn preparar(b: Biblioteca, agora: i64) -> Result<(Comando, Fluxo), Box<Respo
             }),
             limite,
             cursor,
+        }),
+        Biblioteca::Priorizar { por } => simples(Comando::BibliotecaPriorizar {
+            criterio: match por {
+                CriterioArg::Tamanho => CriterioPrioridade::Tamanho,
+            },
         }),
         Biblioteca::Processar { limite, ia } => {
             simples(Comando::BibliotecaProcessar { limite, ia })
@@ -1050,6 +1067,12 @@ mod testes {
                 estado: Some(EstadoFilaInfo::EmAndamento),
                 limite: Some(5),
                 cursor: None
+            }
+        );
+        assert_eq!(
+            cmd(&["priorizar", "--por", "tamanho"]),
+            Comando::BibliotecaPriorizar {
+                criterio: CriterioPrioridade::Tamanho
             }
         );
         assert_eq!(

@@ -305,6 +305,34 @@ impl Classificador {
     /// Classifica um arquivo. Sempre devolve um resultado: falhas de modelo viram revisão humana.
     #[must_use]
     pub fn classificar(&self, entrada: &EntradaClassificacao) -> ResultadoClassificacao {
+        match self.fase_primaria(entrada) {
+            Fase::Pronto(out) => out,
+            Fase::AguardaSecundario(p) => self.fase_secundaria(entrada, p),
+        }
+    }
+
+    /// Classifica vários arquivos agrupando as chamadas por modelo: primeiro todos os primários
+    /// (e a visão), depois o segundo parecer só dos que precisam. Cada item recebe o mesmo
+    /// resultado de [`Self::classificar`]; só muda a ordem das chamadas (uma troca de modelo na
+    /// GPU por lote, não por item).
+    #[must_use]
+    pub fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<ResultadoClassificacao> {
+        let fases: Vec<Fase> = entradas.iter().map(|e| self.fase_primaria(e)).collect();
+        fases
+            .into_iter()
+            .zip(entradas)
+            .map(|(f, e)| match f {
+                Fase::Pronto(out) => out,
+                Fase::AguardaSecundario(p) => self.fase_secundaria(e, p),
+            })
+            .collect()
+    }
+
+    /// Primário + visão. Resolve tudo que não depende do segundo parecer.
+    fn fase_primaria(&self, entrada: &EntradaClassificacao) -> Fase {
         let mut out = ResultadoClassificacao::default();
         let (a, reg_a) = self.consultar(
             &self.primario,
@@ -314,44 +342,19 @@ impl Classificador {
         );
         out.registros.push(reg_a);
 
-        let (a, indisponivel_primario) = match a {
-            Some(v) => (Some(v), None),
-            None => (
-                None,
-                Some(out.registros[0].erro.clone().unwrap_or_default()),
-            ),
-        };
-
         // Primário falhou: o secundário assume sozinho (e tudo vai para conferência).
-        let Some(a) = a else {
-            let detalhe = indisponivel_primario.unwrap_or_default();
-            if let Some(sec) = &self.secundario {
-                let (b, reg_b) =
-                    self.consultar(sec, PapelModelo::Secundario, entrada, &self.info_secundario);
-                out.registros.push(reg_b);
-                out.segundo_parecer_consultado = true;
-                out.motivos_segundo_parecer
-                    .push(format!("primário indisponível: {detalhe}"));
-                if let Some(b) = b {
-                    absorver(&mut out, b, entrada, self.limiar_confianca);
-                    out.revisao_humana.push(RevisaoHumana {
-                        campo: None,
-                        motivo: MotivoRevisao::ModeloIndisponivel {
-                            detalhe: format!("primário: {detalhe}"),
-                        },
-                    });
-                    return out;
-                }
+        let Some(mut a) = a else {
+            let detalhe = out.registros[0].erro.clone().unwrap_or_default();
+            if self.secundario.is_some() {
+                return Fase::AguardaSecundario(Pendente {
+                    out,
+                    a: None,
+                    detalhe_primario: detalhe,
+                });
             }
-            out.valores = CAMPOS_IA.iter().map(|c| desconhecido(*c)).collect();
-            out.revisao_humana.push(RevisaoHumana {
-                campo: None,
-                motivo: MotivoRevisao::ModeloIndisponivel { detalhe },
-            });
-            return out;
+            return Fase::Pronto(falha_total(out, detalhe));
         };
 
-        let mut a = a;
         if let Some((v, reg)) = self
             .usar_visao
             .then(|| self.consultar_visao(entrada))
@@ -364,26 +367,95 @@ impl Classificador {
         }
 
         let motivos = motivos_segundo_parecer(&a, entrada, self.limiar_confianca);
-        let mut b: Option<ResultadoValidacao> = None;
-        if !motivos.is_empty() {
-            out.motivos_segundo_parecer.clone_from(&motivos);
-            if let Some(sec) = &self.secundario {
-                let (rb, reg_b) =
-                    self.consultar(sec, PapelModelo::Secundario, entrada, &self.info_secundario);
-                out.registros.push(reg_b);
-                out.segundo_parecer_consultado = true;
-                b = rb;
+        if motivos.is_empty() {
+            combinar(&mut out, a, None, entrada, self.limiar_confianca);
+            return Fase::Pronto(out);
+        }
+        out.motivos_segundo_parecer.clone_from(&motivos);
+        if self.secundario.is_none() {
+            out.revisao_humana.push(RevisaoHumana {
+                campo: None,
+                motivo: MotivoRevisao::SegundoParecerIndisponivel,
+            });
+            combinar(&mut out, a, None, entrada, self.limiar_confianca);
+            return Fase::Pronto(out);
+        }
+        Fase::AguardaSecundario(Pendente {
+            out,
+            a: Some(a),
+            detalhe_primario: String::new(),
+        })
+    }
+
+    /// Segundo parecer e combinação final de um item que ficou pendente.
+    fn fase_secundaria(
+        &self,
+        entrada: &EntradaClassificacao,
+        p: Pendente,
+    ) -> ResultadoClassificacao {
+        let Pendente {
+            mut out,
+            a,
+            detalhe_primario,
+        } = p;
+        let Some(sec) = &self.secundario else {
+            // Inalcançável (só há pendente com secundário), mas mantém o contrato.
+            return falha_total(out, detalhe_primario);
+        };
+        let (rb, reg_b) =
+            self.consultar(sec, PapelModelo::Secundario, entrada, &self.info_secundario);
+        out.registros.push(reg_b);
+        out.segundo_parecer_consultado = true;
+        match a {
+            None => {
+                out.motivos_segundo_parecer
+                    .push(format!("primário indisponível: {detalhe_primario}"));
+                if let Some(b) = rb {
+                    absorver(&mut out, b, entrada, self.limiar_confianca);
+                    out.revisao_humana.push(RevisaoHumana {
+                        campo: None,
+                        motivo: MotivoRevisao::ModeloIndisponivel {
+                            detalhe: format!("primário: {detalhe_primario}"),
+                        },
+                    });
+                    return out;
+                }
+                falha_total(out, detalhe_primario)
             }
-            if b.is_none() {
-                out.revisao_humana.push(RevisaoHumana {
-                    campo: None,
-                    motivo: MotivoRevisao::SegundoParecerIndisponivel,
-                });
+            Some(a) => {
+                if rb.is_none() {
+                    out.revisao_humana.push(RevisaoHumana {
+                        campo: None,
+                        motivo: MotivoRevisao::SegundoParecerIndisponivel,
+                    });
+                }
+                combinar(&mut out, a, rb, entrada, self.limiar_confianca);
+                out
             }
         }
-        combinar(&mut out, a, b, entrada, self.limiar_confianca);
-        out
     }
+}
+
+/// Estado intermediário de um item entre a fase do primário e a do segundo parecer.
+struct Pendente {
+    out: ResultadoClassificacao,
+    /// `None` quando o primário falhou.
+    a: Option<ResultadoValidacao>,
+    detalhe_primario: String,
+}
+
+enum Fase {
+    Pronto(ResultadoClassificacao),
+    AguardaSecundario(Pendente),
+}
+
+fn falha_total(mut out: ResultadoClassificacao, detalhe: String) -> ResultadoClassificacao {
+    out.valores = CAMPOS_IA.iter().map(|c| desconhecido(*c)).collect();
+    out.revisao_humana.push(RevisaoHumana {
+        campo: None,
+        motivo: MotivoRevisao::ModeloIndisponivel { detalhe },
+    });
+    out
 }
 
 fn e_conhecido(v: &ValorSugerido) -> bool {

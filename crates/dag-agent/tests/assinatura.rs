@@ -307,6 +307,72 @@ fn fila_de_jobs_e_cancelamento_de_quem_ainda_nao_comecou() {
 }
 
 #[test]
+fn ctrl_c_de_quem_espera_na_fila_nao_cancela_o_trabalho_de_outro() {
+    let c = cenario();
+    let srv = Servidor::iniciar(config(&c)).unwrap();
+    sem_abertura(&c.socket);
+    let mut escuta = Escuta::nova(&c.socket);
+    escuta.ate("instantâneo", |e, _| {
+        matches!(e, EventoAgente::Instantaneo { .. })
+    });
+
+    // A "curadoria" de outro cliente roda.
+    let mut dono = Cliente::conectar(&c.socket).unwrap();
+    let cancela_dono = dono.cancelador();
+    let c1 = scan(&c, false);
+    let primeiro = std::thread::spawn(move || {
+        dono.enviar(
+            Pedido {
+                autor: Autor::Cli,
+                comando: c1,
+            },
+            &mut |_| {},
+        )
+        .unwrap()
+    });
+    let j1 = escuta.job_iniciado(OrigemJob::Cli, TipoJob::FullScan);
+
+    // Uma consulta entra na fila e quem a pediu desiste (Ctrl-C, SIGTERM de um timeout).
+    let mut consulta = Cliente::conectar(&c.socket).unwrap();
+    let cancela_consulta = consulta.cancelador();
+    let c2 = scan(&c, true);
+    let segundo = std::thread::spawn(move || {
+        consulta.enviar(
+            Pedido {
+                autor: Autor::Mcp,
+                comando: c2,
+            },
+            &mut |_| {},
+        )
+    });
+    let EventoAgente::JobEnfileirado { job: j2 } = escuta.ate(
+        "job enfileirado",
+        |e, _| matches!(e, EventoAgente::JobEnfileirado { job } if job.origem == OrigemJob::Mcp),
+    ) else {
+        unreachable!()
+    };
+    assert!(
+        !cancela_consulta.cancelar(),
+        "quem está na fila não pode cancelar"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let agora = jobs(&c.socket);
+    let atual = agora.iter().find(|j| j.id == j1.id).unwrap();
+    assert_eq!(atual.estado, EstadoJob::Executando, "{agora:?}");
+
+    // O dono, que já roda, cancela o próprio trabalho.
+    let r = enviar(&c.socket, Autor::Gui, Comando::CancelarJob { job: j2.id });
+    assert!(matches!(r, Resposta::Ok { .. }), "{r:?}");
+    let _ = segundo.join().unwrap();
+    assert!(cancela_dono.cancelar());
+    assert!(matches!(
+        primeiro.join().unwrap(),
+        Resposta::ScanConcluido { desfecho, .. } if desfecho == "cancelada"
+    ));
+    srv.encerrar();
+}
+
+#[test]
 fn assinante_tardio_recebe_o_instantaneo_do_que_ja_esta_rodando() {
     let c = cenario();
     let srv = Servidor::iniciar(config(&c)).unwrap();

@@ -2289,3 +2289,394 @@ fn ca_b02_calibredb_real_cria_a_classificar_com_pasta_e_demais_colunas() {
     }
     assert_eq!(arvore(&e.m.homologada), antes);
 }
+
+/// IA falsa que registra a ordem das chamadas. Em lote, imita o `Classificador` real: todos os
+/// primários e, depois, os segundos pareceres dos que precisam (nome com "dup").
+struct IaOrdem {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl IaOrdem {
+    fn resultado(entrada: &EntradaClassificacao) -> ResultadoClassificacao {
+        ResultadoClassificacao {
+            valores: vec![lista_v(
+                Campo::Tags,
+                &["Literatura"],
+                OrigemEvidencia::Ia,
+                0.8,
+            )],
+            segundo_parecer_consultado: entrada.nome_arquivo.contains("dup"),
+            ..ResultadoClassificacao::default()
+        }
+    }
+}
+
+impl dag_agent::ClassificadorIa for IaOrdem {
+    fn nome(&self) -> String {
+        "ordem:1b".into()
+    }
+
+    fn classificar(
+        &self,
+        entrada: &EntradaClassificacao,
+    ) -> Result<ResultadoClassificacao, String> {
+        let mut l = self.log.lock().unwrap();
+        l.push(format!("P:{}", entrada.nome_arquivo));
+        if entrada.nome_arquivo.contains("dup") {
+            l.push(format!("S:{}", entrada.nome_arquivo));
+        }
+        Ok(Self::resultado(entrada))
+    }
+
+    fn classificar_lote(
+        &self,
+        entradas: &[EntradaClassificacao],
+    ) -> Vec<Result<ResultadoClassificacao, String>> {
+        let mut l = self.log.lock().unwrap();
+        for e in entradas {
+            l.push(format!("P:{}", e.nome_arquivo));
+        }
+        for e in entradas.iter().filter(|e| e.nome_arquivo.contains("dup")) {
+            l.push(format!("S:{}", e.nome_arquivo));
+        }
+        entradas.iter().map(|e| Ok(Self::resultado(e))).collect()
+    }
+}
+
+fn processar_com_lote(lote: usize) -> (Vec<String>, Vec<String>, dag_core::ResumoProcessamento) {
+    let e = Ambiente::novo();
+    etiquetar(&e.m, 1, "Literatura");
+    etiquetar(&e.m, 2, "Literatura");
+    for (i, n) in ["a.pdf", "b_dup.pdf", "c.pdf", "d_dup.pdf"]
+        .iter()
+        .enumerate()
+    {
+        fs::write(e.m.downloads.join(n), corpo(30 + i as u8, 30_000)).unwrap();
+    }
+    let ext = ExtratorRoteiro::novo(|_| {
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Quincas Borba",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut a = e
+        .agente_com(Autor::Gui, ext)
+        .com_classificador_ia(Arc::new(IaOrdem {
+            log: Arc::clone(&log),
+        }));
+    a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"ia": {"lote": lote}}),
+    });
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = match bib(a.executar(Comando::BibliotecaProcessar {
+        limite: None,
+        ia: true,
+    })) {
+        DadosBiblioteca::Processada { resumo } => resumo,
+        d => panic!("{d:?}"),
+    };
+    let itens = revisao(&mut a);
+    let mut gravado: Vec<String> = itens
+        .iter()
+        .filter(|i| {
+            i.caminho.as_deref().is_some_and(|c| {
+                ["a.pdf", "b_dup.pdf", "c.pdf", "d_dup.pdf"]
+                    .iter()
+                    .any(|n| c.ends_with(&format!("/{n}")))
+            })
+        })
+        .map(|i| {
+            let nome = i.caminho.clone().unwrap_or_default();
+            let nome = nome.rsplit('/').next().unwrap_or_default().to_owned();
+            let campos: Vec<String> = i
+                .campos
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}={:?}/{:?}/{:?}/{:?}/{:?}/{}",
+                        c.campo,
+                        c.sugerido,
+                        c.sugerido_lista,
+                        c.confianca,
+                        c.origem,
+                        c.motivos,
+                        c.estado
+                    )
+                })
+                .collect();
+            format!("{nome}: {campos:?}")
+        })
+        .collect();
+    gravado.sort();
+    let l = log.lock().unwrap().clone();
+    (l, gravado, r)
+}
+
+#[test]
+fn ia_em_lote_agrupa_primarios_e_depois_segundos_pareceres_com_o_mesmo_resultado() {
+    let (log_um, gravado_um, r_um) = processar_com_lote(1);
+    let (log_lote, gravado_lote, r_lote) = processar_com_lote(8);
+
+    let primarios = |l: &[String]| l.iter().filter(|x| x.starts_with("P:")).count();
+    assert_eq!(primarios(&log_um), 4, "{log_um:?}");
+    assert_eq!(primarios(&log_lote), 4, "{log_lote:?}");
+
+    // Item a item, o segundo parecer vem logo depois do primário do mesmo livro, e a sequência
+    // de modelos alterna. Em lote, nenhum primário vem depois do primeiro segundo parecer.
+    let trocas = |l: &[String]| l.windows(2).filter(|w| w[0][..1] != w[1][..1]).count();
+    let primeiro_s = log_lote.iter().position(|x| x.starts_with("S:")).unwrap();
+    assert!(
+        log_lote[primeiro_s..].iter().all(|x| x.starts_with("S:")),
+        "{log_lote:?}"
+    );
+    assert_eq!(trocas(&log_lote), 1, "{log_lote:?}");
+    assert!(trocas(&log_um) > 1, "{log_um:?}");
+
+    assert_eq!(r_um.consultas_ia, 4, "{r_um:?}");
+    assert_eq!(r_lote.consultas_ia, 4, "{r_lote:?}");
+    assert_eq!(r_um.revisao_pendente, r_lote.revisao_pendente);
+    assert_eq!(r_um.falhas + r_lote.falhas, 0);
+    assert_eq!(gravado_um.len(), 4, "{gravado_um:?}");
+    assert_eq!(gravado_um, gravado_lote, "mesmo resultado gravado");
+}
+
+#[test]
+fn compactado_grande_so_manda_o_teto_de_membros_para_a_ia() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct IaContadora(Arc<AtomicUsize>);
+    impl dag_agent::ClassificadorIa for IaContadora {
+        fn nome(&self) -> String {
+            "conta:1b".into()
+        }
+
+        fn classificar(
+            &self,
+            _entrada: &EntradaClassificacao,
+        ) -> Result<ResultadoClassificacao, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ResultadoClassificacao::default())
+        }
+    }
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("cursos.pdf"), corpo(33, 30_000)).unwrap();
+    // 20 "Membros" num só arquivo: mais que o teto padrão (12).
+    let ext = ExtratorRoteiro::novo(|_| {
+        (0..20)
+            .map(|i| {
+                (
+                    format!("curso/aula{i:02}.pdf"),
+                    vec![texto_v(
+                        Campo::Titulo,
+                        &format!("Aula {i}"),
+                        OrigemEvidencia::MetadadoInterno,
+                        0.9,
+                    )],
+                )
+            })
+            .collect()
+    });
+    let chamadas = Arc::new(AtomicUsize::new(0));
+    let mut a = e
+        .agente_com(Autor::Gui, ext)
+        .com_classificador_ia(Arc::new(IaContadora(Arc::clone(&chamadas))));
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = match bib(a.executar(Comando::BibliotecaProcessar {
+        limite: None,
+        ia: true,
+    })) {
+        DadosBiblioteca::Processada { resumo } => resumo,
+        d => panic!("{d:?}"),
+    };
+    assert_eq!(chamadas.load(Ordering::SeqCst), 12, "{r:?}");
+    assert_eq!(r.membros_de_conteiner, 20, "{r:?}");
+    // Todos os 20 viram itens de revisão; os 8 sem IA dizem por quê.
+    let itens: Vec<ItemRevisaoInfo> = revisao(&mut a)
+        .into_iter()
+        .filter(|i| i.membro.is_some())
+        .collect();
+    assert_eq!(itens.len(), 20, "{itens:#?}");
+    let sem_ia = itens
+        .iter()
+        .filter(|i| format!("{i:?}").contains("IA não consultada"))
+        .count();
+    assert_eq!(sem_ia, 8, "{itens:#?}");
+}
+
+#[test]
+fn copia_de_arquivo_ja_curado_vira_duplicata_sem_nova_extracao() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let e = Ambiente::novo();
+    let conteudo = corpo(41, 40_000);
+    fs::create_dir_all(e.m.downloads.join("a")).unwrap();
+    fs::create_dir_all(e.m.downloads.join("b")).unwrap();
+    fs::write(e.m.downloads.join("a/livro.pdf"), &conteudo).unwrap();
+    let extracoes = Arc::new(AtomicUsize::new(0));
+    let cont = Arc::clone(&extracoes);
+    let ext = ExtratorRoteiro::novo(move |_| {
+        cont.fetch_add(1, Ordering::SeqCst);
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Um Livro",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1);
+
+    // A mesma cópia aparece em outra pasta: vira Duplicata Exata do primeiro, sem extrair.
+    fs::write(e.m.downloads.join("b/copia.pdf"), &conteudo).unwrap();
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1, "{r:?}");
+    assert!(
+        alertas(&mut a)
+            .iter()
+            .any(|al| format!("{al:?}").contains("arquivo_igual")),
+        "alerta de cópia"
+    );
+    let itens = revisao(&mut a);
+    assert_eq!(
+        itens
+            .iter()
+            .filter(|i| i.caminho.as_deref().is_some_and(|c| c.ends_with(".pdf")))
+            .count(),
+        1,
+        "{itens:#?}"
+    );
+}
+
+#[test]
+fn priorizar_por_tamanho_poe_o_maior_na_frente_mesmo_com_espera_menor() {
+    let e = Ambiente::novo();
+    fs::write(e.m.downloads.join("pequeno.pdf"), corpo(31, 20_000)).unwrap();
+    fs::write(e.m.downloads.join("grande.pdf"), corpo(32, 900_000)).unwrap();
+    let mut a = e.agente(Autor::Gui);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    // O pequeno espera há 60 h: pelo aging, passa na frente do grande.
+    Connection::open(&e.m.catalogo)
+        .unwrap()
+        .execute(
+            "UPDATE jobs_bibliograficos SET enfileirado_em = enfileirado_em - 60 * 3600
+             WHERE file_id IN (SELECT id FROM files WHERE name_display = 'pequeno.pdf')",
+            [],
+        )
+        .unwrap();
+    let primeiro = |a: &mut Agente| match bib(a.executar(Comando::BibliotecaFila {
+        estado: Some(EstadoFilaInfo::Pendente),
+        limite: None,
+        cursor: None,
+    })) {
+        DadosBiblioteca::Fila { itens, .. } => itens[0].caminho.clone().unwrap(),
+        d => panic!("{d:?}"),
+    };
+    assert!(primeiro(&mut a).ends_with("pequeno.pdf"));
+    let r = a.executar(Comando::BibliotecaPriorizar {
+        criterio: dag_core::CriterioPrioridade::Tamanho,
+    });
+    assert!(
+        matches!(&r, Resposta::Ok { mensagem: Some(m) } if m.starts_with("2 ")),
+        "{r:?}"
+    );
+    assert!(primeiro(&mut a).ends_with("grande.pdf"));
+}
+
+#[test]
+fn copias_identicas_na_mesma_rodada_extraem_uma_vez_so() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let e = Ambiente::novo();
+    let conteudo = corpo(43, 60_000);
+    for d in ["a", "b", "c"] {
+        fs::create_dir_all(e.m.downloads.join(d)).unwrap();
+        fs::write(e.m.downloads.join(format!("{d}/livro.pdf")), &conteudo).unwrap();
+    }
+    let extracoes = Arc::new(AtomicUsize::new(0));
+    let cont = Arc::clone(&extracoes);
+    let ext = ExtratorRoteiro::novo(move |_| {
+        cont.fetch_add(1, Ordering::SeqCst);
+        // Devagar o bastante para as três cópias serem pegas antes de a primeira terminar.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        vec![(
+            String::new(),
+            vec![texto_v(
+                Campo::Titulo,
+                "Um Livro",
+                OrigemEvidencia::MetadadoInterno,
+                0.9,
+            )],
+        )]
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(Comando::BibliotecaConfigDefinir {
+        alteracoes: serde_json::json!({"extracoes_por_dispositivo": 4}),
+    });
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(extracoes.load(Ordering::SeqCst), 1, "{r:?}");
+    assert_eq!(r.pendentes_restantes, 0, "{r:?}");
+    let copias = alertas(&mut a)
+        .iter()
+        .filter(|al| format!("{al:?}").contains("arquivo_igual"))
+        .count();
+    assert_eq!(copias, 2);
+}
+
+/// Um original que saiu em Exceção (limite excedido, corrompido) também serve de atalho:
+/// a cópia idêntica é a mesma coisa e não precisa ser lida de novo (backups com dezenas de
+/// cópias de um zip que estoura o limite de Membros gastavam minutos cada uma).
+#[test]
+fn copia_de_original_em_excecao_nao_e_lida_de_novo() {
+    let e = Ambiente::novo();
+    let conteudo = corpo(44, 60_000);
+    for d in ["a", "b", "c"] {
+        fs::create_dir_all(e.m.downloads.join(d)).unwrap();
+        fs::write(e.m.downloads.join(format!("{d}/backup.pdf")), &conteudo).unwrap();
+    }
+    let chamadas = Arc::new(AtomicUsize::new(0));
+    let ext = Arc::new(ExtratorContavel {
+        chamadas: Arc::clone(&chamadas),
+        estado: EstadoLeitura::LimiteExcedido {
+            limite: "quantidade de membros (> 50000)".into(),
+        },
+    });
+    let mut a = e.agente_com(Autor::Gui, ext);
+    a.executar(scan(&e.m, ModoVarredura::FullScan));
+    let id = registrar_homologada(&mut a, &e.m);
+    sincronizar(&mut a, id);
+    enfileirar(&mut a, &e.m.downloads, MotivoFila::Novo);
+    let r = processar(&mut a);
+    assert_eq!(chamadas.load(Ordering::SeqCst), 1, "{r:?}");
+    assert_eq!(r.pendentes_restantes, 0, "{r:?}");
+    let copias = alertas(&mut a)
+        .iter()
+        .filter(|al| format!("{al:?}").contains("arquivo_igual"))
+        .count();
+    assert_eq!(copias, 2);
+}

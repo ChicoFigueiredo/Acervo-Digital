@@ -38,6 +38,7 @@ mod elevado;
 mod erro;
 mod fast;
 mod hash;
+mod protegidos;
 mod reconciliar;
 mod scan;
 mod visita;
@@ -53,5 +54,6 @@ pub use hash::{
     ConfigHash, Desfecho, EtapaHash, ProgressoDisco, ProgressoHash, ResultadoHash,
     ResultadoVerificacao, VerificacaoIntegridade,
 };
+pub use protegidos::{proteger_catalogo, protegido};
 pub use reconciliar::{DirSujo, RaizMonitorada, ResultadoLote, reconciliar_diretorios};
 pub use scan::{DesfechoScan, FullScan, ResultadoScan};

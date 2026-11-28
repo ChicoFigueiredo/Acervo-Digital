@@ -630,6 +630,12 @@ impl Limitador {
 }
 
 pub(crate) fn abrir_somente_leitura(caminho: &Path) -> std::io::Result<File> {
+    if crate::protegidos::protegido(caminho) {
+        // Abrir e fechar o Catálogo aberto soltaria as travas POSIX do SQLite (ver `protegidos`).
+        return Err(std::io::Error::other(
+            "arquivo do próprio Catálogo: o DAG não o lê enquanto o usa",
+        ));
+    }
     let base = (OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32;
     let tentativa = |extra: i32| {
         OpenOptions::new()
